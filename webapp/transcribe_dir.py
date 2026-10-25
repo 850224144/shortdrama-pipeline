@@ -10,8 +10,8 @@ import json
 import re
 from pathlib import Path
 
-# CUDA DLL路径
-_nv_base = Path(r"C:\Users\86159\AppData\Local\Programs\Python\Python311\Lib\site-packages\nvidia")
+# CUDA DLL路径：从当前 Python 推导，不写死 3.11
+_nv_base = Path(sys.prefix) / 'Lib' / 'site-packages' / 'nvidia'
 _nv_paths = []
 for _sub in ["cublas/bin", "cudnn/bin", "cuda_nvrtc/bin"]:
     _p = _nv_base / _sub
@@ -25,7 +25,11 @@ os.environ["HF_ENDPOINT"] = "https://hf-mirror.com"
 
 from faster_whisper import WhisperModel
 
-MODEL_PATH = r"D:\models\models\keepitsimple--faster-whisper-large-v3\snapshots\master"
+# 模型路径读环境变量，没设用默认
+MODEL_PATH = os.environ.get(
+    "WHISPER_MODEL_PATH",
+    r"D:\models\models\keepitsimple--faster-whisper-large-v3\snapshots\master"
+)
 
 def find_eps(drama_dir):
     """找到所有mp4，按集数排序"""
