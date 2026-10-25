@@ -1421,7 +1421,16 @@ class PipelineProcessor:
             with open(transcript_path, 'r', encoding='utf-8') as f:
                 text = f.read()
             
-            lines = [l.strip() for l in text.split('\n') if l.strip()]
+            lines = []
+            for l in text.split('\n'):
+                l = l.strip()
+                if not l:
+                    continue
+                # transcribe_dir.py 输出格式: "[12.3-15.1] 你好啊" —— 剥掉时间戳前缀，只留台词
+                m = re.match(r'^\[[\d.\-]+\]\s*(.+)$', l)
+                if m:
+                    l = m.group(1).strip()
+                lines.append(l)
             
             # 冲突+悬念关键词
             conflict_words = ['打脸', '傻', '死', '滚', '敢', '谁', '凭什么', 
