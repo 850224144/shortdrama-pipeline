@@ -1,0 +1,356 @@
+{
+  "drama_name": "悔赶持家婆",
+  "source_dir": "D:\\短剧素材\\悔赶持家婆",
+  "output_dir": "D:\\短剧工坊\\output\\悔赶持家婆",
+  "source_pattern": "{name} - 第{ep}集.mp4",
+  "videos": [
+    {
+      "id": 1,
+      "hook_keyword": "持家被赶",
+      "title": "妈孩子大了我们想自己过",
+      "description": "是把你赶出去合途都塞进去还不叫赶。我们只是觉得分开可能大家都舒服一点。那你为什么不直接跟我说。",
+      "hashtags": [
+        "#婆媳",
+        "#短剧",
+        "#催泪",
+        "#一口气看完"
+      ],
+      "segments": [
+        {
+          "episode": 1,
+          "start": 5,
+          "duration": 18
+        },
+        {
+          "episode": 5,
+          "start": 5,
+          "duration": 18
+        },
+        {
+          "episode": 10,
+          "start": 5,
+          "duration": 18
+        },
+        {
+          "episode": 15,
+          "start": 5,
+          "duration": 18
+        },
+        {
+          "episode": 20,
+          "start": 5,
+          "duration": 18
+        },
+        {
+          "episode": 25,
+          "start": 5,
+          "duration": 18
+        },
+        {
+          "episode": 30,
+          "start": 5,
+          "duration": 18
+        },
+        {
+          "episode": 35,
+          "start": 5,
+          "duration": 18
+        }
+      ]
+    },
+    {
+      "id": 2,
+      "hook_keyword": "中秋之辩",
+      "title": "怕中秋节把亲妈赶走",
+      "description": "本来想着中秋给他做。妈中秋都快到了要不过完节再走。过完中秋你们就不想让我走了。",
+      "hashtags": [
+        "#婆媳",
+        "#短剧",
+        "#催泪",
+        "#一口气看完"
+      ],
+      "segments": [
+        {
+          "episode": 2,
+          "start": 5,
+          "duration": 18
+        },
+        {
+          "episode": 7,
+          "start": 5,
+          "duration": 18
+        },
+        {
+          "episode": 12,
+          "start": 5,
+          "duration": 18
+        },
+        {
+          "episode": 17,
+          "start": 5,
+          "duration": 18
+        },
+        {
+          "episode": 22,
+          "start": 5,
+          "duration": 18
+        },
+        {
+          "episode": 27,
+          "start": 5,
+          "duration": 18
+        },
+        {
+          "episode": 32,
+          "start": 5,
+          "duration": 18
+        },
+        {
+          "episode": 36,
+          "start": 5,
+          "duration": 18
+        }
+      ]
+    },
+    {
+      "id": 3,
+      "hook_keyword": "孩子受伤",
+      "title": "孩子在学校受伤妈妈没接",
+      "description": "老师别动先去一屋室。妈妈没接老师打给我奶奶。我儿子喂您好请问是喝汁好奶奶吗。孩子在学校受伤了。",
+      "hashtags": [
+        "#婆媳",
+        "#短剧",
+        "#催泪",
+        "#一口气看完"
+      ],
+      "segments": [
+        {
+          "episode": 3,
+          "start": 5,
+          "duration": 18
+        },
+        {
+          "episode": 8,
+          "start": 5,
+          "duration": 18
+        },
+        {
+          "episode": 13,
+          "start": 5,
+          "duration": 18
+        },
+        {
+          "episode": 18,
+          "start": 5,
+          "duration": 18
+        },
+        {
+          "episode": 23,
+          "start": 5,
+          "duration": 18
+        },
+        {
+          "episode": 28,
+          "start": 5,
+          "duration": 18
+        },
+        {
+          "episode": 33,
+          "start": 5,
+          "duration": 18
+        }
+      ]
+    },
+    {
+      "id": 4,
+      "hook_keyword": "买菜风波",
+      "title": "青菜水果加起来一百八十七",
+      "description": "妈你可算来了这几天我跟文川真是忙不过来。不就是帮你们做几天饭接接孩子吗。妈辛苦了你婆婆以前每天都买菜吧。",
+      "hashtags": [
+        "#婆媳",
+        "#短剧",
+        "#催泪",
+        "#一口气看完"
+      ],
+      "segments": [
+        {
+          "episode": 4,
+          "start": 5,
+          "duration": 18
+        },
+        {
+          "episode": 9,
+          "start": 5,
+          "duration": 18
+        },
+        {
+          "episode": 14,
+          "start": 5,
+          "duration": 18
+        },
+        {
+          "episode": 19,
+          "start": 5,
+          "duration": 18
+        },
+        {
+          "episode": 24,
+          "start": 5,
+          "duration": 18
+        },
+        {
+          "episode": 29,
+          "start": 5,
+          "duration": 18
+        },
+        {
+          "episode": 34,
+          "start": 5,
+          "duration": 18
+        }
+      ]
+    },
+    {
+      "id": 5,
+      "hook_keyword": "六年轻松",
+      "title": "六年持家活可都是你在干",
+      "description": "生不处儿子还来了成价六年。事不是这么算这六年成价的活可都是求何在干。你也不要我们了。",
+      "hashtags": [
+        "#婆媳",
+        "#短剧",
+        "#催泪",
+        "#一口气看完"
+      ],
+      "segments": [
+        {
+          "episode": 5,
+          "start": 5,
+          "duration": 18
+        },
+        {
+          "episode": 8,
+          "start": 5,
+          "duration": 18
+        },
+        {
+          "episode": 11,
+          "start": 5,
+          "duration": 18
+        },
+        {
+          "episode": 14,
+          "start": 5,
+          "duration": 18
+        },
+        {
+          "episode": 17,
+          "start": 5,
+          "duration": 18
+        },
+        {
+          "episode": 20,
+          "start": 5,
+          "duration": 18
+        },
+        {
+          "episode": 23,
+          "start": 5,
+          "duration": 18
+        },
+        {
+          "episode": 26,
+          "start": 5,
+          "duration": 18
+        },
+        {
+          "episode": 29,
+          "start": 5,
+          "duration": 18
+        },
+        {
+          "episode": 32,
+          "start": 5,
+          "duration": 18
+        }
+      ]
+    },
+    {
+      "id": 6,
+      "hook_keyword": "最终和解",
+      "title": "人老了也有自己的日子",
+      "description": "还得照着你们一家三口的。你婆婆以前是不是也这么跟自己说的。陪你啊人老了也有自己的日子。",
+      "hashtags": [
+        "#婆媳",
+        "#短剧",
+        "#大结局",
+        "#一口气看完"
+      ],
+      "segments": [
+        {
+          "episode": 6,
+          "start": 5,
+          "duration": 18
+        },
+        {
+          "episode": 11,
+          "start": 5,
+          "duration": 18
+        },
+        {
+          "episode": 16,
+          "start": 5,
+          "duration": 18
+        },
+        {
+          "episode": 21,
+          "start": 5,
+          "duration": 18
+        },
+        {
+          "episode": 26,
+          "start": 5,
+          "duration": 18
+        },
+        {
+          "episode": 31,
+          "start": 5,
+          "duration": 18
+        },
+        {
+          "episode": 36,
+          "start": 25,
+          "duration": 8
+        }
+      ]
+    }
+  ],
+  "settings": {
+    "crf": 22,
+    "preset": "veryfast",
+    "anti_dup": {
+      "speed": 1.05,
+      "crop": 30,
+      "contrast": 1.05,
+      "saturation": 1.1,
+      "brightness": 0.02,
+      "noise": 8,
+      "rotate": 0.008,
+      "fps": null,
+      "atempo": 1.05,
+      "eq_h": {
+        "f": 3000,
+        "width": 1000,
+        "g": 3
+      },
+      "eq_l": {
+        "f": 100,
+        "width": 50,
+        "g": -2
+      },
+      "watermark_text": "福桃说剧",
+      "watermark_alpha": 0.3,
+      "watermark_fontsize": 36,
+      "watermark_font": "C:\\Windows\\Fonts\\msyh.ttc"
+    }
+  }
+}

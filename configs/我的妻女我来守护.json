@@ -1,0 +1,441 @@
+{
+  "drama_name": "我的qizi",
+  "source_dir": "D:\\短剧素材\\我的妻女我来守护",
+  "output_dir": "D:\\短剧工坊\\output\\我的妻女我来守护",
+  "source_pattern": "{ep}.mp4",
+  "videos": [
+    {
+      "id": 1,
+      "hook_keyword": "满月受辱",
+      "title": "满月宴被婆婆当众羞辱",
+      "description": "妈爱吃的海鲜一样没有你心里到底有没有这个家。小叔子当众欺负婆婆和稀泥我忍够了。",
+      "hashtags": [
+        "#婆媳",
+        "#短剧",
+        "#反转",
+        "#一口气看完"
+      ],
+      "segments": [
+        {
+          "episode": 1,
+          "start": 8,
+          "duration": 25
+        },
+        {
+          "episode": 1,
+          "start": 40,
+          "duration": 25
+        },
+        {
+          "episode": 5,
+          "start": 8,
+          "duration": 20
+        },
+        {
+          "episode": 5,
+          "start": 28,
+          "duration": 20
+        },
+        {
+          "episode": 10,
+          "start": 8,
+          "duration": 20
+        },
+        {
+          "episode": 10,
+          "start": 28,
+          "duration": 16
+        },
+        {
+          "episode": 15,
+          "start": 8,
+          "duration": 20
+        },
+        {
+          "episode": 20,
+          "start": 8,
+          "duration": 20
+        },
+        {
+          "episode": 25,
+          "start": 8,
+          "duration": 20
+        },
+        {
+          "episode": 30,
+          "start": 8,
+          "duration": 20
+        },
+        {
+          "episode": 35,
+          "start": 8,
+          "duration": 20
+        }
+      ]
+    },
+    {
+      "id": 2,
+      "hook_keyword": "护妻离场",
+      "title": "丈夫护我妻女毅然离场",
+      "description": "你有话冲过来别买孩子砸气。他护在我和女儿身前带我们毅然离场今天教教你什么叫规矩。",
+      "hashtags": [
+        "#婆媳",
+        "#短剧",
+        "#反转",
+        "#一口气看完"
+      ],
+      "segments": [
+        {
+          "episode": 2,
+          "start": 8,
+          "duration": 20
+        },
+        {
+          "episode": 2,
+          "start": 28,
+          "duration": 17
+        },
+        {
+          "episode": 10,
+          "start": 8,
+          "duration": 20
+        },
+        {
+          "episode": 10,
+          "start": 28,
+          "duration": 16
+        },
+        {
+          "episode": 12,
+          "start": 8,
+          "duration": 20
+        },
+        {
+          "episode": 12,
+          "start": 28,
+          "duration": 20
+        },
+        {
+          "episode": 18,
+          "start": 8,
+          "duration": 20
+        },
+        {
+          "episode": 18,
+          "start": 28,
+          "duration": 20
+        },
+        {
+          "episode": 22,
+          "start": 8,
+          "duration": 20
+        },
+        {
+          "episode": 22,
+          "start": 28,
+          "duration": 17
+        },
+        {
+          "episode": 28,
+          "start": 8,
+          "duration": 20
+        }
+      ]
+    },
+    {
+      "id": 3,
+      "hook_keyword": "产权之争",
+      "title": "产权是我的不是你们养老住",
+      "description": "妈产权还是我的。我承诺的是让您和爸住不是把产权转给你。养老和长期补贴是两回事。",
+      "hashtags": [
+        "#婆媳",
+        "#短剧",
+        "#反转",
+        "#一口气看完"
+      ],
+      "segments": [
+        {
+          "episode": 3,
+          "start": 8,
+          "duration": 20
+        },
+        {
+          "episode": 3,
+          "start": 28,
+          "duration": 19
+        },
+        {
+          "episode": 15,
+          "start": 8,
+          "duration": 20
+        },
+        {
+          "episode": 15,
+          "start": 28,
+          "duration": 20
+        },
+        {
+          "episode": 17,
+          "start": 8,
+          "duration": 20
+        },
+        {
+          "episode": 17,
+          "start": 28,
+          "duration": 20
+        },
+        {
+          "episode": 19,
+          "start": 8,
+          "duration": 20
+        },
+        {
+          "episode": 19,
+          "start": 28,
+          "duration": 20
+        },
+        {
+          "episode": 21,
+          "start": 8,
+          "duration": 20
+        },
+        {
+          "episode": 21,
+          "start": 28,
+          "duration": 16
+        },
+        {
+          "episode": 23,
+          "start": 8,
+          "duration": 20
+        }
+      ]
+    },
+    {
+      "id": 4,
+      "hook_keyword": "断供补贴",
+      "title": "断掉无底线补贴小叔一家",
+      "description": "我不打算再把自己的资产变成你家的长期保障。爸养老的钱我给但往里面加钱不是我的选择。",
+      "hashtags": [
+        "#婆媳",
+        "#短剧",
+        "#反转",
+        "#一口气看完"
+      ],
+      "segments": [
+        {
+          "episode": 4,
+          "start": 8,
+          "duration": 20
+        },
+        {
+          "episode": 4,
+          "start": 28,
+          "duration": 17
+        },
+        {
+          "episode": 9,
+          "start": 8,
+          "duration": 20
+        },
+        {
+          "episode": 9,
+          "start": 28,
+          "duration": 20
+        },
+        {
+          "episode": 13,
+          "start": 8,
+          "duration": 20
+        },
+        {
+          "episode": 13,
+          "start": 28,
+          "duration": 20
+        },
+        {
+          "episode": 20,
+          "start": 8,
+          "duration": 20
+        },
+        {
+          "episode": 20,
+          "start": 28,
+          "duration": 19
+        },
+        {
+          "episode": 24,
+          "start": 8,
+          "duration": 20
+        },
+        {
+          "episode": 24,
+          "start": 28,
+          "duration": 18
+        },
+        {
+          "episode": 26,
+          "start": 8,
+          "duration": 20
+        }
+      ]
+    },
+    {
+      "id": 5,
+      "hook_keyword": "家庭博弈",
+      "title": "一家全靠大哥刷卡该断奶了",
+      "description": "小儿子副食钱找大哥装修钱找大哥车坏了也找大哥连旅游都刷大哥卡。咱家该靠自己了。",
+      "hashtags": [
+        "#亲情",
+        "#短剧",
+        "#催泪",
+        "#一口气看完"
+      ],
+      "segments": [
+        {
+          "episode": 6,
+          "start": 8,
+          "duration": 20
+        },
+        {
+          "episode": 6,
+          "start": 28,
+          "duration": 20
+        },
+        {
+          "episode": 11,
+          "start": 8,
+          "duration": 20
+        },
+        {
+          "episode": 11,
+          "start": 28,
+          "duration": 20
+        },
+        {
+          "episode": 16,
+          "start": 8,
+          "duration": 20
+        },
+        {
+          "episode": 16,
+          "start": 28,
+          "duration": 20
+        },
+        {
+          "episode": 25,
+          "start": 8,
+          "duration": 20
+        },
+        {
+          "episode": 25,
+          "start": 28,
+          "duration": 18
+        },
+        {
+          "episode": 27,
+          "start": 8,
+          "duration": 20
+        },
+        {
+          "episode": 27,
+          "start": 28,
+          "duration": 20
+        },
+        {
+          "episode": 29,
+          "start": 8,
+          "duration": 20
+        }
+      ]
+    },
+    {
+      "id": 6,
+      "hook_keyword": "守护边界",
+      "title": "你让我一次次退不是你该做的",
+      "description": "为了让他们满意你一次次让我退。您是不是一直觉得只要不是您亲自动手就跟你没关系。",
+      "hashtags": [
+        "#婆媳",
+        "#短剧",
+        "#大结局",
+        "#一口气看完"
+      ],
+      "segments": [
+        {
+          "episode": 7,
+          "start": 8,
+          "duration": 20
+        },
+        {
+          "episode": 7,
+          "start": 28,
+          "duration": 20
+        },
+        {
+          "episode": 8,
+          "start": 8,
+          "duration": 20
+        },
+        {
+          "episode": 8,
+          "start": 28,
+          "duration": 20
+        },
+        {
+          "episode": 14,
+          "start": 8,
+          "duration": 20
+        },
+        {
+          "episode": 14,
+          "start": 28,
+          "duration": 20
+        },
+        {
+          "episode": 50,
+          "start": 8,
+          "duration": 20
+        },
+        {
+          "episode": 50,
+          "start": 28,
+          "duration": 20
+        },
+        {
+          "episode": 40,
+          "start": 8,
+          "duration": 20
+        }
+      ]
+    }
+  ],
+  "settings": {
+    "crf": 22,
+    "preset": "veryfast",
+    "anti_dup": {
+      "speed": 1.05,
+      "crop": 30,
+      "contrast": 1.05,
+      "saturation": 1.1,
+      "brightness": 0.02,
+      "noise": 8,
+      "rotate": 0.008,
+      "fps": null,
+      "atempo": 1.05,
+      "eq_h": {
+        "f": 3000,
+        "width": 1000,
+        "g": 3
+      },
+      "eq_l": {
+        "f": 100,
+        "width": 50,
+        "g": -2
+      },
+      "watermark_text": "福桃说剧",
+      "watermark_alpha": 0.3,
+      "watermark_fontsize": 36,
+      "watermark_font": "C:\\Windows\\Fonts\\msyh.ttc"
+    }
+  }
+}

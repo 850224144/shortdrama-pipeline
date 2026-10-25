@@ -1,0 +1,441 @@
+{
+  "drama_name": "一张破山图，我成真山王",
+  "source_dir": "D:\\短剧素材\\一张破山图，我成真山王",
+  "output_dir": "D:\\短剧工坊\\output\\一张破山图，我成真山王",
+  "source_pattern": "{name}-第{ep}集.mp4",
+  "videos": [
+    {
+      "id": 1,
+      "hook_keyword": "撞破出轨",
+      "title": "送外卖送到女朋友头上",
+      "description": "外卖员周野拎着酸菜鱼送到酒店包厢。撞见女友赵倩坐在马强旁边。马强嘲笑送外卖还送到自己女朋友头上来了。",
+      "hashtags": [
+        "#逆袭",
+        "#短剧",
+        "#爽",
+        "#一口气看完"
+      ],
+      "segments": [
+        {
+          "episode": 1,
+          "start": 8,
+          "duration": 25
+        },
+        {
+          "episode": 1,
+          "start": 40,
+          "duration": 25
+        },
+        {
+          "episode": 5,
+          "start": 8,
+          "duration": 20
+        },
+        {
+          "episode": 5,
+          "start": 25,
+          "duration": 20
+        },
+        {
+          "episode": 10,
+          "start": 8,
+          "duration": 20
+        },
+        {
+          "episode": 10,
+          "start": 28,
+          "duration": 20
+        },
+        {
+          "episode": 15,
+          "start": 8,
+          "duration": 20
+        },
+        {
+          "episode": 20,
+          "start": 8,
+          "duration": 20
+        },
+        {
+          "episode": 25,
+          "start": 8,
+          "duration": 20
+        },
+        {
+          "episode": 30,
+          "start": 8,
+          "duration": 20
+        },
+        {
+          "episode": 30,
+          "start": 28,
+          "duration": 20
+        }
+      ]
+    },
+    {
+      "id": 2,
+      "hook_keyword": "嫌穷分手",
+      "title": "你给不了我想要的生活",
+      "description": "赵倩指着周野的外卖服。二十八岁的人了天天骑个破电动车给人送饭。马强买个包的钱都顶你几个月工资。",
+      "hashtags": [
+        "#逆袭",
+        "#短剧",
+        "#爽",
+        "#一口气看完"
+      ],
+      "segments": [
+        {
+          "episode": 2,
+          "start": 8,
+          "duration": 20
+        },
+        {
+          "episode": 2,
+          "start": 28,
+          "duration": 20
+        },
+        {
+          "episode": 10,
+          "start": 8,
+          "duration": 20
+        },
+        {
+          "episode": 10,
+          "start": 28,
+          "duration": 20
+        },
+        {
+          "episode": 12,
+          "start": 8,
+          "duration": 20
+        },
+        {
+          "episode": 12,
+          "start": 28,
+          "duration": 20
+        },
+        {
+          "episode": 18,
+          "start": 8,
+          "duration": 20
+        },
+        {
+          "episode": 18,
+          "start": 28,
+          "duration": 20
+        },
+        {
+          "episode": 22,
+          "start": 8,
+          "duration": 20
+        },
+        {
+          "episode": 22,
+          "start": 28,
+          "duration": 20
+        },
+        {
+          "episode": 28,
+          "start": 8,
+          "duration": 20
+        }
+      ]
+    },
+    {
+      "id": 3,
+      "hook_keyword": "母亲遗物",
+      "title": "母亲遗物被扔出包厢",
+      "description": "周野要回母亲留下的玉牌。赵倩随手一扔那个破东西几百块都嫌贵也就你天天当个宝。玉牌撞在桌角裂开。",
+      "hashtags": [
+        "#逆袭",
+        "#短剧",
+        "#爽",
+        "#一口气看完"
+      ],
+      "segments": [
+        {
+          "episode": 3,
+          "start": 8,
+          "duration": 20
+        },
+        {
+          "episode": 3,
+          "start": 28,
+          "duration": 18
+        },
+        {
+          "episode": 15,
+          "start": 8,
+          "duration": 20
+        },
+        {
+          "episode": 15,
+          "start": 28,
+          "duration": 20
+        },
+        {
+          "episode": 17,
+          "start": 8,
+          "duration": 20
+        },
+        {
+          "episode": 17,
+          "start": 28,
+          "duration": 20
+        },
+        {
+          "episode": 19,
+          "start": 8,
+          "duration": 20
+        },
+        {
+          "episode": 19,
+          "start": 28,
+          "duration": 20
+        },
+        {
+          "episode": 21,
+          "start": 8,
+          "duration": 20
+        },
+        {
+          "episode": 21,
+          "start": 28,
+          "duration": 20
+        },
+        {
+          "episode": 23,
+          "start": 8,
+          "duration": 20
+        }
+      ]
+    },
+    {
+      "id": 4,
+      "hook_keyword": "深山探险",
+      "title": "跟着古地图进深山",
+      "description": "跟着神秘老山图进深山找山货。山路崎岖破车比我想的还难开。暴雨后山路可能变了差点掉下山坡。",
+      "hashtags": [
+        "#逆袭",
+        "#短剧",
+        "#爽",
+        "#一口气看完"
+      ],
+      "segments": [
+        {
+          "episode": 4,
+          "start": 8,
+          "duration": 20
+        },
+        {
+          "episode": 4,
+          "start": 25,
+          "duration": 20
+        },
+        {
+          "episode": 9,
+          "start": 8,
+          "duration": 20
+        },
+        {
+          "episode": 9,
+          "start": 28,
+          "duration": 18
+        },
+        {
+          "episode": 13,
+          "start": 8,
+          "duration": 20
+        },
+        {
+          "episode": 13,
+          "start": 28,
+          "duration": 20
+        },
+        {
+          "episode": 20,
+          "start": 8,
+          "duration": 20
+        },
+        {
+          "episode": 20,
+          "start": 28,
+          "duration": 20
+        },
+        {
+          "episode": 24,
+          "start": 8,
+          "duration": 20
+        },
+        {
+          "episode": 24,
+          "start": 28,
+          "duration": 16
+        },
+        {
+          "episode": 26,
+          "start": 8,
+          "duration": 20
+        }
+      ]
+    },
+    {
+      "id": 5,
+      "hook_keyword": "对手封杀",
+      "title": "对手三倍价买光所有猎狗",
+      "description": "马家三倍价包圆周边所有山场。把能找松露的狗全买光。黑松露长在地下十几二十厘米没狗怎么找。",
+      "hashtags": [
+        "#逆袭",
+        "#短剧",
+        "#爽",
+        "#一口气看完"
+      ],
+      "segments": [
+        {
+          "episode": 6,
+          "start": 8,
+          "duration": 20
+        },
+        {
+          "episode": 6,
+          "start": 25,
+          "duration": 20
+        },
+        {
+          "episode": 11,
+          "start": 8,
+          "duration": 20
+        },
+        {
+          "episode": 11,
+          "start": 28,
+          "duration": 20
+        },
+        {
+          "episode": 16,
+          "start": 8,
+          "duration": 20
+        },
+        {
+          "episode": 16,
+          "start": 28,
+          "duration": 20
+        },
+        {
+          "episode": 25,
+          "start": 8,
+          "duration": 20
+        },
+        {
+          "episode": 25,
+          "start": 28,
+          "duration": 18
+        },
+        {
+          "episode": 27,
+          "start": 8,
+          "duration": 20
+        },
+        {
+          "episode": 27,
+          "start": 28,
+          "duration": 20
+        },
+        {
+          "episode": 29,
+          "start": 8,
+          "duration": 20
+        }
+      ]
+    },
+    {
+      "id": 6,
+      "hook_keyword": "逆袭决心",
+      "title": "今天必须看得到底",
+      "description": "周野盯着马强的车消失在山路尽头。咱们知道他们往哪走就行逼出来今天我必须看得到底。",
+      "hashtags": [
+        "#逆袭",
+        "#短剧",
+        "#大结局",
+        "#一口气看完"
+      ],
+      "segments": [
+        {
+          "episode": 7,
+          "start": 8,
+          "duration": 20
+        },
+        {
+          "episode": 7,
+          "start": 25,
+          "duration": 20
+        },
+        {
+          "episode": 8,
+          "start": 8,
+          "duration": 20
+        },
+        {
+          "episode": 8,
+          "start": 28,
+          "duration": 20
+        },
+        {
+          "episode": 14,
+          "start": 8,
+          "duration": 20
+        },
+        {
+          "episode": 14,
+          "start": 28,
+          "duration": 20
+        },
+        {
+          "episode": 30,
+          "start": 8,
+          "duration": 20
+        },
+        {
+          "episode": 30,
+          "start": 28,
+          "duration": 20
+        },
+        {
+          "episode": 20,
+          "start": 28,
+          "duration": 20
+        }
+      ]
+    }
+  ],
+  "settings": {
+    "crf": 22,
+    "preset": "veryfast",
+    "anti_dup": {
+      "speed": 1.05,
+      "crop": 30,
+      "contrast": 1.05,
+      "saturation": 1.1,
+      "brightness": 0.02,
+      "noise": 8,
+      "rotate": 0.008,
+      "fps": null,
+      "atempo": 1.05,
+      "eq_h": {
+        "f": 3000,
+        "width": 1000,
+        "g": 3
+      },
+      "eq_l": {
+        "f": 100,
+        "width": 50,
+        "g": -2
+      },
+      "watermark_text": "福桃说剧",
+      "watermark_alpha": 0.3,
+      "watermark_fontsize": 36,
+      "watermark_font": "C:\\Windows\\Fonts\\msyh.ttc"
+    }
+  }
+}

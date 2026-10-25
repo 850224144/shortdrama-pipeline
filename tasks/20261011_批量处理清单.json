@@ -1,0 +1,101 @@
+[
+  {
+    "drama": "藏了七年的三宝",
+    "letter": "B",
+    "name": "方案B_三个孩子的爸爸是谁",
+    "config_path": "D:\\短剧工坊\\tasks\\20261011_藏了七年的三宝\\04_成片\\segments_B.json",
+    "output_dir": "D:\\短剧工坊\\tasks\\20261011_藏了七年的三宝\\04_成片",
+    "segments": 22,
+    "total_dur": 264
+  },
+  {
+    "drama": "藏了七年的三宝",
+    "letter": "C",
+    "name": "方案C_七年前的真相",
+    "config_path": "D:\\短剧工坊\\tasks\\20261011_藏了七年的三宝\\04_成片\\segments_C.json",
+    "output_dir": "D:\\短剧工坊\\tasks\\20261011_藏了七年的三宝\\04_成片",
+    "segments": 22,
+    "total_dur": 264
+  },
+  {
+    "drama": "藏了七年的三宝",
+    "letter": "D",
+    "name": "方案D_血型单上的秘密",
+    "config_path": "D:\\短剧工坊\\tasks\\20261011_藏了七年的三宝\\04_成片\\segments_D.json",
+    "output_dir": "D:\\短剧工坊\\tasks\\20261011_藏了七年的三宝\\04_成片",
+    "segments": 24,
+    "total_dur": 288
+  },
+  {
+    "drama": "他误签协议我怀崽跑路",
+    "letter": "A",
+    "name": "方案A_他签了什么",
+    "config_path": "D:\\短剧工坊\\tasks\\20261011_他误签协议我怀崽跑路\\04_成片\\segments_A.json",
+    "output_dir": "D:\\短剧工坊\\tasks\\20261011_他误签协议我怀崽跑路\\04_成片",
+    "segments": 22,
+    "total_dur": 264
+  },
+  {
+    "drama": "他误签协议我怀崽跑路",
+    "letter": "B",
+    "name": "方案B_四胞胎的来路",
+    "config_path": "D:\\短剧工坊\\tasks\\20261011_他误签协议我怀崽跑路\\04_成片\\segments_B.json",
+    "output_dir": "D:\\短剧工坊\\tasks\\20261011_他误签协议我怀崽跑路\\04_成片",
+    "segments": 16,
+    "total_dur": 192
+  },
+  {
+    "drama": "他误签协议我怀崽跑路",
+    "letter": "C",
+    "name": "方案C_不靠任何人",
+    "config_path": "D:\\短剧工坊\\tasks\\20261011_他误签协议我怀崽跑路\\04_成片\\segments_C.json",
+    "output_dir": "D:\\短剧工坊\\tasks\\20261011_他误签协议我怀崽跑路\\04_成片",
+    "segments": 26,
+    "total_dur": 312
+  },
+  {
+    "drama": "谁是沈家真千金",
+    "letter": "A",
+    "name": "方案A_真千金婚礼",
+    "config_path": "D:\\短剧工坊\\tasks\\20261011_谁是沈家真千金\\04_成片\\segments_A.json",
+    "output_dir": "D:\\短剧工坊\\tasks\\20261011_谁是沈家真千金\\04_成片",
+    "segments": 18,
+    "total_dur": 216
+  },
+  {
+    "drama": "谁是沈家真千金",
+    "letter": "B",
+    "name": "方案B_假千金的复仇",
+    "config_path": "D:\\短剧工坊\\tasks\\20261011_谁是沈家真千金\\04_成片\\segments_B.json",
+    "output_dir": "D:\\短剧工坊\\tasks\\20261011_谁是沈家真千金\\04_成片",
+    "segments": 13,
+    "total_dur": 156
+  },
+  {
+    "drama": "谁是沈家真千金",
+    "letter": "C",
+    "name": "方案C_扳指上的刻字",
+    "config_path": "D:\\短剧工坊\\tasks\\20261011_谁是沈家真千金\\04_成片\\segments_C.json",
+    "output_dir": "D:\\短剧工坊\\tasks\\20261011_谁是沈家真千金\\04_成片",
+    "segments": 9,
+    "total_dur": 108
+  },
+  {
+    "drama": "一声妈暖了半生",
+    "letter": "A",
+    "name": "方案A_中秋收留",
+    "config_path": "D:\\短剧工坊\\tasks\\20261011_一声妈暖了半生\\04_成片\\segments_A.json",
+    "output_dir": "D:\\短剧工坊\\tasks\\20261011_一声妈暖了半生\\04_成片",
+    "segments": 28,
+    "total_dur": 336
+  },
+  {
+    "drama": "烟火相逢念君恩",
+    "letter": "A",
+    "name": "方案A_一碗面的六百块",
+    "config_path": "D:\\短剧工坊\\tasks\\20261011_烟火相逢念君恩\\04_成片\\segments_A.json",
+    "output_dir": "D:\\短剧工坊\\tasks\\20261011_烟火相逢念君恩\\04_成片",
+    "segments": 24,
+    "total_dur": 288
+  }
+]

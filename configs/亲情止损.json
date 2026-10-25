@@ -1,0 +1,396 @@
+{
+  "drama_name": "亲情止损",
+  "source_dir": "D:\\短剧素材\\亲情止损",
+  "output_dir": "D:\\短剧工坊\\output\\亲情止损",
+  "source_pattern": "{name} - 第{ep}集.mp4",
+  "videos": [
+    {
+      "id": 1,
+      "hook_keyword": "被排除在外",
+      "title": "我们这次去就没打算带你",
+      "description": "我们这次去就没打算带你。你们去云南旅游不带我是不是怕发钱。没事妈自己有钱。",
+      "hashtags": [
+        "#亲情",
+        "#短剧",
+        "#催泪",
+        "#一口气看完"
+      ],
+      "segments": [
+        {
+          "episode": 1,
+          "start": 5,
+          "duration": 18
+        },
+        {
+          "episode": 5,
+          "start": 5,
+          "duration": 18
+        },
+        {
+          "episode": 10,
+          "start": 5,
+          "duration": 18
+        },
+        {
+          "episode": 15,
+          "start": 5,
+          "duration": 18
+        },
+        {
+          "episode": 20,
+          "start": 5,
+          "duration": 18
+        },
+        {
+          "episode": 25,
+          "start": 5,
+          "duration": 18
+        },
+        {
+          "episode": 30,
+          "start": 5,
+          "duration": 18
+        },
+        {
+          "episode": 35,
+          "start": 5,
+          "duration": 18
+        },
+        {
+          "episode": 40,
+          "start": 5,
+          "duration": 18
+        },
+        {
+          "episode": 45,
+          "start": 5,
+          "duration": 18
+        }
+      ]
+    },
+    {
+      "id": 2,
+      "hook_keyword": "房产纠纷",
+      "title": "他说买就买这不是康甲里人吗",
+      "description": "他买自己名下的房子手序合法。付为法也不贵我们管怎么不管。他人孙子住了六年他说买就买。",
+      "hashtags": [
+        "#亲情",
+        "#短剧",
+        "#催泪",
+        "#一口气看完"
+      ],
+      "segments": [
+        {
+          "episode": 2,
+          "start": 5,
+          "duration": 18
+        },
+        {
+          "episode": 7,
+          "start": 5,
+          "duration": 18
+        },
+        {
+          "episode": 12,
+          "start": 5,
+          "duration": 18
+        },
+        {
+          "episode": 17,
+          "start": 5,
+          "duration": 18
+        },
+        {
+          "episode": 22,
+          "start": 5,
+          "duration": 18
+        },
+        {
+          "episode": 27,
+          "start": 5,
+          "duration": 18
+        },
+        {
+          "episode": 32,
+          "start": 5,
+          "duration": 18
+        },
+        {
+          "episode": 37,
+          "start": 5,
+          "duration": 18
+        },
+        {
+          "episode": 42,
+          "start": 5,
+          "duration": 18
+        }
+      ]
+    },
+    {
+      "id": 3,
+      "hook_keyword": "外人待遇",
+      "title": "把他一个人赶出门管他叫外人",
+      "description": "再说他一个老太婆要什么大房间。天经第一照你这么说你也是老人。你们一家六口去云南。",
+      "hashtags": [
+        "#亲情",
+        "#短剧",
+        "#催泪",
+        "#一口气看完"
+      ],
+      "segments": [
+        {
+          "episode": 3,
+          "start": 5,
+          "duration": 18
+        },
+        {
+          "episode": 8,
+          "start": 5,
+          "duration": 18
+        },
+        {
+          "episode": 13,
+          "start": 5,
+          "duration": 18
+        },
+        {
+          "episode": 18,
+          "start": 5,
+          "duration": 18
+        },
+        {
+          "episode": 23,
+          "start": 5,
+          "duration": 18
+        },
+        {
+          "episode": 28,
+          "start": 5,
+          "duration": 18
+        },
+        {
+          "episode": 33,
+          "start": 5,
+          "duration": 18
+        },
+        {
+          "episode": 38,
+          "start": 5,
+          "duration": 18
+        },
+        {
+          "episode": 43,
+          "start": 5,
+          "duration": 18
+        }
+      ]
+    },
+    {
+      "id": 4,
+      "hook_keyword": "心寒对比",
+      "title": "让孙子住这种祸地方她良心不会痛吗",
+      "description": "你妈住着大几百万的房款让孙子住这种祸地方。她良心不会痛吗。妈您少说两句行吗。",
+      "hashtags": [
+        "#亲情",
+        "#短剧",
+        "#催泪",
+        "#一口气看完"
+      ],
+      "segments": [
+        {
+          "episode": 4,
+          "start": 5,
+          "duration": 18
+        },
+        {
+          "episode": 9,
+          "start": 5,
+          "duration": 18
+        },
+        {
+          "episode": 14,
+          "start": 5,
+          "duration": 18
+        },
+        {
+          "episode": 19,
+          "start": 5,
+          "duration": 18
+        },
+        {
+          "episode": 24,
+          "start": 5,
+          "duration": 18
+        },
+        {
+          "episode": 29,
+          "start": 5,
+          "duration": 18
+        },
+        {
+          "episode": 34,
+          "start": 5,
+          "duration": 18
+        },
+        {
+          "episode": 39,
+          "start": 5,
+          "duration": 18
+        },
+        {
+          "episode": 44,
+          "start": 5,
+          "duration": 18
+        }
+      ]
+    },
+    {
+      "id": 5,
+      "hook_keyword": "和解无门",
+      "title": "日子回不到从前了你真是不可原谅我",
+      "description": "你能一个人来能把这些话当面说出来说明你心里还有数。道歉我收下了日子回不到从前了。",
+      "hashtags": [
+        "#亲情",
+        "#短剧",
+        "#催泪",
+        "#一口气看完"
+      ],
+      "segments": [
+        {
+          "episode": 6,
+          "start": 5,
+          "duration": 18
+        },
+        {
+          "episode": 11,
+          "start": 5,
+          "duration": 18
+        },
+        {
+          "episode": 16,
+          "start": 5,
+          "duration": 18
+        },
+        {
+          "episode": 21,
+          "start": 5,
+          "duration": 18
+        },
+        {
+          "episode": 26,
+          "start": 5,
+          "duration": 18
+        },
+        {
+          "episode": 31,
+          "start": 5,
+          "duration": 18
+        },
+        {
+          "episode": 36,
+          "start": 5,
+          "duration": 18
+        },
+        {
+          "episode": 41,
+          "start": 5,
+          "duration": 18
+        },
+        {
+          "episode": 45,
+          "start": 23,
+          "duration": 8
+        }
+      ]
+    },
+    {
+      "id": 6,
+      "hook_keyword": "最终抉择",
+      "title": "你别再打这个主义了你不去行",
+      "description": "你别再打这个主义了。你不去行我让你海区。他要是也不去我自己去。妈又要开始。",
+      "hashtags": [
+        "#亲情",
+        "#短剧",
+        "#大结局",
+        "#一口气看完"
+      ],
+      "segments": [
+        {
+          "episode": 7,
+          "start": 5,
+          "duration": 18
+        },
+        {
+          "episode": 10,
+          "start": 23,
+          "duration": 8
+        },
+        {
+          "episode": 15,
+          "start": 24,
+          "duration": 8
+        },
+        {
+          "episode": 20,
+          "start": 24,
+          "duration": 8
+        },
+        {
+          "episode": 25,
+          "start": 23,
+          "duration": 8
+        },
+        {
+          "episode": 30,
+          "start": 23,
+          "duration": 8
+        },
+        {
+          "episode": 35,
+          "start": 24,
+          "duration": 8
+        },
+        {
+          "episode": 40,
+          "start": 23,
+          "duration": 8
+        },
+        {
+          "episode": 45,
+          "start": 23,
+          "duration": 8
+        }
+      ]
+    }
+  ],
+  "settings": {
+    "crf": 22,
+    "preset": "veryfast",
+    "anti_dup": {
+      "speed": 1.05,
+      "crop": 30,
+      "contrast": 1.05,
+      "saturation": 1.1,
+      "brightness": 0.02,
+      "noise": 8,
+      "rotate": 0.008,
+      "fps": null,
+      "atempo": 1.05,
+      "eq_h": {
+        "f": 3000,
+        "width": 1000,
+        "g": 3
+      },
+      "eq_l": {
+        "f": 100,
+        "width": 50,
+        "g": -2
+      },
+      "watermark_text": "福桃说剧",
+      "watermark_alpha": 0.3,
+      "watermark_fontsize": 36,
+      "watermark_font": "C:\\Windows\\Fonts\\msyh.ttc"
+    }
+  }
+}

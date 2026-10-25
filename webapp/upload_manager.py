@@ -1,0 +1,363 @@
+# -*- coding: utf-8 -*-
+"""
+上传队列管理器
+功能：管理批量上传任务、异步处理、状态查询、日志记录
+"""
+import os
+import json
+import threading
+import time
+from datetime import datetime
+from typing import List, Dict, Optional
+import sqlite3
+
+# 导入上传模块
+from wechat_uploader import WeChatChannelsUploader
+
+# 导入配置
+from processor import CONFIG
+
+class UploadManager:
+    """上传队列管理器"""
+    
+    def __init__(self, data_dir: str = None):
+        self.data_dir = data_dir or CONFIG.get('data_dir', 'data')
+        self.upload_log_file = os.path.join(self.data_dir, 'upload_log.json')
+        
+        # 数据库路径
+        self.db_path = os.path.join(self.data_dir, 'upload.db')
+        self._init_database()
+        
+        # 队列状态
+        self.queue = []  # 待上传队列
+        self.current_task = None  # 当前上传任务
+        self.uploading = False  # 是否正在上传
+        self.paused = False  # 是否暂停
+        self.completed = []  # 已完成任务
+        self.failed = []  # 失败任务
+        
+        # 日志
+        self.logs = []
+        
+        # 线程锁
+        self.lock = threading.Lock()
+        
+        # 上传线程
+        self.upload_thread = None
+        
+        # 账号列表
+        self.accounts = []
+        self.current_account = None
+        
+    def _init_database(self):
+        """初始化数据库"""
+        conn = sqlite3.connect(self.db_path)
+        cursor = conn.cursor()
+        
+        # 创建上传记录表
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS upload_records (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                drama_name TEXT NOT NULL,
+                version INTEGER NOT NULL,
+                video_path TEXT NOT NULL,
+                cover_path TEXT,
+                title TEXT,
+                description TEXT,
+                topics TEXT,
+                account TEXT NOT NULL,
+                status TEXT DEFAULT 'pending',
+                error_message TEXT,
+                retry_count INTEGER DEFAULT 0,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                started_at TIMESTAMP,
+                completed_at TIMESTAMP
+            )
+        ''')
+        
+        # 创建索引
+        cursor.execute('''
+            CREATE INDEX IF NOT EXISTS idx_drama_version 
+            ON upload_records(drama_name, version)
+        ''')
+        cursor.execute('''
+            CREATE INDEX IF NOT EXISTS idx_status 
+            ON upload_records(status)
+        ''')
+        
+        conn.commit()
+        conn.close()
+        
+    def add_to_queue(self, drama_name: str, video_path: str, cover_path: str = None,
+                     title: str = None, description: str = None, topics: str = None,
+                     account: str = None, version: int = 1) -> Dict:
+        """添加到上传队列"""
+        with self.lock:
+            # 检查是否已存在
+            with sqlite3.connect(self.db_path) as conn:
+                cursor = conn.cursor()
+                cursor.execute('''
+                    SELECT id FROM upload_records 
+                    WHERE drama_name=? AND version=? AND status IN ('pending', 'uploading')
+                ''', (drama_name, version))
+                existing = cursor.fetchone()
+            
+            if existing:
+                return {'status': 'failed', 'error': f'V{version}已在队列中'}
+            
+            # 插入数据库
+            with sqlite3.connect(self.db_path) as conn:
+                cursor = conn.cursor()
+                cursor.execute('''
+                    INSERT INTO upload_records 
+                    (drama_name, version, video_path, cover_path, title, description, topics, account, status)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'pending')
+                ''', (drama_name, version, video_path, cover_path, title, description, topics, account or '福桃说剧'))
+                record_id = cursor.lastrowid
+            
+            # 添加到内存队列
+            task = {
+                'id': record_id,
+                'drama_name': drama_name,
+                'version': version,
+                'video_path': video_path,
+                'cover_path': cover_path,
+                'title': title,
+                'description': description,
+                'topics': topics,
+                'account': account or '福桃说剧',
+                'status': 'pending',
+                'retry_count': 0
+            }
+            self.queue.append(task)
+            
+            self._log('info', f'添加任务：{drama_name} V{version}')
+            
+            return {'status': 'success', 'id': record_id}
+    
+    def start_upload(self):
+        """开始上传"""
+        with self.lock:
+            if self.uploading:
+                return {'status': 'failed', 'error': '正在上传中'}
+            
+            if not self.queue:
+                return {'status': 'failed', 'error': '队列为空'}
+            
+            self.uploading = True
+            self.paused = False
+            self.current_account = self.queue[0].get('account')
+            
+            # 启动上传线程
+            self.upload_thread = threading.Thread(target=self._upload_worker, daemon=True)
+            self.upload_thread.start()
+            
+            self._log('info', f'开始上传：{len(self.queue)}个任务')
+            
+            return {'status': 'success', 'message': f'开始上传{len(self.queue)}个任务'}
+    
+    def pause_upload(self):
+        """暂停上传"""
+        with self.lock:
+            if not self.uploading:
+                return {'status': 'failed', 'error': '未在上传'}
+            
+            self.paused = True
+            self._log('info', '上传已暂停')
+            return {'status': 'success'}
+    
+    def resume_upload(self):
+        """恢复上传"""
+        with self.lock:
+            if not self.uploading:
+                return {'status': 'failed', 'error': '未在上传'}
+            
+            self.paused = False
+            self._log('info', '上传已恢复')
+            return {'status': 'success'}
+    
+    def stop_upload(self):
+        """停止上传"""
+        with self.lock:
+            if not self.uploading:
+                return {'status': 'failed', 'error': '未在上传'}
+            
+            self.paused = True
+            self.uploading = False  # 重置uploading状态
+            self.current_task = None  # 清除当前任务
+            self._log('info', '上传已停止')
+            return {'status': 'success'}
+    
+    def clear_queue(self, status: str = 'pending'):
+        """清除队列"""
+        with self.lock:
+            if status == 'all':
+                cleared = len(self.queue)
+                self.queue.clear()
+                self.completed.clear()
+                self.failed.clear()
+                
+                # 清除数据库记录
+                conn = sqlite3.connect(self.db_path)
+                cursor = conn.cursor()
+                cursor.execute('DELETE FROM upload_records')
+                conn.commit()
+                conn.close()
+            else:
+                cleared = len([t for t in self.queue if t['status'] == status])
+                self.queue = [t for t in self.queue if t['status'] != status]
+                
+                # 更新数据库
+                conn = sqlite3.connect(self.db_path)
+                cursor = conn.cursor()
+                cursor.execute('DELETE FROM upload_records WHERE status=?', (status,))
+                conn.commit()
+                conn.close()
+            
+            self._log('info', f'清除队列：{cleared}个任务')
+            return {'status': 'success', 'cleared': cleared}
+    
+    def get_status(self) -> Dict:
+        """获取上传状态"""
+        with self.lock:
+            return {
+                'uploading': self.uploading,
+                'paused': self.paused,
+                'queue_length': len(self.queue),
+                'completed_count': len(self.completed),
+                'failed_count': len(self.failed),
+                'current_task': self.current_task,
+                'current_account': self.current_account,
+                'queue': self.queue[:],
+                'completed': self.completed[-20:],  # 最近20个
+                'failed': self.failed[-20:],  # 最近20个
+                'logs': self.logs[-50:]  # 最近50条日志
+            }
+    
+    def get_history(self, limit: int = 100) -> List[Dict]:
+        """获取上传历史"""
+        conn = sqlite3.connect(self.db_path)
+        conn.row_factory = sqlite3.Row
+        cursor = conn.cursor()
+        cursor.execute('''
+            SELECT * FROM upload_records 
+            ORDER BY created_at DESC 
+            LIMIT ?
+        ''', (limit,))
+        records = [dict(row) for row in cursor.fetchall()]
+        conn.close()
+        return records
+    
+    def _upload_worker(self):
+        """上传工作线程 - 缩小锁范围，避免死锁"""
+        while True:
+            # 获取任务（短暂持锁）
+            with self.lock:
+                if not self.queue:
+                    break
+                
+                if self.paused:
+                    time.sleep(1)
+                    continue
+                
+                task = self.queue.pop(0)
+                self.current_task = task
+                task['status'] = 'uploading'
+                task['started_at'] = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+            
+            # 更新数据库（不持锁）
+            with sqlite3.connect(self.db_path) as conn:
+                cursor = conn.cursor()
+                cursor.execute('''
+                    UPDATE upload_records 
+                    SET status='uploading', started_at=?
+                    WHERE id=?
+                ''', (task['started_at'], task['id']))
+            
+            self._log('info', f'开始上传：{task["drama_name"]} V{task["version"]}')
+            
+            # 执行上传（不持锁，避免阻塞其他线程）
+            success = self._execute_upload(task)
+            
+            # 更新任务状态（短暂持锁）
+            with self.lock:
+                if success:
+                    task['status'] = 'completed'
+                    task['completed_at'] = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+                    self.completed.append(task)
+                    self._log('success', f'上传成功：{task["drama_name"]} V{task["version"]}')
+                else:
+                    task['status'] = 'failed'
+                    task['completed_at'] = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+                    self.failed.append(task)
+                    self._log('error', f'上传失败：{task["drama_name"]} V{task["version"]} - {task.get("error_message")}')
+            
+            # 更新数据库（不持锁）
+            with sqlite3.connect(self.db_path) as conn:
+                cursor = conn.cursor()
+                cursor.execute('''
+                    UPDATE upload_records 
+                    SET status=?, completed_at=?, error_message=?
+                    WHERE id=?
+                ''', (task['status'], task['completed_at'], task.get('error_message'), task['id']))
+            
+            # 检查账号切换（短暂持锁）
+            with self.lock:
+                if self.queue:
+                    next_account = self.queue[0].get('account')
+                    if next_account != self.current_account:
+                        self.current_account = next_account
+                        self._log('info', f'切换账号：{self.current_account}')
+            
+            # 等待间隔（避免风控）
+            time.sleep(2)
+        
+        with self.lock:
+            self.uploading = False
+            self.current_task = None
+            self._log('info', '上传完成')
+    
+    def _execute_upload(self, task: Dict) -> bool:
+        """执行单个上传任务"""
+        try:
+            # 检查视频文件
+            if not os.path.exists(task['video_path']):
+                task['error_message'] = f'视频文件不存在：{task["video_path"]}'
+                return False
+            
+            # 初始化上传器
+            uploader = WeChatChannelsUploader(task['account'])
+
+            # 检查登录状态
+            if not uploader.check_login():
+                task['error_message'] = '登录失败'
+                return False
+
+            # 执行上传（传递位置参数）
+            result = uploader.upload_to_draft(
+                video_path=task['video_path'],
+                title=task.get('title', '短剧精彩片段') or '短剧精彩片段',
+                tags=task.get('topics', []) or [],
+                description=task.get('description', '') or '',
+                cover_path=task.get('cover_path')
+            )
+
+            if result.get('status') == 'success':
+                return True
+            else:
+                task['error_message'] = result.get('error', '上传失败')
+                return False
+                
+        except Exception as e:
+            task['error_message'] = str(e)
+            return False
+    
+    def _log(self, level: str, message: str):
+        """记录日志"""
+        log_entry = {
+            'timestamp': datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
+            'level': level,
+            'message': message
+        }
+        self.logs.append(log_entry)
+        print(f'[{log_entry["timestamp"]}] [{level.upper()}] {message}')

@@ -1,0 +1,103 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<title>短剧流水线仪表盘</title>
+<style>
+body { font-family: "Microsoft YaHei", sans-serif; margin: 20px; background: #f5f5f5; }
+.card { background: white; border-radius: 8px; padding: 20px; margin-bottom: 20px; box-shadow: 0 2px 4px rgba(0,0,0,0.1); }
+.status-big { font-size: 24px; font-weight: bold; color: #333; }
+.progress-bar { height: 20px; background: #eee; border-radius: 10px; overflow: hidden; margin: 10px 0; }
+.progress-fill { height: 100%; background: #4CAF50; width: 0%; transition: width 0.3s; }
+table { width: 100%; border-collapse: collapse; margin-top: 10px; }
+th, td { padding: 10px; text-align: left; border-bottom: 1px solid #eee; }
+th { background: #fafafa; }
+.bad { color: #f44336; }
+.good { color: #4CAF50; }
+</style>
+</head>
+<body>
+<h1>短剧CPS流水线仪表盘</h1>
+
+<div class="card">
+  <h2>设置</h2>
+  <div>
+    <label>素材根目录：<input type="text" id="srcPath" style="width:400px" value="E:\短剧素材"></label>
+  </div>
+  <div style="margin-top:10px">
+    <label>输出根目录：<input type="text" id="outPath" style="width:400px" value="D:\短剧工坊\output"></label>
+  </div>
+  <button onclick="saveSettings()" style="margin-top:10px;padding:8px 16px;background:#4CAF50;color:white;border:none;border-radius:4px;cursor:pointer">保存设置</button>
+</div>
+
+<div class="card">
+  <h2>当前状态</h2>
+  <div class="status-big" id="status">加载中...</div>
+  <div class="progress-bar"><div class="progress-fill" id="progress"></div></div>
+  <div id="message"></div>
+</div>
+
+<div class="card">
+  <h2>待确认列表</h2>
+  <table id="pending">
+    <tr><th>剧名</th><th>原因</th><th>时间</th></tr>
+  </table>
+</div>
+
+<div class="card">
+  <h2>已完成作品</h2>
+  <table id="completed">
+    <tr><th>剧名</th><th>账号</th><th>条数</th><th>切完时间</th><th>路径</th></tr>
+  </table>
+</div>
+
+<div class="card">
+  <h2>失败记录</h2>
+  <table id="failed">
+    <tr><th>剧名</th><th>原因</th><th>时间</th></tr>
+  </table>
+</div>
+
+<script>
+function saveSettings() {
+  localStorage.setItem('srcPath', document.getElementById('srcPath').value);
+  localStorage.setItem('outPath', document.getElementById('outPath').value);
+  alert('设置已保存');
+}
+// 加载设置
+document.getElementById('srcPath').value = localStorage.getItem('srcPath') || 'E:\\短剧素材';
+document.getElementById('outPath').value = localStorage.getItem('outPath') || 'D:\\短剧工坊\\output';
+
+async function loadState() {
+  const res = await fetch('data/pipeline_state.json');
+  const state = await res.json();
+  document.getElementById('status').innerText = state.current_task.status;
+  document.getElementById('progress').style.width = state.current_task.progress + '%';
+  document.getElementById('message').innerText = state.current_task.message;
+
+  // 待确认
+  let pendingHtml = '<tr><th>剧名</th><th>原因</th><th>时间</th></tr>';
+  state.pending_confirm.forEach(item => {
+    pendingHtml += `<tr><td>${item.name}</td><td>${item.reason}</td><td>${item.time}</td></tr>`;
+  });
+  document.getElementById('pending').innerHTML = pendingHtml;
+
+  // 已完成
+  let doneHtml = '<tr><th>剧名</th><th>账号</th><th>条数</th><th>切完时间</th><th>路径</th></tr>';
+  state.completed.forEach(item => {
+    doneHtml += `<tr><td>${item.name}</td><td>${item.account}</td><td>${item.count}</td><td>${item.time}</td><td>${item.path}</td></tr>`;
+  });
+  document.getElementById('completed').innerHTML = doneHtml;
+
+  // 失败
+  let failHtml = '<tr><th>剧名</th><th>原因</th><th>时间</th></tr>';
+  state.failed.forEach(item => {
+    failHtml += `<tr class="bad"><td>${item.name}</td><td>${item.reason}</td><td>${item.time}</td></tr>`;
+  });
+  document.getElementById('failed').innerHTML = failHtml;
+}
+loadState();
+setInterval(loadState, 2000);
+</script>
+</body>
+</html>

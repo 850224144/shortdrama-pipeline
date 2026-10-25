@@ -1,0 +1,441 @@
+{
+  "drama_name": "这一世，我的命我自己保",
+  "source_dir": "D:\\短剧素材\\这一世，我的命我自己保",
+  "output_dir": "D:\\短剧工坊\\output\\这一世，我的命我自己保",
+  "source_pattern": "{name} - 第{ep}集.mp4",
+  "videos": [
+    {
+      "id": 1,
+      "hook_keyword": "重生黑化",
+      "title": "重生后我亲手撕开妹妹的真面目",
+      "description": "姜令仪重生后识破妹妹姜婉柔的设计。当众揭穿妹妹为夺婚约而设下的失贞局。妹妹亲口承认一切。",
+      "hashtags": [
+        "#复仇",
+        "#短剧",
+        "#爽",
+        "#一口气看完"
+      ],
+      "segments": [
+        {
+          "episode": 1,
+          "start": 8,
+          "duration": 25
+        },
+        {
+          "episode": 1,
+          "start": 40,
+          "duration": 25
+        },
+        {
+          "episode": 5,
+          "start": 8,
+          "duration": 20
+        },
+        {
+          "episode": 5,
+          "start": 30,
+          "duration": 20
+        },
+        {
+          "episode": 10,
+          "start": 8,
+          "duration": 20
+        },
+        {
+          "episode": 10,
+          "start": 28,
+          "duration": 20
+        },
+        {
+          "episode": 15,
+          "start": 8,
+          "duration": 20
+        },
+        {
+          "episode": 20,
+          "start": 8,
+          "duration": 20
+        },
+        {
+          "episode": 25,
+          "start": 8,
+          "duration": 20
+        },
+        {
+          "episode": 30,
+          "start": 8,
+          "duration": 20
+        },
+        {
+          "episode": 36,
+          "start": 8,
+          "duration": 20
+        }
+      ]
+    },
+    {
+      "id": 2,
+      "hook_keyword": "卖女抵债",
+      "title": "父亲拿我娘的嫁妆换三千两银子",
+      "description": "姜令仪发现父亲要用母亲的嫁妆抵债。逼迫她嫁入江州送家。揭露姜家卖女儿抵债的真面目。",
+      "hashtags": [
+        "#复仇",
+        "#短剧",
+        "#爽",
+        "#一口气看完"
+      ],
+      "segments": [
+        {
+          "episode": 2,
+          "start": 8,
+          "duration": 20
+        },
+        {
+          "episode": 2,
+          "start": 28,
+          "duration": 20
+        },
+        {
+          "episode": 10,
+          "start": 8,
+          "duration": 20
+        },
+        {
+          "episode": 10,
+          "start": 28,
+          "duration": 20
+        },
+        {
+          "episode": 12,
+          "start": 8,
+          "duration": 20
+        },
+        {
+          "episode": 12,
+          "start": 28,
+          "duration": 20
+        },
+        {
+          "episode": 18,
+          "start": 8,
+          "duration": 20
+        },
+        {
+          "episode": 18,
+          "start": 28,
+          "duration": 20
+        },
+        {
+          "episode": 22,
+          "start": 8,
+          "duration": 20
+        },
+        {
+          "episode": 22,
+          "start": 28,
+          "duration": 20
+        },
+        {
+          "episode": 28,
+          "start": 8,
+          "duration": 20
+        }
+      ]
+    },
+    {
+      "id": 3,
+      "hook_keyword": "婚书真相",
+      "title": "八年前婆婆亲手定下的这门亲事",
+      "description": "姜令仪拿出八年前的婚约证据。揭露婆婆曾亲口定下婚事的真相。同时发现母亲的名字牵涉一桩旧案。",
+      "hashtags": [
+        "#复仇",
+        "#短剧",
+        "#爽",
+        "#一口气看完"
+      ],
+      "segments": [
+        {
+          "episode": 3,
+          "start": 8,
+          "duration": 20
+        },
+        {
+          "episode": 3,
+          "start": 28,
+          "duration": 20
+        },
+        {
+          "episode": 15,
+          "start": 8,
+          "duration": 20
+        },
+        {
+          "episode": 15,
+          "start": 28,
+          "duration": 20
+        },
+        {
+          "episode": 17,
+          "start": 8,
+          "duration": 20
+        },
+        {
+          "episode": 17,
+          "start": 28,
+          "duration": 20
+        },
+        {
+          "episode": 19,
+          "start": 8,
+          "duration": 20
+        },
+        {
+          "episode": 19,
+          "start": 28,
+          "duration": 20
+        },
+        {
+          "episode": 21,
+          "start": 8,
+          "duration": 20
+        },
+        {
+          "episode": 21,
+          "start": 28,
+          "duration": 20
+        },
+        {
+          "episode": 23,
+          "start": 8,
+          "duration": 20
+        }
+      ]
+    },
+    {
+      "id": 4,
+      "hook_keyword": "母亲之死",
+      "title": "我娘不是病死的她被推了下去",
+      "description": "老仆唐伯透露夫人并非病死。而是被人推入井中。姜令仪追查母亲被谋杀的真相。",
+      "hashtags": [
+        "#复仇",
+        "#短剧",
+        "#爽",
+        "#一口气看完"
+      ],
+      "segments": [
+        {
+          "episode": 4,
+          "start": 8,
+          "duration": 20
+        },
+        {
+          "episode": 4,
+          "start": 28,
+          "duration": 20
+        },
+        {
+          "episode": 9,
+          "start": 8,
+          "duration": 20
+        },
+        {
+          "episode": 9,
+          "start": 28,
+          "duration": 20
+        },
+        {
+          "episode": 13,
+          "start": 8,
+          "duration": 20
+        },
+        {
+          "episode": 13,
+          "start": 28,
+          "duration": 20
+        },
+        {
+          "episode": 20,
+          "start": 8,
+          "duration": 20
+        },
+        {
+          "episode": 20,
+          "start": 28,
+          "duration": 20
+        },
+        {
+          "episode": 24,
+          "start": 8,
+          "duration": 20
+        },
+        {
+          "episode": 24,
+          "start": 28,
+          "duration": 20
+        },
+        {
+          "episode": 26,
+          "start": 8,
+          "duration": 20
+        }
+      ]
+    },
+    {
+      "id": 5,
+      "hook_keyword": "十年阴谋",
+      "title": "三件事串起一场十六年的大棋",
+      "description": "姜令仪将八年前婚约六年前签押三年前退婚三件事串联。发现是一场跨越十六年的家族阴谋。",
+      "hashtags": [
+        "#复仇",
+        "#短剧",
+        "#爽",
+        "#一口气看完"
+      ],
+      "segments": [
+        {
+          "episode": 6,
+          "start": 8,
+          "duration": 20
+        },
+        {
+          "episode": 6,
+          "start": 28,
+          "duration": 20
+        },
+        {
+          "episode": 11,
+          "start": 8,
+          "duration": 20
+        },
+        {
+          "episode": 11,
+          "start": 28,
+          "duration": 20
+        },
+        {
+          "episode": 16,
+          "start": 8,
+          "duration": 20
+        },
+        {
+          "episode": 16,
+          "start": 28,
+          "duration": 20
+        },
+        {
+          "episode": 25,
+          "start": 8,
+          "duration": 20
+        },
+        {
+          "episode": 25,
+          "start": 28,
+          "duration": 20
+        },
+        {
+          "episode": 27,
+          "start": 8,
+          "duration": 20
+        },
+        {
+          "episode": 27,
+          "start": 28,
+          "duration": 18
+        },
+        {
+          "episode": 29,
+          "start": 8,
+          "duration": 20
+        }
+      ]
+    },
+    {
+      "id": 6,
+      "hook_keyword": "当庭翻盘",
+      "title": "三张文书一天之内我全推翻了",
+      "description": "面对一天之内下达的三张文书。姜令仪当庭反击推翻整个家族针对她的法律围剿。",
+      "hashtags": [
+        "#复仇",
+        "#短剧",
+        "#大结局",
+        "#一口气看完"
+      ],
+      "segments": [
+        {
+          "episode": 7,
+          "start": 8,
+          "duration": 20
+        },
+        {
+          "episode": 7,
+          "start": 28,
+          "duration": 20
+        },
+        {
+          "episode": 8,
+          "start": 8,
+          "duration": 20
+        },
+        {
+          "episode": 8,
+          "start": 28,
+          "duration": 20
+        },
+        {
+          "episode": 14,
+          "start": 8,
+          "duration": 20
+        },
+        {
+          "episode": 14,
+          "start": 28,
+          "duration": 20
+        },
+        {
+          "episode": 36,
+          "start": 8,
+          "duration": 20
+        },
+        {
+          "episode": 36,
+          "start": 28,
+          "duration": 20
+        },
+        {
+          "episode": 30,
+          "start": 28,
+          "duration": 18
+        }
+      ]
+    }
+  ],
+  "settings": {
+    "crf": 22,
+    "preset": "veryfast",
+    "anti_dup": {
+      "speed": 1.05,
+      "crop": 30,
+      "contrast": 1.05,
+      "saturation": 1.1,
+      "brightness": 0.02,
+      "noise": 8,
+      "rotate": 0.008,
+      "fps": null,
+      "atempo": 1.05,
+      "eq_h": {
+        "f": 3000,
+        "width": 1000,
+        "g": 3
+      },
+      "eq_l": {
+        "f": 100,
+        "width": 50,
+        "g": -2
+      },
+      "watermark_text": "福桃说剧",
+      "watermark_alpha": 0.3,
+      "watermark_fontsize": 36,
+      "watermark_font": "C:\\Windows\\Fonts\\msyh.ttc"
+    }
+  }
+}

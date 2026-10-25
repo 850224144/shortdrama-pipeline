@@ -1,0 +1,291 @@
+{
+  "drama_name": "杀鸡媳妇不好惹",
+  "source_dir": "D:\\短剧素材\\杀鸡媳妇不好惹",
+  "output_dir": "D:\\短剧工坊\\output\\杀鸡媳妇不好惹",
+  "source_pattern": "{name}-{ep}.mp4",
+  "videos": [
+    {
+      "id": 1,
+      "hook_keyword": "新婚拒圆",
+      "title": "大婚之夜老公不肯碰我",
+      "description": "老公大婚之夜你躲什么。身体堂你坐好咱俩都拜过堂了亲一下怎么了。有件事承清前没人告诉你你欠债外头有女人。",
+      "hashtags": [
+        "#豪门恩怨",
+        "#短剧",
+        "#反转",
+        "#一口气看完"
+      ],
+      "segments": [
+        {
+          "episode": 1,
+          "start": 8,
+          "duration": 25
+        },
+        {
+          "episode": 1,
+          "start": 40,
+          "duration": 21
+        },
+        {
+          "episode": 10,
+          "start": 8,
+          "duration": 25
+        },
+        {
+          "episode": 15,
+          "start": 8,
+          "duration": 25
+        },
+        {
+          "episode": 20,
+          "start": 8,
+          "duration": 25
+        },
+        {
+          "episode": 25,
+          "start": 8,
+          "duration": 20
+        },
+        {
+          "episode": 30,
+          "start": 8,
+          "duration": 20
+        }
+      ]
+    },
+    {
+      "id": 2,
+      "hook_keyword": "欠债真相",
+      "title": "你欠的不是外债是女人",
+      "description": "你欠债不是外头有女人。有件事承清前没人告诉你。神经道娘在呢你别害羞。我们修乎抓药紧年的学费都有了。",
+      "hashtags": [
+        "#豪门恩怨",
+        "#短剧",
+        "#反转",
+        "#一口气看完"
+      ],
+      "segments": [
+        {
+          "episode": 2,
+          "start": 8,
+          "duration": 25
+        },
+        {
+          "episode": 8,
+          "start": 8,
+          "duration": 25
+        },
+        {
+          "episode": 12,
+          "start": 8,
+          "duration": 25
+        },
+        {
+          "episode": 18,
+          "start": 8,
+          "duration": 25
+        },
+        {
+          "episode": 23,
+          "start": 8,
+          "duration": 20
+        },
+        {
+          "episode": 28,
+          "start": 8,
+          "duration": 20
+        }
+      ]
+    },
+    {
+      "id": 3,
+      "hook_keyword": "杀鸡逆袭",
+      "title": "取了个杀鸡的就是不一样",
+      "description": "唐哥是不要挂个牌子陪他买鸡。陪家大少改光几事了是自卑吧。只能躲这种见不得光的地方。",
+      "hashtags": [
+        "#豪门恩怨",
+        "#短剧",
+        "#反转",
+        "#一口气看完"
+      ],
+      "segments": [
+        {
+          "episode": 3,
+          "start": 8,
+          "duration": 25
+        },
+        {
+          "episode": 9,
+          "start": 8,
+          "duration": 25
+        },
+        {
+          "episode": 14,
+          "start": 8,
+          "duration": 25
+        },
+        {
+          "episode": 19,
+          "start": 8,
+          "duration": 25
+        },
+        {
+          "episode": 24,
+          "start": 8,
+          "duration": 20
+        },
+        {
+          "episode": 29,
+          "start": 8,
+          "duration": 20
+        }
+      ]
+    },
+    {
+      "id": 4,
+      "hook_keyword": "查案追踪",
+      "title": "三年前那两车是被人提前割过",
+      "description": "三年前那两车找到了杀车不是自然断的是被人提前割过。查先查二方。少爷三年前那两车找到了。",
+      "hashtags": [
+        "#豪门恩怨",
+        "#短剧",
+        "#反转",
+        "#一口气看完"
+      ],
+      "segments": [
+        {
+          "episode": 4,
+          "start": 8,
+          "duration": 25
+        },
+        {
+          "episode": 11,
+          "start": 8,
+          "duration": 25
+        },
+        {
+          "episode": 16,
+          "start": 8,
+          "duration": 25
+        },
+        {
+          "episode": 22,
+          "start": 8,
+          "duration": 25
+        },
+        {
+          "episode": 27,
+          "start": 8,
+          "duration": 20
+        }
+      ]
+    },
+    {
+      "id": 5,
+      "hook_keyword": "堂弟陷害",
+      "title": "当着那么多人面跪下",
+      "description": "爷爷孙宁堂在受压上发风他还比我下跪。当着那么多人的面父亲还有更过分的。眼周拿槿自己的亲堂地。",
+      "hashtags": [
+        "#豪门恩怨",
+        "#短剧",
+        "#反转",
+        "#一口气看完"
+      ],
+      "segments": [
+        {
+          "episode": 5,
+          "start": 8,
+          "duration": 25
+        },
+        {
+          "episode": 13,
+          "start": 8,
+          "duration": 25
+        },
+        {
+          "episode": 20,
+          "start": 8,
+          "duration": 25
+        },
+        {
+          "episode": 26,
+          "start": 8,
+          "duration": 25
+        },
+        {
+          "episode": 30,
+          "start": 28,
+          "duration": 20
+        }
+      ]
+    },
+    {
+      "id": 6,
+      "hook_keyword": "终极对峙",
+      "title": "说他先休入令爷",
+      "description": "大房这是要翻天了。说完了吗编子是谁抽的就是谁到的。花元利几十双眼睛看着呢。爷爷随便问是他先休入令爷。",
+      "hashtags": [
+        "#豪门恩怨",
+        "#短剧",
+        "#大结局",
+        "#一口气看完"
+      ],
+      "segments": [
+        {
+          "episode": 6,
+          "start": 8,
+          "duration": 25
+        },
+        {
+          "episode": 10,
+          "start": 28,
+          "duration": 20
+        },
+        {
+          "episode": 17,
+          "start": 8,
+          "duration": 25
+        },
+        {
+          "episode": 23,
+          "start": 28,
+          "duration": 20
+        },
+        {
+          "episode": 30,
+          "start": 40,
+          "duration": 10
+        }
+      ]
+    }
+  ],
+  "settings": {
+    "crf": 22,
+    "preset": "veryfast",
+    "anti_dup": {
+      "speed": 1.05,
+      "crop": 30,
+      "contrast": 1.05,
+      "saturation": 1.1,
+      "brightness": 0.02,
+      "noise": 8,
+      "rotate": 0.008,
+      "fps": null,
+      "atempo": 1.05,
+      "eq_h": {
+        "f": 3000,
+        "width": 1000,
+        "g": 3
+      },
+      "eq_l": {
+        "f": 100,
+        "width": 50,
+        "g": -2
+      },
+      "watermark_text": "福桃说剧",
+      "watermark_alpha": 0.3,
+      "watermark_fontsize": 36,
+      "watermark_font": "C:\\Windows\\Fonts\\msyh.ttc"
+    }
+  }
+}

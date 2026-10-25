@@ -1,0 +1,282 @@
+# -*- coding: utf-8 -*-
+"""
+AI 文案生成器 - 使用 SenseNova API
+生成标题、描述、话题
+"""
+
+import os
+import sys
+import json
+import time
+import requests
+
+# API 配置
+SENSENOVA_API_BASE = 'https://token.sensenova.cn/v1'
+SENSENOVA_API_KEY = 'sk-qA5e29R5Uo5d8ylCyioHA3wC88U5YunO'
+SENSENOVA_MODEL = 'sensenova-6.8-flash-lite'
+
+
+class AICopyGenerator:
+    """AI 文案生成器"""
+    
+    def __init__(self, api_key=SENSENOVA_API_KEY):
+        self.api_base = SENSENOVA_API_BASE
+        self.api_key = api_key
+        self.model = SENSENOVA_MODEL
+        self.enabled = True
+        self.cache = {}  # 缓存已生成的文案
+    
+    def generate_copy(self, drama_name, version_idx, version_hook, 
+                      plot_summary='', drama_genre=''):
+        """
+        生成完整文案（标题、描述、话题）
+        
+        Args:
+            drama_name: 剧名
+            version_idx: 版本索引 (1, 2, 3...)
+            version_hook: 钩子主题 (逆袭、打脸、真相...)
+            plot_summary: 剧情概要（可选）
+            drama_genre: 题材类型（可选）
+        
+        Returns:
+            {
+                'title': '标题（6-16字，无标点）',
+                'description': '描述（50-100字，有悬念）',
+                'hashtags': ['#话题1', '#话题2', ...]
+            }
+        """
+        # 检查缓存
+        cache_key = f"{drama_name}_{version_idx}_{version_hook}"
+        if cache_key in self.cache:
+            return self.cache[cache_key]
+        
+        # 构建提示词
+        prompt = self._build_prompt(drama_name, version_idx, version_hook, 
+                                    plot_summary, drama_genre)
+        
+        try:
+            # 调用 AI API
+            response = self._call_api(prompt)
+            result = self._parse_response(response)
+            
+            # 验证结果
+            result = self._validate_result(result, drama_name, version_hook)
+            
+            # 缓存结果
+            self.cache[cache_key] = result
+            
+            return result
+            
+        except Exception as e:
+            print(f"[AI] 文案生成失败: {e}")
+            # 返回模板文案作为兜底
+            return self._generate_template_copy(drama_name, version_idx, version_hook)
+    
+    def _build_prompt(self, drama_name, version_idx, version_hook, 
+                      plot_summary, drama_genre):
+        """构建 AI 提示词"""
+        
+        prompt = f"""你是一个专业的短剧文案策划师。请为以下短剧生成吸引人的文案。
+
+【剧集信息】
+- 剧名: {drama_name}
+- 题材: {drama_genre or '短剧'}
+- 本版钩子: {version_hook}
+- 剧情概要: {plot_summary or '暂无'}
+
+【生成要求】
+1. 标题（title）:
+   - 6-16个字
+   - 不能有标点符号
+   - 吸引眼球，制造悬念
+   - 体现本版钩子主题
+
+2. 描述（description）:
+   - 50-100个字
+   - 剧情概要
+   - 制造悬念，引导观看
+   - 不能包含剧名
+
+3. 话题（hashtags）:
+   - 3-5个话题
+   - 每个话题以#开头
+   - 包含热门话题和精准话题
+   - 不同版本的话题要有差异化
+
+【版本差异化】
+- 这是第 {version_idx} 个版本
+- 请生成与其他版本不同的文案
+- 突出 {version_hook} 主题
+
+【输出格式】
+请严格按照以下JSON格式输出，不要包含任何其他内容：
+{{
+    "title": "标题文字",
+    "description": "描述文字",
+    "hashtags": ["#话题1", "#话题2", "#话题3"]
+}}"""
+
+        return prompt
+    
+    def _call_api(self, prompt):
+        """调用 SenseNova API"""
+        
+        url = f"{self.api_base}/chat/completions"
+        headers = {
+            'Authorization': f'Bearer {self.api_key}',
+            'Content-Type': 'application/json'
+        }
+        data = {
+            'model': self.model,
+            'messages': [
+                {
+                    'role': 'user',
+                    'content': prompt
+                }
+            ],
+            'temperature': 0.8,  # 创意生成需要更高温度
+            'max_tokens': 2000,  # 增加到2000，避免被截断
+            'reasoning_effort': 'none'  # 关闭推理，快速生成
+        }
+        
+        try:
+            response = requests.post(url, headers=headers, json=data, timeout=30)
+            response.raise_for_status()
+            return response.json()
+        except requests.exceptions.RequestException as e:
+            raise Exception(f"API 调用失败: {e}")
+    
+    def _parse_response(self, response):
+        """解析 AI 响应"""
+        
+        content = None
+        try:
+            content = response['choices'][0]['message']['content']
+            
+            # 提取 JSON
+            # 处理可能被包裹在 ```json ... ``` 中的情况
+            if '```json' in content:
+                content = content.split('```json')[1].split('```')[0].strip()
+            elif '```' in content:
+                content = content.split('```')[1].split('```')[0].strip()
+            
+            result = json.loads(content)
+            
+            return {
+                'title': result.get('title', ''),
+                'description': result.get('description', ''),
+                'hashtags': result.get('hashtags', [])
+            }
+            
+        except (KeyError, IndexError, json.JSONDecodeError) as e:
+            raise Exception(f"响应解析失败: {e}, 内容: {str(content)[:200] if content else 'N/A'}...")
+    
+    def _validate_result(self, result, drama_name, version_hook):
+        """验证 AI 生成结果"""
+        
+        # 验证标题
+        title = result.get('title', '')
+        if not title or len(title) < 6 or len(title) > 16:
+            title = self._generate_title(drama_name, version_hook)
+        
+        # 验证描述
+        description = result.get('description', '')
+        if not description or len(description) < 30:
+            description_templates = {
+                '逆袭': f"{drama_name}精彩剧情，曾经被欺压的她是隐藏千金，当恶霸再次挑衅时，真相即将揭开...",
+                '打脸': f"豪门千金vs恶霸，一场精彩对决即将上演，打脸瞬间不容错过，快来见证精彩反转！",
+                '真相': f"所有阴谋即将暴露，真相揭开时全场震惊，剧情即将迎来大反转，快来见证真相时刻！",
+                '反转': f"你以为的结局并非真相，剧情反转烧脑至极，快来见证精彩瞬间，意想不到的结局！",
+                '高潮': f"高能预警！剧情高潮来袭，逆袭时刻燃爆全场，精彩不容错过，快来感受精彩瞬间！",
+                '泪目': f"催泪剧情来袭，虐心瞬间泪目全场，快来感受这场情感风暴，精彩内容不容错过！"
+            }
+            description = description_templates.get(version_hook, 
+                                                   f"{drama_name}精彩剧情，不容错过，快来观看！")
+        
+        # 验证话题
+        hashtags = result.get('hashtags', [])
+        if not hashtags or len(hashtags) < 3:
+            hashtags = self._generate_hashtags(version_hook)
+        
+        return {
+            'title': title,
+            'description': description,
+            'hashtags': hashtags[:5]  # 最多5个话题
+        }
+    
+    def _generate_title(self, drama_name, version_hook):
+        """模板生成标题（AI失败时兜底）"""
+        
+        # 提取剧名关键词
+        keywords = []
+        for word in ['千金', '豪门', '逆袭', '打脸', '真相', '反转', '恶霸', '甜宠']:
+            if word in drama_name:
+                keywords.append(word)
+        
+        title_templates = {
+            '逆袭': ['恶霸竟敢占我橘山', '真相揭开时全场震惊', '身份曝光逆袭开始'],
+            '打脸': ['恶霸打脸瞬间高能', '豪门千金复仇开始', '真相大白打脸全场'],
+            '真相': ['真相揭开时全场震惊', '隐藏身份即将曝光', '豪门恩怨真相大白'],
+            '反转': ['意想不到的结局来了', '反转瞬间引爆全场', '剧情反转烧脑至极'],
+            '高潮': ['高能预警精彩瞬间', '剧情高潮不容错过', '逆袭时刻燃爆全场'],
+            '泪目': ['催泪瞬间泪目全场', '虐心剧情泪目不断', '情感高潮泪目瞬间']
+        }
+        
+        templates = title_templates.get(version_hook, ['精彩剧情不容错过'])
+        return templates[hash(drama_name + version_hook) % len(templates)]
+    
+    def _generate_hashtags(self, version_hook):
+        """模板生成话题（AI失败时兜底）"""
+        
+        hashtag_templates = {
+            '逆袭': ['#逆袭人生', '#打脸现场', '#短剧推荐', '#豪门恩怨', '#爽剧'],
+            '打脸': ['#打脸', '#反转', '#短剧', '#豪门', '#爽剧'],
+            '真相': ['#真相大白', '#揭秘', '#短剧', '#悬疑', '#烧脑'],
+            '反转': ['#反转', '#意想不到的结局', '#短剧', '#烧脑', '#悬疑'],
+            '高潮': ['#高能预警', '#精彩瞬间', '#短剧', '#爽剧', '#热门'],
+            '泪目': ['#泪目', '#催泪', '#短剧', '#情感', '#虐心']
+        }
+        
+        return hashtag_templates.get(version_hook, ['#短剧', '#短剧推荐', '#热门'])
+    
+    def _generate_template_copy(self, drama_name, version_idx, version_hook):
+        """生成模板文案（AI完全失败时兜底）"""
+        
+        # 生成标题
+        title = self._generate_title(drama_name, version_hook)
+        
+        # 生成描述
+        description_templates = {
+            '逆袭': f"曾经被欺压的她是隐藏千金，当恶霸再次挑衅时，真相即将揭开...",
+            '打脸': f"豪门千金vs恶霸，一场精彩对决即将上演，打脸瞬间不容错过！",
+            '真相': f"所有阴谋即将暴露，真相揭开时全场震惊，剧情即将迎来大反转...",
+            '反转': f"你以为的结局并非真相，剧情反转烧脑至极，快来见证精彩瞬间！",
+            '高潮': f"高能预警！剧情高潮来袭，逆袭时刻燃爆全场，精彩不容错过！",
+            '泪目': f"催泪剧情来袭，虐心瞬间泪目全场，快来感受这场情感风暴！"
+        }
+        description = description_templates.get(version_hook, 
+                                               f"{drama_name}精彩剧情，不容错过！")
+        
+        # 生成话题
+        hashtags = self._generate_hashtags(version_hook)
+        
+        return {
+            'title': title,
+            'description': description,
+            'hashtags': hashtags
+        }
+    
+    def test_api(self):
+        """测试 API 连接"""
+        print("[AI] 测试 SenseNova API 连接...")
+        try:
+            response = self._call_api("你好，请回复测试成功")
+            print("[AI] API 连接成功！")
+            return True
+        except Exception as e:
+            print(f"[AI] API 连接失败: {e}")
+            return False
+
+
+# 导出
+__all__ = ['AICopyGenerator']

@@ -1,0 +1,321 @@
+{
+  "drama_name": "前夫竟不知我是谁",
+  "source_dir": "D:\\短剧素材\\前夫竟不知我是谁",
+  "output_dir": "D:\\短剧工坊\\output\\前夫竟不知我是谁",
+  "source_pattern": "{name}-{ep}.mp4",
+  "videos": [
+    {
+      "id": 1,
+      "hook_keyword": "豪门初遇",
+      "title": "一个分锁小律师在豪门待三年",
+      "description": "一个分锁的小律师在豪门城呆了三年也没办成什么大事。婆婆说怕什么。明天你老婆一走你跟叔月就自在了。",
+      "hashtags": [
+        "#豪门恩怨",
+        "#短剧",
+        "#反转",
+        "#一口气看完"
+      ],
+      "segments": [
+        {
+          "episode": 1,
+          "start": 8,
+          "duration": 25
+        },
+        {
+          "episode": 1,
+          "start": 40,
+          "duration": 25
+        },
+        {
+          "episode": 5,
+          "start": 8,
+          "duration": 25
+        },
+        {
+          "episode": 10,
+          "start": 8,
+          "duration": 20
+        },
+        {
+          "episode": 15,
+          "start": 8,
+          "duration": 20
+        },
+        {
+          "episode": 20,
+          "start": 8,
+          "duration": 20
+        },
+        {
+          "episode": 25,
+          "start": 8,
+          "duration": 20
+        },
+        {
+          "episode": 30,
+          "start": 8,
+          "duration": 20
+        },
+        {
+          "episode": 30,
+          "start": 28,
+          "duration": 20
+        }
+      ]
+    },
+    {
+      "id": 2,
+      "hook_keyword": "论文疑云",
+      "title": "三条线对不上那段内网论文",
+      "description": "这段我怎么听出演手那段三条线对不上那段。内网有篇论文一个意思。谁写的苏听兰十年前上传的。",
+      "hashtags": [
+        "#豪门恩怨",
+        "#短剧",
+        "#反转",
+        "#一口气看完"
+      ],
+      "segments": [
+        {
+          "episode": 2,
+          "start": 8,
+          "duration": 25
+        },
+        {
+          "episode": 7,
+          "start": 8,
+          "duration": 25
+        },
+        {
+          "episode": 12,
+          "start": 8,
+          "duration": 25
+        },
+        {
+          "episode": 10,
+          "start": 28,
+          "duration": 20
+        },
+        {
+          "episode": 15,
+          "start": 28,
+          "duration": 20
+        },
+        {
+          "episode": 20,
+          "start": 28,
+          "duration": 20
+        },
+        {
+          "episode": 25,
+          "start": 28,
+          "duration": 20
+        },
+        {
+          "episode": 30,
+          "start": 48,
+          "duration": 13
+        }
+      ]
+    },
+    {
+      "id": 3,
+      "hook_keyword": "家庭暗战",
+      "title": "术月家里装修庆家来了不说一声",
+      "description": "阿姨快进来做你是阿姨我是术月。这条围曲家里的随守拿的。那是天兰的。庆家来了怎么不说一声。",
+      "hashtags": [
+        "#豪门恩怨",
+        "#短剧",
+        "#反转",
+        "#一口气看完"
+      ],
+      "segments": [
+        {
+          "episode": 3,
+          "start": 8,
+          "duration": 25
+        },
+        {
+          "episode": 8,
+          "start": 8,
+          "duration": 25
+        },
+        {
+          "episode": 13,
+          "start": 8,
+          "duration": 25
+        },
+        {
+          "episode": 15,
+          "start": 40,
+          "duration": 25
+        },
+        {
+          "episode": 18,
+          "start": 8,
+          "duration": 20
+        },
+        {
+          "episode": 23,
+          "start": 8,
+          "duration": 20
+        },
+        {
+          "episode": 28,
+          "start": 8,
+          "duration": 20
+        }
+      ]
+    },
+    {
+      "id": 4,
+      "hook_keyword": "分蛋糕局",
+      "title": "让她纠任的那份蛋糕",
+      "description": "进去少说话就像你分蛋糕走个礼物城的事。对方换人论没有还是那个小律师。那就给她点教训。",
+      "hashtags": [
+        "#豪门恩怨",
+        "#短剧",
+        "#反转",
+        "#一口气看完"
+      ],
+      "segments": [
+        {
+          "episode": 4,
+          "start": 8,
+          "duration": 25
+        },
+        {
+          "episode": 9,
+          "start": 8,
+          "duration": 25
+        },
+        {
+          "episode": 14,
+          "start": 8,
+          "duration": 25
+        },
+        {
+          "episode": 20,
+          "start": 8,
+          "duration": 20
+        },
+        {
+          "episode": 22,
+          "start": 8,
+          "duration": 20
+        },
+        {
+          "episode": 27,
+          "start": 8,
+          "duration": 20
+        }
+      ]
+    },
+    {
+      "id": 5,
+      "hook_keyword": "三年轮稿",
+      "title": "三年一期分锁轮稿三年",
+      "description": "三年前我是从京洪区的凌晨。你说什么轮稿三年一期。轮什么稿所有的安排去分锁轮稿三年。那你们锁里。",
+      "hashtags": [
+        "#豪门恩怨",
+        "#短剧",
+        "#反转",
+        "#一口气看完"
+      ],
+      "segments": [
+        {
+          "episode": 5,
+          "start": 40,
+          "duration": 22
+        },
+        {
+          "episode": 10,
+          "start": 40,
+          "duration": 25
+        },
+        {
+          "episode": 16,
+          "start": 8,
+          "duration": 25
+        },
+        {
+          "episode": 21,
+          "start": 8,
+          "duration": 20
+        },
+        {
+          "episode": 26,
+          "start": 8,
+          "duration": 20
+        }
+      ]
+    },
+    {
+      "id": 6,
+      "hook_keyword": "真相大白",
+      "title": "妈我这边要开会了",
+      "description": "三年一期轮什么稿所有的安排去分锁轮稿三年。那你们锁里妈我这边要开会了。真相即将揭晓的终极悬念。",
+      "hashtags": [
+        "#豪门恩怨",
+        "#短剧",
+        "#大结局",
+        "#一口气看完"
+      ],
+      "segments": [
+        {
+          "episode": 6,
+          "start": 8,
+          "duration": 25
+        },
+        {
+          "episode": 11,
+          "start": 8,
+          "duration": 25
+        },
+        {
+          "episode": 17,
+          "start": 8,
+          "duration": 25
+        },
+        {
+          "episode": 24,
+          "start": 8,
+          "duration": 25
+        },
+        {
+          "episode": 30,
+          "start": 8,
+          "duration": 25
+        }
+      ]
+    }
+  ],
+  "settings": {
+    "crf": 22,
+    "preset": "veryfast",
+    "anti_dup": {
+      "speed": 1.05,
+      "crop": 30,
+      "contrast": 1.05,
+      "saturation": 1.1,
+      "brightness": 0.02,
+      "noise": 8,
+      "rotate": 0.008,
+      "fps": null,
+      "atempo": 1.05,
+      "eq_h": {
+        "f": 3000,
+        "width": 1000,
+        "g": 3
+      },
+      "eq_l": {
+        "f": 100,
+        "width": 50,
+        "g": -2
+      },
+      "watermark_text": "福桃说剧",
+      "watermark_alpha": 0.3,
+      "watermark_fontsize": 36,
+      "watermark_font": "C:\\Windows\\Fonts\\msyh.ttc"
+    }
+  }
+}

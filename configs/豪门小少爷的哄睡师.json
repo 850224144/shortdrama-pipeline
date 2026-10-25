@@ -1,0 +1,291 @@
+{
+  "drama_name": "豪门小少爷的哄睡师",
+  "source_dir": "D:\\短剧素材\\豪门小少爷的哄睡师",
+  "output_dir": "D:\\短剧工坊\\output\\豪门小少爷的哄睡师",
+  "source_pattern": "{ep}.mp4",
+  "videos": [
+    {
+      "id": 1,
+      "hook_keyword": "月薪百万",
+      "title": "哄睡师月薪百万包吃包住",
+      "description": "一个月一百万包吃包住。顾家那个小少爷半年赶走了二十多个保姆。谁赶去。既然你们都不赶那就让我去试试。",
+      "hashtags": [
+        "#豪门恩怨",
+        "#短剧",
+        "#反转",
+        "#一口气看完"
+      ],
+      "segments": [
+        {
+          "episode": 1,
+          "start": 8,
+          "duration": 25
+        },
+        {
+          "episode": 1,
+          "start": 40,
+          "duration": 25
+        },
+        {
+          "episode": 10,
+          "start": 8,
+          "duration": 25
+        },
+        {
+          "episode": 15,
+          "start": 8,
+          "duration": 25
+        },
+        {
+          "episode": 20,
+          "start": 8,
+          "duration": 25
+        },
+        {
+          "episode": 25,
+          "start": 8,
+          "duration": 20
+        },
+        {
+          "episode": 30,
+          "start": 8,
+          "duration": 20
+        }
+      ]
+    },
+    {
+      "id": 2,
+      "hook_keyword": "八十万手术",
+      "title": "妹妹手术还差八十万",
+      "description": "你妹妹的手术压惊还差八十万。最晚三天内不齐。切了这么久一万块的错不起。今天八十碗小姑娘钱来入增不增啊。",
+      "hashtags": [
+        "#豪门恩怨",
+        "#短剧",
+        "#反转",
+        "#一口气看完"
+      ],
+      "segments": [
+        {
+          "episode": 2,
+          "start": 8,
+          "duration": 25
+        },
+        {
+          "episode": 8,
+          "start": 8,
+          "duration": 25
+        },
+        {
+          "episode": 12,
+          "start": 8,
+          "duration": 25
+        },
+        {
+          "episode": 18,
+          "start": 8,
+          "duration": 25
+        },
+        {
+          "episode": 23,
+          "start": 8,
+          "duration": 20
+        },
+        {
+          "episode": 28,
+          "start": 8,
+          "duration": 20
+        }
+      ]
+    },
+    {
+      "id": 3,
+      "hook_keyword": "孩子秘密",
+      "title": "小少爷的秘密只有我知道",
+      "description": "爸爸的舒服为什么画得这么远。因为你很久在那里。我去敲过门方叔叔说你在忙。以前是你来敲门爸爸不开。以后这条路爸爸自己走。",
+      "hashtags": [
+        "#豪门恩怨",
+        "#短剧",
+        "#反转",
+        "#一口气看完"
+      ],
+      "segments": [
+        {
+          "episode": 3,
+          "start": 8,
+          "duration": 25
+        },
+        {
+          "episode": 9,
+          "start": 8,
+          "duration": 25
+        },
+        {
+          "episode": 14,
+          "start": 8,
+          "duration": 25
+        },
+        {
+          "episode": 19,
+          "start": 8,
+          "duration": 25
+        },
+        {
+          "episode": 24,
+          "start": 8,
+          "duration": 20
+        },
+        {
+          "episode": 29,
+          "start": 8,
+          "duration": 20
+        }
+      ]
+    },
+    {
+      "id": 4,
+      "hook_keyword": "保姆真相",
+      "title": "半年赶走二十个保姆",
+      "description": "顾家拼情的照顾人有监护特殊。现在连妈都能花钱顾了。我们孩子跟这种人一起活动安全谁负责。",
+      "hashtags": [
+        "#豪门恩怨",
+        "#短剧",
+        "#反转",
+        "#一口气看完"
+      ],
+      "segments": [
+        {
+          "episode": 4,
+          "start": 8,
+          "duration": 25
+        },
+        {
+          "episode": 11,
+          "start": 8,
+          "duration": 25
+        },
+        {
+          "episode": 16,
+          "start": 8,
+          "duration": 25
+        },
+        {
+          "episode": 22,
+          "start": 8,
+          "duration": 25
+        },
+        {
+          "episode": 27,
+          "start": 8,
+          "duration": 20
+        }
+      ]
+    },
+    {
+      "id": 5,
+      "hook_keyword": "母子被赶",
+      "title": "他叫我们走我们就不留了",
+      "description": "楼底下的出无间严女士当年说那件漏水。要是他自己收着不让任何人进。妈妈说我是个麻烦。才来几天就挑捕我们母子。",
+      "hashtags": [
+        "#豪门恩怨",
+        "#短剧",
+        "#反转",
+        "#一口气看完"
+      ],
+      "segments": [
+        {
+          "episode": 5,
+          "start": 8,
+          "duration": 25
+        },
+        {
+          "episode": 13,
+          "start": 8,
+          "duration": 25
+        },
+        {
+          "episode": 20,
+          "start": 8,
+          "duration": 25
+        },
+        {
+          "episode": 26,
+          "start": 8,
+          "duration": 25
+        },
+        {
+          "episode": 30,
+          "start": 28,
+          "duration": 20
+        }
+      ]
+    },
+    {
+      "id": 6,
+      "hook_keyword": "终极真相",
+      "title": "每天晚上爸爸走过来",
+      "description": "这是哪儿爸爸的舒服为什么画得这么远。因为你很久在那里。每天晚上爸爸走过来。你许难敲吧。",
+      "hashtags": [
+        "#豪门恩怨",
+        "#短剧",
+        "#大结局",
+        "#一口气看完"
+      ],
+      "segments": [
+        {
+          "episode": 6,
+          "start": 8,
+          "duration": 25
+        },
+        {
+          "episode": 10,
+          "start": 28,
+          "duration": 20
+        },
+        {
+          "episode": 17,
+          "start": 8,
+          "duration": 25
+        },
+        {
+          "episode": 23,
+          "start": 28,
+          "duration": 20
+        },
+        {
+          "episode": 30,
+          "start": 40,
+          "duration": 16
+        }
+      ]
+    }
+  ],
+  "settings": {
+    "crf": 22,
+    "preset": "veryfast",
+    "anti_dup": {
+      "speed": 1.05,
+      "crop": 30,
+      "contrast": 1.05,
+      "saturation": 1.1,
+      "brightness": 0.02,
+      "noise": 8,
+      "rotate": 0.008,
+      "fps": null,
+      "atempo": 1.05,
+      "eq_h": {
+        "f": 3000,
+        "width": 1000,
+        "g": 3
+      },
+      "eq_l": {
+        "f": 100,
+        "width": 50,
+        "g": -2
+      },
+      "watermark_text": "福桃说剧",
+      "watermark_alpha": 0.3,
+      "watermark_fontsize": 36,
+      "watermark_font": "C:\\Windows\\Fonts\\msyh.ttc"
+    }
+  }
+}

@@ -1,0 +1,452 @@
+{
+  "drama_name": "分家先分养老责",
+  "source_dir": "D:\\短剧素材\\分家先分养老责",
+  "output_dir": "D:\\短剧工坊\\output\\分家先分养老责",
+  "source_pattern": "{name}-{ep}.mp4",
+  "videos": [
+    {
+      "id": 1,
+      "hook_keyword": "分家分钱",
+      "title": "一百零八万全给老大",
+      "description": "妈把一百零八万养老钱全给了老大。一分钱都没留给老二。老二媳妇照顾妈十二年终于看不下去了。",
+      "hashtags": [
+        "#分家养老",
+        "#短剧",
+        "#家庭伦理",
+        "#反转",
+        "#一口气看完"
+      ],
+      "segments": [
+        {
+          "episode": 1,
+          "start": 8,
+          "duration": 25
+        },
+        {
+          "episode": 1,
+          "start": 48,
+          "duration": 25
+        },
+        {
+          "episode": 15,
+          "start": 8,
+          "duration": 25
+        },
+        {
+          "episode": 15,
+          "start": 34,
+          "duration": 20
+        },
+        {
+          "episode": 20,
+          "start": 8,
+          "duration": 20
+        },
+        {
+          "episode": 20,
+          "start": 25,
+          "duration": 20
+        },
+        {
+          "episode": 10,
+          "start": 8,
+          "duration": 20
+        },
+        {
+          "episode": 10,
+          "start": 28,
+          "duration": 20
+        },
+        {
+          "episode": 25,
+          "start": 35,
+          "duration": 25
+        },
+        {
+          "episode": 30,
+          "start": 8,
+          "duration": 20
+        },
+        {
+          "episode": 30,
+          "start": 28,
+          "duration": 20
+        }
+      ]
+    },
+    {
+      "id": 2,
+      "hook_keyword": "养老房卖",
+      "title": "妈卖了养老房没给我留房间",
+      "description": "妈瞒着我们把养老房卖了。新房里没有给妈留房间。十二年照顾换来的是一句你没有房间。",
+      "hashtags": [
+        "#分家养老",
+        "#短剧",
+        "#婆媳",
+        "#反转",
+        "#一口气看完"
+      ],
+      "segments": [
+        {
+          "episode": 5,
+          "start": 8,
+          "duration": 25
+        },
+        {
+          "episode": 5,
+          "start": 30,
+          "duration": 20
+        },
+        {
+          "episode": 12,
+          "start": 8,
+          "duration": 20
+        },
+        {
+          "episode": 12,
+          "start": 28,
+          "duration": 20
+        },
+        {
+          "episode": 16,
+          "start": 8,
+          "duration": 25
+        },
+        {
+          "episode": 16,
+          "start": 35,
+          "duration": 20
+        },
+        {
+          "episode": 22,
+          "start": 8,
+          "duration": 25
+        },
+        {
+          "episode": 22,
+          "start": 35,
+          "duration": 20
+        },
+        {
+          "episode": 26,
+          "start": 8,
+          "duration": 25
+        },
+        {
+          "episode": 26,
+          "start": 38,
+          "duration": 25
+        },
+        {
+          "episode": 28,
+          "start": 8,
+          "duration": 20
+        },
+        {
+          "episode": 28,
+          "start": 25,
+          "duration": 20
+        }
+      ]
+    },
+    {
+      "id": 3,
+      "hook_keyword": "十二年熬",
+      "title": "这样的麻烦我熬了十二年",
+      "description": "我照顾妈十二年。从早到晚做饭吃药陪医院。他们说我熬够了。可熬够了又能怎样。",
+      "hashtags": [
+        "#分家养老",
+        "#短剧",
+        "#催泪",
+        "#反转",
+        "#一口气看完"
+      ],
+      "segments": [
+        {
+          "episode": 1,
+          "start": 67,
+          "duration": 15
+        },
+        {
+          "episode": 6,
+          "start": 8,
+          "duration": 25
+        },
+        {
+          "episode": 6,
+          "start": 30,
+          "duration": 15
+        },
+        {
+          "episode": 11,
+          "start": 8,
+          "duration": 25
+        },
+        {
+          "episode": 11,
+          "start": 35,
+          "duration": 20
+        },
+        {
+          "episode": 17,
+          "start": 8,
+          "duration": 25
+        },
+        {
+          "episode": 17,
+          "start": 35,
+          "duration": 20
+        },
+        {
+          "episode": 21,
+          "start": 8,
+          "duration": 20
+        },
+        {
+          "episode": 21,
+          "start": 28,
+          "duration": 20
+        },
+        {
+          "episode": 25,
+          "start": 8,
+          "duration": 20
+        },
+        {
+          "episode": 25,
+          "start": 25,
+          "duration": 20
+        }
+      ]
+    },
+    {
+      "id": 4,
+      "hook_keyword": "养老归谁",
+      "title": "钱你能分责任也得跟分",
+      "description": "分家的时候钱分得清清楚楚。可养老责任呢。老大拿了钱就不管。妈生病住院老二陪着。",
+      "hashtags": [
+        "#分家养老",
+        "#短剧",
+        "#家庭伦理",
+        "#爽",
+        "#一口气看完"
+      ],
+      "segments": [
+        {
+          "episode": 4,
+          "start": 8,
+          "duration": 20
+        },
+        {
+          "episode": 4,
+          "start": 25,
+          "duration": 20
+        },
+        {
+          "episode": 9,
+          "start": 8,
+          "duration": 25
+        },
+        {
+          "episode": 9,
+          "start": 30,
+          "duration": 20
+        },
+        {
+          "episode": 13,
+          "start": 8,
+          "duration": 20
+        },
+        {
+          "episode": 13,
+          "start": 25,
+          "duration": 20
+        },
+        {
+          "episode": 18,
+          "start": 8,
+          "duration": 25
+        },
+        {
+          "episode": 18,
+          "start": 35,
+          "duration": 20
+        },
+        {
+          "episode": 19,
+          "start": 8,
+          "duration": 25
+        },
+        {
+          "episode": 19,
+          "start": 38,
+          "duration": 25
+        },
+        {
+          "episode": 23,
+          "start": 8,
+          "duration": 20
+        },
+        {
+          "episode": 23,
+          "start": 28,
+          "duration": 20
+        }
+      ]
+    },
+    {
+      "id": 5,
+      "hook_keyword": "婆媳博弈",
+      "title": "钱是儿子的活是儿媳妇的",
+      "description": "这个家的规矩钱是儿子的活是儿媳妇的。妈把养老钱全给了大儿子。可照顾妈的全是小儿媳。",
+      "hashtags": [
+        "#分家养老",
+        "#短剧",
+        "#婆媳",
+        "#虐心",
+        "#一口气看完"
+      ],
+      "segments": [
+        {
+          "episode": 2,
+          "start": 8,
+          "duration": 20
+        },
+        {
+          "episode": 2,
+          "start": 25,
+          "duration": 20
+        },
+        {
+          "episode": 7,
+          "start": 8,
+          "duration": 20
+        },
+        {
+          "episode": 7,
+          "start": 28,
+          "duration": 20
+        },
+        {
+          "episode": 8,
+          "start": 8,
+          "duration": 20
+        },
+        {
+          "episode": 8,
+          "start": 28,
+          "duration": 20
+        },
+        {
+          "episode": 14,
+          "start": 8,
+          "duration": 20
+        },
+        {
+          "episode": 14,
+          "start": 28,
+          "duration": 20
+        },
+        {
+          "episode": 24,
+          "start": 8,
+          "duration": 25
+        },
+        {
+          "episode": 24,
+          "start": 35,
+          "duration": 20
+        },
+        {
+          "episode": 27,
+          "start": 8,
+          "duration": 25
+        },
+        {
+          "episode": 27,
+          "start": 35,
+          "duration": 20
+        }
+      ]
+    },
+    {
+      "id": 6,
+      "hook_keyword": "真相大白",
+      "title": "十二年前你也是这么劝我的",
+      "description": "十二年前大姑也是这么劝我的。说再熬几年就好了。现在妈七十了还是这句话。到底要熬到哪一年。",
+      "hashtags": [
+        "#分家养老",
+        "#短剧",
+        "#催泪",
+        "#大结局",
+        "#一口气看完"
+      ],
+      "segments": [
+        {
+          "episode": 3,
+          "start": 8,
+          "duration": 25
+        },
+        {
+          "episode": 3,
+          "start": 30,
+          "duration": 20
+        },
+        {
+          "episode": 15,
+          "start": 42,
+          "duration": 12
+        },
+        {
+          "episode": 25,
+          "start": 55,
+          "duration": 12
+        },
+        {
+          "episode": 29,
+          "start": 8,
+          "duration": 25
+        },
+        {
+          "episode": 29,
+          "start": 38,
+          "duration": 20
+        },
+        {
+          "episode": 30,
+          "start": 48,
+          "duration": 14
+        }
+      ]
+    }
+  ],
+  "settings": {
+    "crf": 22,
+    "preset": "veryfast",
+    "anti_dup": {
+      "speed": 1.05,
+      "crop": 30,
+      "contrast": 1.05,
+      "saturation": 1.1,
+      "brightness": 0.02,
+      "noise": 8,
+      "rotate": 0.008,
+      "fps": null,
+      "atempo": 1.05,
+      "eq_h": {
+        "f": 3000,
+        "width": 1000,
+        "g": 3
+      },
+      "eq_l": {
+        "f": 100,
+        "width": 50,
+        "g": -2
+      },
+      "watermark_text": "福桃说剧",
+      "watermark_alpha": 0.3,
+      "watermark_fontsize": 36,
+      "watermark_font": "C:\\Windows\\Fonts\\msyh.ttc"
+    }
+  }
+}

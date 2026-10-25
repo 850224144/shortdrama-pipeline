@@ -1,0 +1,54 @@
+{
+  "drama_name": "一声妈暖了半生",
+  "source_dir": "D:\\短剧素材\\一声妈暖了半生",
+  "output_dir": "D:\\短剧工坊\\test_generic",
+  "source_pattern": "{name} - 第{ep}集.mp4",
+  "videos": [
+    {
+      "id": 1,
+      "hook_keyword": "测试钩子",
+      "segments": [
+        {
+          "episode": 3,
+          "start": 15.0,
+          "duration": 25.0
+        },
+        {
+          "episode": 10,
+          "start": 10.0,
+          "duration": 25.0
+        },
+        {
+          "episode": 21,
+          "start": 20.0,
+          "duration": 25.0
+        }
+      ]
+    }
+  ],
+  "settings": {
+    "crf": 22,
+    "preset": "veryfast",
+    "anti_dup": {
+      "speed": 1.05,
+      "crop": 30,
+      "contrast": 1.05,
+      "saturation": 1.1,
+      "brightness": 0.02,
+      "noise": 8,
+      "rotate": 0.008,
+      "fps": null,
+      "atempo": 1.05,
+      "eq_h": {
+        "f": 3000,
+        "width": 1000,
+        "g": 3
+      },
+      "eq_l": {
+        "f": 100,
+        "width": 50,
+        "g": -2
+      }
+    }
+  }
+}

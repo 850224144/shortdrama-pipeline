@@ -1,0 +1,396 @@
+{
+  "drama_name": "红酒覆纱仇",
+  "source_dir": "D:\\短剧素材\\红酒覆纱仇",
+  "output_dir": "D:\\短剧工坊\\output\\红酒覆纱仇",
+  "source_pattern": "{name} - 第{ep}集.mp4",
+  "videos": [
+    {
+      "id": 1,
+      "hook_keyword": "婚纱入场",
+      "title": "30岁穿白婚纱的我全场都傻了",
+      "description": "苏可30岁身着白婚纱现身豪门宴。面对众人嘲讽毫不示弱。一句话亮出身份气场全开。",
+      "hashtags": [
+        "#豪门",
+        "#短剧",
+        "#复仇",
+        "#一口气看完"
+      ],
+      "segments": [
+        {
+          "episode": 1,
+          "start": 5,
+          "duration": 18
+        },
+        {
+          "episode": 1,
+          "start": 22,
+          "duration": 10
+        },
+        {
+          "episode": 5,
+          "start": 5,
+          "duration": 18
+        },
+        {
+          "episode": 10,
+          "start": 5,
+          "duration": 18
+        },
+        {
+          "episode": 15,
+          "start": 5,
+          "duration": 18
+        },
+        {
+          "episode": 20,
+          "start": 5,
+          "duration": 18
+        },
+        {
+          "episode": 25,
+          "start": 5,
+          "duration": 18
+        },
+        {
+          "episode": 30,
+          "start": 5,
+          "duration": 18
+        },
+        {
+          "episode": 36,
+          "start": 5,
+          "duration": 18
+        },
+        {
+          "episode": 36,
+          "start": 23,
+          "duration": 8
+        }
+      ]
+    },
+    {
+      "id": 2,
+      "hook_keyword": "北城棋局",
+      "title": "座位能安排但人心挪不动",
+      "description": "陈九雅在北城宴局中精心安排座位。揭露对方操纵人心的手段。一句座位能安排人心挪不动反杀。",
+      "hashtags": [
+        "#豪门",
+        "#短剧",
+        "#复仇",
+        "#一口气看完"
+      ],
+      "segments": [
+        {
+          "episode": 2,
+          "start": 5,
+          "duration": 18
+        },
+        {
+          "episode": 7,
+          "start": 5,
+          "duration": 18
+        },
+        {
+          "episode": 12,
+          "start": 5,
+          "duration": 18
+        },
+        {
+          "episode": 17,
+          "start": 5,
+          "duration": 18
+        },
+        {
+          "episode": 22,
+          "start": 5,
+          "duration": 18
+        },
+        {
+          "episode": 27,
+          "start": 5,
+          "duration": 18
+        },
+        {
+          "episode": 32,
+          "start": 5,
+          "duration": 18
+        },
+        {
+          "episode": 10,
+          "start": 25,
+          "duration": 10
+        },
+        {
+          "episode": 36,
+          "start": 23,
+          "duration": 8
+        }
+      ]
+    },
+    {
+      "id": 3,
+      "hook_keyword": "亲情交易",
+      "title": "好一个一家人该赔的钱赔家赔",
+      "description": "家族以一家人名义包庇违法行为。苏可当面揭露亲情背后的利益交换。一句话撕破伪装。",
+      "hashtags": [
+        "#豪门",
+        "#短剧",
+        "#复仇",
+        "#一口气看完"
+      ],
+      "segments": [
+        {
+          "episode": 3,
+          "start": 5,
+          "duration": 18
+        },
+        {
+          "episode": 8,
+          "start": 5,
+          "duration": 18
+        },
+        {
+          "episode": 13,
+          "start": 5,
+          "duration": 18
+        },
+        {
+          "episode": 18,
+          "start": 5,
+          "duration": 18
+        },
+        {
+          "episode": 23,
+          "start": 5,
+          "duration": 18
+        },
+        {
+          "episode": 28,
+          "start": 5,
+          "duration": 18
+        },
+        {
+          "episode": 33,
+          "start": 5,
+          "duration": 18
+        },
+        {
+          "episode": 15,
+          "start": 25,
+          "duration": 10
+        },
+        {
+          "episode": 36,
+          "start": 23,
+          "duration": 8
+        }
+      ]
+    },
+    {
+      "id": 4,
+      "hook_keyword": "十周年主场",
+      "title": "这个家早就该是我的了",
+      "description": "苏可面对羞辱毫不退缩。一句这个家十早是我的宣告主权。随即请全场下午茶秀实力。",
+      "hashtags": [
+        "#豪门",
+        "#短剧",
+        "#复仇",
+        "#一口气看完"
+      ],
+      "segments": [
+        {
+          "episode": 4,
+          "start": 5,
+          "duration": 18
+        },
+        {
+          "episode": 9,
+          "start": 5,
+          "duration": 18
+        },
+        {
+          "episode": 14,
+          "start": 5,
+          "duration": 18
+        },
+        {
+          "episode": 19,
+          "start": 5,
+          "duration": 18
+        },
+        {
+          "episode": 24,
+          "start": 5,
+          "duration": 18
+        },
+        {
+          "episode": 29,
+          "start": 5,
+          "duration": 18
+        },
+        {
+          "episode": 34,
+          "start": 5,
+          "duration": 18
+        },
+        {
+          "episode": 20,
+          "start": 22,
+          "duration": 10
+        },
+        {
+          "episode": 36,
+          "start": 23,
+          "duration": 8
+        }
+      ]
+    },
+    {
+      "id": 5,
+      "hook_keyword": "毒酒局中局",
+      "title": "我故意给爸备的酒他们全喝了",
+      "description": "苏可精心设计局中局。以特意为爸爸备的酒为引让对手自投罗网。一句今天这场戏收网。",
+      "hashtags": [
+        "#豪门",
+        "#短剧",
+        "#复仇",
+        "#一口气看完"
+      ],
+      "segments": [
+        {
+          "episode": 6,
+          "start": 5,
+          "duration": 18
+        },
+        {
+          "episode": 11,
+          "start": 5,
+          "duration": 18
+        },
+        {
+          "episode": 16,
+          "start": 5,
+          "duration": 18
+        },
+        {
+          "episode": 21,
+          "start": 5,
+          "duration": 18
+        },
+        {
+          "episode": 26,
+          "start": 5,
+          "duration": 18
+        },
+        {
+          "episode": 31,
+          "start": 5,
+          "duration": 18
+        },
+        {
+          "episode": 36,
+          "start": 5,
+          "duration": 18
+        },
+        {
+          "episode": 25,
+          "start": 25,
+          "duration": 10
+        },
+        {
+          "episode": 36,
+          "start": 23,
+          "duration": 8
+        }
+      ]
+    },
+    {
+      "id": 6,
+      "hook_keyword": "拒绝天价",
+      "title": "我不跟钱过不去只跟不讲规矩",
+      "description": "苏可面对钱家提亲拒绝妥协。一句不跟钱过不去只跟不讲规矩的人过不去亮明底线。",
+      "hashtags": [
+        "#豪门",
+        "#短剧",
+        "#大结局",
+        "#一口气看完"
+      ],
+      "segments": [
+        {
+          "episode": 10,
+          "start": 5,
+          "duration": 18
+        },
+        {
+          "episode": 15,
+          "start": 5,
+          "duration": 18
+        },
+        {
+          "episode": 20,
+          "start": 5,
+          "duration": 18
+        },
+        {
+          "episode": 25,
+          "start": 5,
+          "duration": 18
+        },
+        {
+          "episode": 30,
+          "start": 5,
+          "duration": 18
+        },
+        {
+          "episode": 36,
+          "start": 5,
+          "duration": 18
+        },
+        {
+          "episode": 36,
+          "start": 23,
+          "duration": 8
+        },
+        {
+          "episode": 1,
+          "start": 22,
+          "duration": 10
+        },
+        {
+          "episode": 36,
+          "start": 23,
+          "duration": 8
+        }
+      ]
+    }
+  ],
+  "settings": {
+    "crf": 22,
+    "preset": "veryfast",
+    "anti_dup": {
+      "speed": 1.05,
+      "crop": 30,
+      "contrast": 1.05,
+      "saturation": 1.1,
+      "brightness": 0.02,
+      "noise": 8,
+      "rotate": 0.008,
+      "fps": null,
+      "atempo": 1.05,
+      "eq_h": {
+        "f": 3000,
+        "width": 1000,
+        "g": 3
+      },
+      "eq_l": {
+        "f": 100,
+        "width": 50,
+        "g": -2
+      },
+      "watermark_text": "福桃说剧",
+      "watermark_alpha": 0.3,
+      "watermark_fontsize": 36,
+      "watermark_font": "C:\\Windows\\Fonts\\msyh.ttc"
+    }
+  }
+}

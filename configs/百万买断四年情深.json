@@ -1,0 +1,381 @@
+{
+  "drama_name": "百万买断四年情深",
+  "source_dir": "D:\\短剧素材\\百万买断四年情深",
+  "output_dir": "D:\\短剧工坊\\output\\百万买断四年情深",
+  "source_pattern": "{name}-第{ep}集.mp4",
+  "videos": [
+    {
+      "id": 1,
+      "hook_keyword": "四年情深",
+      "title": "四年感情被一百万买断",
+      "description": "臣末28岁初中毕业四年给她转了快三十万。学费住宿费考研费生活费全是他给的。她却说只是普通朋友。后来那钱成了百万买断的结算价。",
+      "hashtags": [
+        "#豪门恩怨",
+        "#短剧",
+        "#反转",
+        "#一口气看完"
+      ],
+      "segments": [
+        {
+          "episode": 1,
+          "start": 8,
+          "duration": 25
+        },
+        {
+          "episode": 1,
+          "start": 40,
+          "duration": 25
+        },
+        {
+          "episode": 10,
+          "start": 8,
+          "duration": 25
+        },
+        {
+          "episode": 15,
+          "start": 8,
+          "duration": 25
+        },
+        {
+          "episode": 20,
+          "start": 8,
+          "duration": 20
+        },
+        {
+          "episode": 25,
+          "start": 8,
+          "duration": 20
+        },
+        {
+          "episode": 30,
+          "start": 8,
+          "duration": 20
+        },
+        {
+          "episode": 35,
+          "start": 8,
+          "duration": 20
+        },
+        {
+          "episode": 40,
+          "start": 8,
+          "duration": 20
+        },
+        {
+          "episode": 45,
+          "start": 8,
+          "duration": 20
+        },
+        {
+          "episode": 50,
+          "start": 8,
+          "duration": 20
+        }
+      ]
+    },
+    {
+      "id": 2,
+      "hook_keyword": "三十万真相",
+      "title": "普通朋友转了快三十万",
+      "description": "臣末给她转了快三十万学费住宿费生活费。她跟人说只是普通朋友。四十集后真相大白这些钱都是别人买的。",
+      "hashtags": [
+        "#豪门恩怨",
+        "#短剧",
+        "#反转",
+        "#一口气看完"
+      ],
+      "segments": [
+        {
+          "episode": 2,
+          "start": 8,
+          "duration": 25
+        },
+        {
+          "episode": 10,
+          "start": 28,
+          "duration": 20
+        },
+        {
+          "episode": 12,
+          "start": 8,
+          "duration": 25
+        },
+        {
+          "episode": 18,
+          "start": 8,
+          "duration": 20
+        },
+        {
+          "episode": 22,
+          "start": 8,
+          "duration": 20
+        },
+        {
+          "episode": 28,
+          "start": 8,
+          "duration": 20
+        },
+        {
+          "episode": 33,
+          "start": 8,
+          "duration": 20
+        },
+        {
+          "episode": 38,
+          "start": 8,
+          "duration": 20
+        },
+        {
+          "episode": 42,
+          "start": 8,
+          "duration": 20
+        },
+        {
+          "episode": 47,
+          "start": 8,
+          "duration": 20
+        }
+      ]
+    },
+    {
+      "id": 3,
+      "hook_keyword": "千万标假",
+      "title": "一百万不是爱情标价",
+      "description": "那一百万不是我给爱情标的是别人把我四年感情明码标价。说得好听还不是说了我没否认但我没拿去读没拿去挥霍。",
+      "hashtags": [
+        "#豪门恩怨",
+        "#短剧",
+        "#反转",
+        "#一口气看完"
+      ],
+      "segments": [
+        {
+          "episode": 3,
+          "start": 8,
+          "duration": 25
+        },
+        {
+          "episode": 11,
+          "start": 8,
+          "duration": 25
+        },
+        {
+          "episode": 17,
+          "start": 8,
+          "duration": 25
+        },
+        {
+          "episode": 23,
+          "start": 8,
+          "duration": 20
+        },
+        {
+          "episode": 29,
+          "start": 8,
+          "duration": 20
+        },
+        {
+          "episode": 36,
+          "start": 8,
+          "duration": 20
+        },
+        {
+          "episode": 41,
+          "start": 8,
+          "duration": 20
+        },
+        {
+          "episode": 48,
+          "start": 8,
+          "duration": 20
+        }
+      ]
+    },
+    {
+      "id": 4,
+      "hook_keyword": "表弟陷阱",
+      "title": "这车是你接朋友的吗",
+      "description": "表弟大量出了事说不会害她。她说我信不信不重要先找到他。这车是你接朋友的吗。",
+      "hashtags": [
+        "#豪门恩怨",
+        "#短剧",
+        "#反转",
+        "#一口气看完"
+      ],
+      "segments": [
+        {
+          "episode": 4,
+          "start": 8,
+          "duration": 25
+        },
+        {
+          "episode": 14,
+          "start": 8,
+          "duration": 25
+        },
+        {
+          "episode": 20,
+          "start": 8,
+          "duration": 20
+        },
+        {
+          "episode": 26,
+          "start": 8,
+          "duration": 20
+        },
+        {
+          "episode": 31,
+          "start": 8,
+          "duration": 20
+        },
+        {
+          "episode": 37,
+          "start": 8,
+          "duration": 20
+        },
+        {
+          "episode": 43,
+          "start": 8,
+          "duration": 20
+        },
+        {
+          "episode": 50,
+          "start": 28,
+          "duration": 19
+        }
+      ]
+    },
+    {
+      "id": 5,
+      "hook_keyword": "职场暗战",
+      "title": "老板还没吃饭饭不能停",
+      "description": "臭老板今天参仙送完集团内不要调整或许合作可能要暂停。平常我们饭也没问题饭不能停都要暂停啊。",
+      "hashtags": [
+        "#豪门恩怨",
+        "#短剧",
+        "#反转",
+        "#一口气看完"
+      ],
+      "segments": [
+        {
+          "episode": 5,
+          "start": 8,
+          "duration": 25
+        },
+        {
+          "episode": 16,
+          "start": 8,
+          "duration": 25
+        },
+        {
+          "episode": 21,
+          "start": 8,
+          "duration": 20
+        },
+        {
+          "episode": 27,
+          "start": 8,
+          "duration": 20
+        },
+        {
+          "episode": 34,
+          "start": 8,
+          "duration": 20
+        },
+        {
+          "episode": 39,
+          "start": 8,
+          "duration": 20
+        },
+        {
+          "episode": 44,
+          "start": 8,
+          "duration": 20
+        },
+        {
+          "episode": 49,
+          "start": 8,
+          "duration": 20
+        }
+      ]
+    },
+    {
+      "id": 6,
+      "hook_keyword": "最终清算",
+      "title": "许事现在乱了",
+      "description": "苏获志你比我们老板还想老板娘。早上去办菜林小姐昨晚去了老建定中心。赵琴明许事现在乱了。",
+      "hashtags": [
+        "#豪门恩怨",
+        "#短剧",
+        "#大结局",
+        "#一口气看完"
+      ],
+      "segments": [
+        {
+          "episode": 6,
+          "start": 8,
+          "duration": 25
+        },
+        {
+          "episode": 13,
+          "start": 8,
+          "duration": 25
+        },
+        {
+          "episode": 19,
+          "start": 8,
+          "duration": 20
+        },
+        {
+          "episode": 25,
+          "start": 28,
+          "duration": 20
+        },
+        {
+          "episode": 32,
+          "start": 8,
+          "duration": 20
+        },
+        {
+          "episode": 38,
+          "start": 28,
+          "duration": 20
+        },
+        {
+          "episode": 46,
+          "start": 8,
+          "duration": 20
+        }
+      ]
+    }
+  ],
+  "settings": {
+    "crf": 22,
+    "preset": "veryfast",
+    "anti_dup": {
+      "speed": 1.05,
+      "crop": 30,
+      "contrast": 1.05,
+      "saturation": 1.1,
+      "brightness": 0.02,
+      "noise": 8,
+      "rotate": 0.008,
+      "fps": null,
+      "atempo": 1.05,
+      "eq_h": {
+        "f": 3000,
+        "width": 1000,
+        "g": 3
+      },
+      "eq_l": {
+        "f": 100,
+        "width": 50,
+        "g": -2
+      },
+      "watermark_text": "福桃说剧",
+      "watermark_alpha": 0.3,
+      "watermark_fontsize": 36,
+      "watermark_font": "C:\\Windows\\Fonts\\msyh.ttc"
+    }
+  }
+}

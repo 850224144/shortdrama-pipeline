@@ -1,0 +1,57 @@
+{
+  "drama_name": "示例剧名",
+  "source_dir": "D:\\短剧素材\\示例剧名",
+  "output_dir": "D:\\短剧工坊\\output\\示例剧名",
+  "source_pattern": "{name} - 第{ep}集.mp4",
+  "videos": [
+    {
+      "id": 1,
+      "hook_keyword": "开头钩子",
+      "segments": [
+        {"episode": 3, "start": 15.0, "duration": 25.0},
+        {"episode": 7, "start": 52.0, "duration": 28.0},
+        {"episode": 12, "start": 33.0, "duration": 27.0},
+        {"episode": 15, "start": 10.0, "duration": 25.0},
+        {"episode": 20, "start": 40.0, "duration": 26.0},
+        {"episode": 25, "start": 15.0, "duration": 25.0},
+        {"episode": 30, "start": 50.0, "duration": 28.0},
+        {"episode": 35, "start": 20.0, "duration": 25.0},
+        {"episode": 10, "start": 55.0, "duration": 27.0},
+        {"episode": 5, "start": 30.0, "duration": 25.0}
+      ]
+    },
+    {
+      "id": 2,
+      "hook_keyword": "反转钩子",
+      "segments": [
+        {"episode": 6, "start": 12.0, "duration": 26.0},
+        {"episode": 9, "start": 45.0, "duration": 28.0},
+        {"episode": 14, "start": 8.0, "duration": 25.0},
+        {"episode": 18, "start": 35.0, "duration": 27.0},
+        {"episode": 23, "start": 50.0, "duration": 26.0},
+        {"episode": 28, "start": 20.0, "duration": 25.0},
+        {"episode": 32, "start": 55.0, "duration": 28.0},
+        {"episode": 36, "start": 10.0, "duration": 25.0},
+        {"episode": 11, "start": 40.0, "duration": 27.0},
+        {"episode": 4, "start": 30.0, "duration": 25.0}
+      ]
+    }
+  ],
+  "settings": {
+    "crf": 22,
+    "preset": "veryfast",
+    "anti_dup": {
+      "speed": 1.05,
+      "crop": 30,
+      "contrast": 1.05,
+      "saturation": 1.1,
+      "brightness": 0.02,
+      "noise": 8,
+      "rotate": 0.008,
+      "fps": 29.97,
+      "atempo": 1.05,
+      "eq_h": {"f": 3000, "width": 1000, "g": 3},
+      "eq_l": {"f": 100, "width": 50, "g": -2}
+    }
+  }
+}

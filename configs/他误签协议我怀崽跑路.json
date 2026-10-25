@@ -1,0 +1,442 @@
+{
+  "drama_name": "他误签协议我怀崽跑路",
+  "source_dir": "D:\\短剧素材\\他误签协议我怀崽跑路",
+  "output_dir": "D:\\短剧工坊\\output\\他误签协议我怀崽跑路",
+  "source_pattern": "{ep}.mp4",
+  "videos": [
+    {
+      "id": 1,
+      "hook_keyword": "误签协议",
+      "title": "误签协议我怀四胞胎跑路",
+      "description": "丈夫看都不看就落笔盖章。却根本不知道自己签的是什么。她怀四胞胎攥着协议连夜逃离豪门。",
+      "hashtags": [
+        "#豪门恩怨",
+        "#短剧",
+        "#反转",
+        "#一口气看完"
+      ],
+      "segments": [
+        {
+          "episode": 1,
+          "start": 8,
+          "duration": 25
+        },
+        {
+          "episode": 1,
+          "start": 40,
+          "duration": 25
+        },
+        {
+          "episode": 5,
+          "start": 8,
+          "duration": 20
+        },
+        {
+          "episode": 5,
+          "start": 28,
+          "duration": 20
+        },
+        {
+          "episode": 10,
+          "start": 8,
+          "duration": 20
+        },
+        {
+          "episode": 10,
+          "start": 28,
+          "duration": 19
+        },
+        {
+          "episode": 15,
+          "start": 8,
+          "duration": 20
+        },
+        {
+          "episode": 20,
+          "start": 8,
+          "duration": 20
+        },
+        {
+          "episode": 25,
+          "start": 8,
+          "duration": 20
+        },
+        {
+          "episode": 30,
+          "start": 8,
+          "duration": 20
+        },
+        {
+          "episode": 30,
+          "start": 28,
+          "duration": 20
+        }
+      ]
+    },
+    {
+      "id": 2,
+      "hook_keyword": "怀崽跑路",
+      "title": "怀四胞胎攥协议连夜跑路",
+      "description": "老公以为我闹脾气。其实我揣着离婚协议带着四个孩子走了。以后可别后悔。",
+      "hashtags": [
+        "#豪门恩怨",
+        "#短剧",
+        "#反转",
+        "#一口气看完"
+      ],
+      "segments": [
+        {
+          "episode": 2,
+          "start": 8,
+          "duration": 20
+        },
+        {
+          "episode": 2,
+          "start": 28,
+          "duration": 20
+        },
+        {
+          "episode": 10,
+          "start": 8,
+          "duration": 20
+        },
+        {
+          "episode": 10,
+          "start": 28,
+          "duration": 19
+        },
+        {
+          "episode": 12,
+          "start": 8,
+          "duration": 20
+        },
+        {
+          "episode": 12,
+          "start": 28,
+          "duration": 20
+        },
+        {
+          "episode": 18,
+          "start": 8,
+          "duration": 20
+        },
+        {
+          "episode": 18,
+          "start": 28,
+          "duration": 20
+        },
+        {
+          "episode": 22,
+          "start": 8,
+          "duration": 20
+        },
+        {
+          "episode": 22,
+          "start": 28,
+          "duration": 20
+        },
+        {
+          "episode": 28,
+          "start": 8,
+          "duration": 20
+        }
+      ]
+    },
+    {
+      "id": 3,
+      "hook_keyword": "证据反击",
+      "title": "三张证据让谣言不攻自破",
+      "description": "航空公司行程单产检记录产科主任结论。我一个孕妇跑了三天就凭这三张纸野男人在哪。",
+      "hashtags": [
+        "#女性",
+        "#短剧",
+        "#爽",
+        "#一口气看完"
+      ],
+      "segments": [
+        {
+          "episode": 3,
+          "start": 8,
+          "duration": 20
+        },
+        {
+          "episode": 3,
+          "start": 28,
+          "duration": 20
+        },
+        {
+          "episode": 15,
+          "start": 8,
+          "duration": 20
+        },
+        {
+          "episode": 15,
+          "start": 28,
+          "duration": 20
+        },
+        {
+          "episode": 17,
+          "start": 8,
+          "duration": 20
+        },
+        {
+          "episode": 17,
+          "start": 28,
+          "duration": 20
+        },
+        {
+          "episode": 19,
+          "start": 8,
+          "duration": 20
+        },
+        {
+          "episode": 19,
+          "start": 28,
+          "duration": 20
+        },
+        {
+          "episode": 21,
+          "start": 8,
+          "duration": 20
+        },
+        {
+          "episode": 21,
+          "start": 28,
+          "duration": 18
+        },
+        {
+          "episode": 23,
+          "start": 8,
+          "duration": 20
+        }
+      ]
+    },
+    {
+      "id": 4,
+      "hook_keyword": "福利被窃",
+      "title": "生育补贴全被偷走",
+      "description": "怀孕三个月起的孕期补贴结日福利家属保险一笔不落全被人领走。签字的是我丈夫。",
+      "hashtags": [
+        "#豪门恩怨",
+        "#短剧",
+        "#反转",
+        "#一口气看完"
+      ],
+      "segments": [
+        {
+          "episode": 4,
+          "start": 8,
+          "duration": 20
+        },
+        {
+          "episode": 4,
+          "start": 28,
+          "duration": 20
+        },
+        {
+          "episode": 9,
+          "start": 8,
+          "duration": 20
+        },
+        {
+          "episode": 9,
+          "start": 28,
+          "duration": 20
+        },
+        {
+          "episode": 13,
+          "start": 8,
+          "duration": 20
+        },
+        {
+          "episode": 13,
+          "start": 28,
+          "duration": 20
+        },
+        {
+          "episode": 20,
+          "start": 8,
+          "duration": 20
+        },
+        {
+          "episode": 20,
+          "start": 28,
+          "duration": 20
+        },
+        {
+          "episode": 24,
+          "start": 8,
+          "duration": 20
+        },
+        {
+          "episode": 24,
+          "start": 28,
+          "duration": 20
+        },
+        {
+          "episode": 26,
+          "start": 8,
+          "duration": 20
+        }
+      ]
+    },
+    {
+      "id": 5,
+      "hook_keyword": "恩人真相",
+      "title": "我母亲才是沈家真正的恩人",
+      "description": "当年火灾她母亲冲进火场救出沈家夫人。沈家却把恩人认错了十几年。真相炸开前夫懵了。",
+      "hashtags": [
+        "#亲情",
+        "#短剧",
+        "#催泪",
+        "#一口气看完"
+      ],
+      "segments": [
+        {
+          "episode": 6,
+          "start": 8,
+          "duration": 20
+        },
+        {
+          "episode": 6,
+          "start": 28,
+          "duration": 20
+        },
+        {
+          "episode": 11,
+          "start": 8,
+          "duration": 20
+        },
+        {
+          "episode": 11,
+          "start": 28,
+          "duration": 20
+        },
+        {
+          "episode": 16,
+          "start": 8,
+          "duration": 20
+        },
+        {
+          "episode": 16,
+          "start": 28,
+          "duration": 20
+        },
+        {
+          "episode": 25,
+          "start": 8,
+          "duration": 20
+        },
+        {
+          "episode": 25,
+          "start": 28,
+          "duration": 20
+        },
+        {
+          "episode": 27,
+          "start": 8,
+          "duration": 20
+        },
+        {
+          "episode": 27,
+          "start": 28,
+          "duration": 20
+        },
+        {
+          "episode": 29,
+          "start": 8,
+          "duration": 20
+        }
+      ]
+    },
+    {
+      "id": 6,
+      "hook_keyword": "四胎危机",
+      "title": "七个月怀四胎前夫只当闹脾气",
+      "description": "他以为我闹性子直到真相炸开才慌了神。那杯咖啡烫伤了我的整条小臂他却没看一眼。",
+      "hashtags": [
+        "#豪门恩怨",
+        "#短剧",
+        "#催泪",
+        "#大结局",
+        "#一口气看完"
+      ],
+      "segments": [
+        {
+          "episode": 7,
+          "start": 8,
+          "duration": 20
+        },
+        {
+          "episode": 7,
+          "start": 28,
+          "duration": 20
+        },
+        {
+          "episode": 8,
+          "start": 8,
+          "duration": 20
+        },
+        {
+          "episode": 8,
+          "start": 28,
+          "duration": 20
+        },
+        {
+          "episode": 14,
+          "start": 8,
+          "duration": 20
+        },
+        {
+          "episode": 14,
+          "start": 28,
+          "duration": 20
+        },
+        {
+          "episode": 30,
+          "start": 8,
+          "duration": 20
+        },
+        {
+          "episode": 30,
+          "start": 28,
+          "duration": 20
+        },
+        {
+          "episode": 1,
+          "start": 55,
+          "duration": 20
+        }
+      ]
+    }
+  ],
+  "settings": {
+    "crf": 22,
+    "preset": "veryfast",
+    "anti_dup": {
+      "speed": 1.05,
+      "crop": 30,
+      "contrast": 1.05,
+      "saturation": 1.1,
+      "brightness": 0.02,
+      "noise": 8,
+      "rotate": 0.008,
+      "fps": null,
+      "atempo": 1.05,
+      "eq_h": {
+        "f": 3000,
+        "width": 1000,
+        "g": 3
+      },
+      "eq_l": {
+        "f": 100,
+        "width": 50,
+        "g": -2
+      },
+      "watermark_text": "福桃说剧",
+      "watermark_alpha": 0.3,
+      "watermark_fontsize": 36,
+      "watermark_font": "C:\\Windows\\Fonts\\msyh.ttc"
+    }
+  }
+}

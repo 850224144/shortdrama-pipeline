@@ -1,0 +1,404 @@
+{
+  "drama_name": "烟火相逢念君恩",
+  "source_dir": "D:\\短剧素材\\烟火相逢念君恩",
+  "output_dir": "D:\\短剧工坊\\output\\烟火相逢念君恩",
+  "source_pattern": "{name}-第{ep}集.mp4",
+  "videos": [
+    {
+      "id": 1,
+      "hook_keyword": "温情初遇",
+      "segments": [
+        {
+          "episode": 1,
+          "start": 8,
+          "duration": 20
+        },
+        {
+          "episode": 4,
+          "start": 8,
+          "duration": 20
+        },
+        {
+          "episode": 7,
+          "start": 8,
+          "duration": 20
+        },
+        {
+          "episode": 10,
+          "start": 8,
+          "duration": 20
+        },
+        {
+          "episode": 13,
+          "start": 8,
+          "duration": 20
+        },
+        {
+          "episode": 16,
+          "start": 8,
+          "duration": 20
+        },
+        {
+          "episode": 19,
+          "start": 8,
+          "duration": 20
+        },
+        {
+          "episode": 22,
+          "start": 8,
+          "duration": 20
+        },
+        {
+          "episode": 25,
+          "start": 8,
+          "duration": 20
+        },
+        {
+          "episode": 28,
+          "start": 8,
+          "duration": 20
+        },
+        {
+          "episode": 31,
+          "start": 8,
+          "duration": 20
+        }
+      ]
+    },
+    {
+      "id": 2,
+      "hook_keyword": "知恩图报",
+      "segments": [
+        {
+          "episode": 2,
+          "start": 8,
+          "duration": 20
+        },
+        {
+          "episode": 5,
+          "start": 8,
+          "duration": 20
+        },
+        {
+          "episode": 8,
+          "start": 8,
+          "duration": 20
+        },
+        {
+          "episode": 11,
+          "start": 8,
+          "duration": 20
+        },
+        {
+          "episode": 14,
+          "start": 8,
+          "duration": 20
+        },
+        {
+          "episode": 17,
+          "start": 8,
+          "duration": 20
+        },
+        {
+          "episode": 20,
+          "start": 8,
+          "duration": 20
+        },
+        {
+          "episode": 23,
+          "start": 8,
+          "duration": 20
+        },
+        {
+          "episode": 26,
+          "start": 8,
+          "duration": 20
+        },
+        {
+          "episode": 29,
+          "start": 8,
+          "duration": 20
+        },
+        {
+          "episode": 32,
+          "start": 8,
+          "duration": 20
+        }
+      ]
+    },
+    {
+      "id": 3,
+      "hook_keyword": "平凡烟火",
+      "segments": [
+        {
+          "episode": 3,
+          "start": 8,
+          "duration": 20
+        },
+        {
+          "episode": 6,
+          "start": 8,
+          "duration": 20
+        },
+        {
+          "episode": 9,
+          "start": 8,
+          "duration": 20
+        },
+        {
+          "episode": 12,
+          "start": 8,
+          "duration": 20
+        },
+        {
+          "episode": 15,
+          "start": 8,
+          "duration": 20
+        },
+        {
+          "episode": 18,
+          "start": 8,
+          "duration": 20
+        },
+        {
+          "episode": 21,
+          "start": 8,
+          "duration": 20
+        },
+        {
+          "episode": 24,
+          "start": 8,
+          "duration": 20
+        },
+        {
+          "episode": 27,
+          "start": 8,
+          "duration": 20
+        },
+        {
+          "episode": 30,
+          "start": 8,
+          "duration": 20
+        },
+        {
+          "episode": 33,
+          "start": 8,
+          "duration": 20
+        }
+      ]
+    },
+    {
+      "id": 4,
+      "hook_keyword": "命运重逢",
+      "segments": [
+        {
+          "episode": 34,
+          "start": 8,
+          "duration": 20
+        },
+        {
+          "episode": 35,
+          "start": 8,
+          "duration": 20
+        },
+        {
+          "episode": 36,
+          "start": 8,
+          "duration": 20
+        },
+        {
+          "episode": 37,
+          "start": 8,
+          "duration": 20
+        },
+        {
+          "episode": 38,
+          "start": 8,
+          "duration": 20
+        },
+        {
+          "episode": 39,
+          "start": 8,
+          "duration": 20
+        },
+        {
+          "episode": 40,
+          "start": 8,
+          "duration": 20
+        },
+        {
+          "episode": 41,
+          "start": 8,
+          "duration": 20
+        },
+        {
+          "episode": 42,
+          "start": 8,
+          "duration": 20
+        },
+        {
+          "episode": 43,
+          "start": 8,
+          "duration": 20
+        },
+        {
+          "episode": 44,
+          "start": 8,
+          "duration": 20
+        },
+        {
+          "episode": 45,
+          "start": 8,
+          "duration": 20
+        }
+      ]
+    },
+    {
+      "id": 5,
+      "hook_keyword": "烟火味道",
+      "segments": [
+        {
+          "episode": 1,
+          "start": 28,
+          "duration": 20
+        },
+        {
+          "episode": 4,
+          "start": 28,
+          "duration": 20
+        },
+        {
+          "episode": 7,
+          "start": 28,
+          "duration": 20
+        },
+        {
+          "episode": 10,
+          "start": 28,
+          "duration": 20
+        },
+        {
+          "episode": 13,
+          "start": 28,
+          "duration": 20
+        },
+        {
+          "episode": 16,
+          "start": 28,
+          "duration": 20
+        },
+        {
+          "episode": 19,
+          "start": 28,
+          "duration": 20
+        },
+        {
+          "episode": 22,
+          "start": 28,
+          "duration": 20
+        },
+        {
+          "episode": 25,
+          "start": 28,
+          "duration": 20
+        },
+        {
+          "episode": 28,
+          "start": 28,
+          "duration": 20
+        },
+        {
+          "episode": 31,
+          "start": 28,
+          "duration": 20
+        }
+      ]
+    },
+    {
+      "id": 6,
+      "hook_keyword": "一生相伴",
+      "segments": [
+        {
+          "episode": 2,
+          "start": 28,
+          "duration": 20
+        },
+        {
+          "episode": 5,
+          "start": 28,
+          "duration": 20
+        },
+        {
+          "episode": 8,
+          "start": 28,
+          "duration": 20
+        },
+        {
+          "episode": 11,
+          "start": 28,
+          "duration": 20
+        },
+        {
+          "episode": 14,
+          "start": 28,
+          "duration": 20
+        },
+        {
+          "episode": 17,
+          "start": 28,
+          "duration": 20
+        },
+        {
+          "episode": 20,
+          "start": 28,
+          "duration": 20
+        },
+        {
+          "episode": 23,
+          "start": 28,
+          "duration": 20
+        },
+        {
+          "episode": 26,
+          "start": 28,
+          "duration": 20
+        },
+        {
+          "episode": 29,
+          "start": 28,
+          "duration": 20
+        },
+        {
+          "episode": 32,
+          "start": 28,
+          "duration": 20
+        }
+      ]
+    }
+  ],
+  "settings": {
+    "crf": 22,
+    "preset": "veryfast",
+    "anti_dup": {
+      "speed": 1.05,
+      "crop": 30,
+      "contrast": 1.05,
+      "saturation": 1.1,
+      "brightness": 0.02,
+      "noise": 8,
+      "rotate": 0.008,
+      "fps": null,
+      "atempo": 1.05,
+      "eq_h": {
+        "f": 3000,
+        "width": 1000,
+        "g": 3
+      },
+      "eq_l": {
+        "f": 100,
+        "width": 50,
+        "g": -2
+      }
+    }
+  }
+}

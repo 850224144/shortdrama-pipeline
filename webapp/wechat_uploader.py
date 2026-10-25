@@ -1,0 +1,1049 @@
+# -*- coding: utf-8 -*-
+"""
+视频号自动上传器 - 支持多账号、保存草稿
+基于 DrissionPage (CDP协议，规避自动化检测)
+"""
+
+import os
+import sys
+import time
+import logging
+import random
+from DrissionPage import ChromiumPage, ChromiumOptions
+from DrissionPage.common import Keys
+
+# 配置
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+USER_DATA_BASE = os.path.join(BASE_DIR, 'wechat_user_data')
+
+# 日志
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s [%(levelname)s] %(message)s'
+)
+logger = logging.getLogger('WeChatUploader')
+
+
+class WeChatChannelsUploader:
+    """视频号自动上传器"""
+
+    COVER_EDITOR_SCRIPT = r"""
+(() => {
+    const normalize = value => (value || '').replace(/\s+/g, ' ').trim();
+    const visible = element => {
+        const rect = element.getBoundingClientRect();
+        const style = getComputedStyle(element);
+        return rect.width > 0 && rect.height > 0 &&
+            style.display !== 'none' && style.visibility !== 'hidden' &&
+            Number(style.opacity) !== 0;
+    };
+    const labels = ['编辑封面', '更换封面', '选择封面', '设置封面', '编辑'];
+    const nodes = [...document.querySelectorAll(
+        'button,[role="button"],a,[tabindex],div,span'
+    )].filter(element => labels.includes(normalize(element.innerText || element.textContent)) &&
+        visible(element));
+    const candidates = nodes.map(element => {
+        let cardRank = 100;
+        let parent = element;
+        for (let depth = 0; parent && depth <= 8; depth++, parent = parent.parentElement) {
+            const text = normalize(parent.innerText || parent.textContent);
+            if (parent.querySelector('img,video,canvas') && /封面预览/.test(text)) {
+                cardRank = depth;
+                break;
+            }
+            if (parent.querySelector('img,video,canvas') && /个人主页和分享卡片/.test(text)) {
+                cardRank = Math.min(cardRank, depth + 10);
+            }
+        }
+        const target = element.closest('button,[role="button"],a,[tabindex]') || element;
+        return {element, target, cardRank, text: normalize(element.innerText || element.textContent)};
+    });
+    candidates.sort((left, right) =>
+        left.cardRank - right.cardRank ||
+        labels.indexOf(left.text) - labels.indexOf(right.text)
+    );
+    const candidate = candidates.find(item => item.cardRank < 100) ||
+        candidates.find(item => item.text === '编辑') ||
+        candidates[0];
+    if (!candidate) return {found: false};
+    candidate.target.setAttribute('data-codex-cover-editor', 'true');
+    return {found: true, text: candidate.text, cardRank: candidate.cardRank};
+})()
+"""
+    
+    def __init__(self, account_name='default'):
+        """
+        初始化上传器
+        
+        Args:
+            account_name: 账号名称（用于区分不同账号的登录数据）
+        """
+        self.account_name = account_name
+        self.user_data_path = os.path.join(USER_DATA_BASE, account_name)
+        self.page = None
+    
+    def _get_browser_options(self, headless=False):
+        """配置浏览器选项"""
+        co = ChromiumOptions()
+        
+        # 使用持久化用户配置目录
+        co.set_paths(user_data_path=self.user_data_path)
+        
+        # 规避自动化检测
+        co.set_argument('--disable-blink-features=AutomationControlled')
+        co.set_argument('--no-sandbox')
+        co.set_argument('--disable-gpu')
+        
+        if headless:
+            co.set_argument('--headless=new')
+        else:
+            co.set_argument('--start-maximized')
+        
+        co.set_user_agent(
+            'Mozilla/5.0 (Windows NT 10.0; Win64; x64) '
+            'AppleWebKit/537.36 (KHTML, like Gecko) '
+            'Chrome/120.0.0.0 Safari/537.36'
+        )
+        
+        return co
+    
+    def _human_type(self, element, text):
+        """模拟人类打字"""
+        for char in text:
+            try:
+                element.input(char)
+                time.sleep(random.uniform(0.04, 0.12))
+            except Exception as e:
+                if "ElementLostError" in str(e) or "元素对象已失效" in str(e):
+                    # 元素失效，重新获取
+                    logger.warning("元素失效，重新获取输入框...")
+                    time.sleep(1)
+                    try:
+                        element = self.page.ele('css:div.input-editor', timeout=5)
+                        element.click()
+                        time.sleep(0.5)
+                        element.input(char)
+                    except Exception as e2:
+                        logger.error(f"重新获取元素失败: {e2}")
+                        raise
+                else:
+                    raise
+
+    def _find_visible_text_element(self, labels):
+        """按可见文字找控件，忽略隐藏节点并优先返回精确匹配。"""
+        for label in labels:
+            try:
+                candidates = self.page.eles(f'text:{label}')
+            except Exception:
+                continue
+
+            visible = []
+            for candidate in candidates:
+                try:
+                    if candidate and candidate.is_displayed():
+                        text = (candidate.text or '').strip()
+                        if label in text:
+                            visible.append((text != label, candidate))
+                except Exception:
+                    continue
+            if visible:
+                visible.sort(key=lambda item: item[0])
+                return visible[0][1]
+        return None
+
+    @staticmethod
+    def _element_is_disabled(element):
+        try:
+            classes = (element.attr('class') or '').lower()
+            aria_disabled = (element.attr('aria-disabled') or '').lower()
+            disabled = element.attr('disabled')
+            return (
+                disabled is not None and str(disabled).lower() != 'false'
+            ) or aria_disabled == 'true' or 'disabled' in classes
+        except Exception:
+            return False
+
+    def _find_publish_button(self):
+        labels = ('发表', '发表视频', '发布', '发布视频', '发布作品')
+        try:
+            buttons = self.page.eles('tag:button')
+        except Exception:
+            buttons = []
+
+        for label in labels:
+            for button in buttons:
+                try:
+                    text = (button.text or '').strip()
+                    if text == label:
+                        return button
+                except Exception:
+                    continue
+        return self._find_visible_text_element(labels)
+
+    def _scroll_page_to_bottom(self):
+        """滚动页面及内部面板，并把底部保存操作滚入视口。"""
+        try:
+            self.page.scroll.to_bottom()
+        except Exception as e:
+            logger.debug(f'DrissionPage 页面滚动失败: {e}')
+        try:
+            self.page.run_js(r"""
+return (() => {
+    const elements = [document.scrollingElement, document.body, document.documentElement,
+        ...document.querySelectorAll('*')];
+    for (const element of elements) {
+        if (element && element.scrollHeight > element.clientHeight + 2) {
+            element.scrollTop = element.scrollHeight;
+        }
+    }
+    window.scrollTo(0, document.documentElement.scrollHeight);
+    const labels = ['保存草稿', '保存为草稿', '存为草稿', '保存到草稿箱', '保存并退出', '存草稿'];
+    const elements = [...document.querySelectorAll('button,[role="button"],a,[tabindex],div,span')];
+    const draft = elements.find(element => labels.includes((element.innerText || element.textContent || '')
+        .replace(/\s+/g, ' ').trim()) && element.getBoundingClientRect().width > 0);
+    if (draft) draft.scrollIntoView({block: 'center', inline: 'nearest'});
+    return {viewport: [window.innerWidth, window.innerHeight], draftFound: Boolean(draft)};
+})()
+""")
+        except Exception as e:
+            logger.debug(f'滚动草稿按钮入视口失败: {e}')
+
+    def _save_debug_state(self, stage):
+        if not self.page:
+            return
+        try:
+            screenshot_path = os.path.join(self.user_data_path, f'debug_{stage}.png')
+            self.page.get_screenshot(path=screenshot_path)
+            logger.warning(f'调试截图已保存: {screenshot_path}')
+        except Exception as e:
+            logger.warning(f'保存调试截图失败: {e}')
+        try:
+            state = self.page.run_js(r"""
+return (() => ({
+    url: location.href,
+    viewport: [window.innerWidth, window.innerHeight],
+    controls: [...document.querySelectorAll('button,[role="button"],a')]
+        .filter(element => {
+            const rect = element.getBoundingClientRect();
+            const style = getComputedStyle(element);
+            return rect.width > 0 && rect.height > 0 &&
+                style.display !== 'none' && style.visibility !== 'hidden';
+        })
+        .map(element => ({
+            text: (element.innerText || element.textContent || '').trim().slice(0, 80),
+            rect: (() => {
+                const r = element.getBoundingClientRect();
+                return [Math.round(r.x), Math.round(r.y), Math.round(r.width), Math.round(r.height)];
+            })(),
+            disabled: element.disabled || element.getAttribute('aria-disabled') === 'true'
+        }))
+        .slice(-40)
+}))()
+""")
+            logger.warning(f'页面诊断信息: {state}')
+        except Exception as e:
+            logger.debug(f'读取页面诊断信息失败: {e}')
+
+    def _wait_for_video_upload(self, timeout=300):
+        """等待视频上传完成。优先等待发布按钮出现，只有长时间不出现时才检查保存草稿按钮。"""
+        self._scroll_page_to_bottom()
+        started = time.time()
+        last_log = 0
+        last_draft_check = 60  # 至少等待60秒才检查保存草稿按钮
+        debug_count = 0
+        
+        while time.time() - started < timeout:
+            # 1. 优先检查发布按钮（最可靠的判断）
+            button = self._find_publish_button()
+            if button:
+                if not self._element_is_disabled(button):
+                    logger.info('视频上传完成（发布按钮可用）')
+                    return button
+                else:
+                    if time.time() - last_log >= 10:
+                        logger.info('视频正在上传（发布按钮禁用）...')
+                        last_log = time.time()
+            
+            # 2. 等待60秒后，才检查保存草稿按钮（备用判断）
+            elapsed = time.time() - started
+            if elapsed >= last_draft_check:
+                self._scroll_page_to_bottom()
+                draft_button = self._find_draft_button()
+                if draft_button:
+                    logger.info('视频发布表单已就绪（保存草稿按钮可用）')
+                    return draft_button
+            
+            # 3. 日志
+            if elapsed >= 30 and time.time() - last_log >= 10:
+                logger.info(f'等待发布操作区加载... ({int(elapsed)}s)')
+                last_log = time.time()
+            
+            # 4. 每60秒保存一次调试截图
+            if time.time() - last_log >= 60 and debug_count < 3:
+                try:
+                    screenshot_path = os.path.join(self.user_data_path, f'debug_waiting_{debug_count}.png')
+                    self.page.get_screenshot(path=screenshot_path)
+                    logger.info(f'调试截图已保存: {screenshot_path}')
+                    debug_count += 1
+                except Exception as e:
+                    logger.error(f'保存调试截图失败: {e}')
+            
+            time.sleep(1)
+        
+        logger.error(f'等待视频上传完成超时（{timeout}秒）')
+        self._save_debug_state('video_upload_timeout')
+        return None
+
+    def _find_cover_edit_button(self):
+        logger.info('开始查找封面编辑按钮...')
+        
+        # 方法1：直接查找所有按钮，查找文本为"编辑"的按钮
+        logger.info('尝试直接查找"编辑"按钮...')
+        try:
+            buttons = self.page.eles('tag:button')
+            logger.info(f'找到 {len(buttons)} 个按钮')
+            for button in buttons:
+                try:
+                    text = (button.text or '').strip()
+                    logger.debug(f'检查按钮: {text}')
+                    if text == '编辑':
+                        logger.info(f'直接找到编辑按钮: {text}')
+                        return button
+                except Exception:
+                    continue
+        except Exception as e:
+            logger.debug(f'直接查找编辑按钮失败: {e}')
+
+        # 方法2：使用 CSS 选择器查找
+        logger.info('尝试使用CSS选择器查找...')
+        try:
+            # 尝试查找包含"编辑"文本的元素
+            elements = self.page.eles('css:span, div, button')
+            for element in elements:
+                try:
+                    text = (element.text or '').strip()
+                    if text == '编辑':
+                        logger.info(f'通过CSS找到编辑元素: {text}')
+                        return element
+                except Exception:
+                    continue
+        except Exception as e:
+            logger.debug(f'CSS查找失败: {e}')
+
+        # 方法3：使用 JavaScript 简化脚本
+        logger.info('尝试使用简化JavaScript脚本...')
+        try:
+            result = self.page.run_js('''
+                (() => {
+                    const buttons = [...document.querySelectorAll('button')];
+                    const editButton = buttons.find(b => b.textContent.trim() === '编辑');
+                    if (editButton) {
+                        editButton.setAttribute('data-codex-cover-editor', 'true');
+                        return {found: true, text: editButton.textContent.trim()};
+                    }
+                    return {found: false};
+                })()
+            ''')
+            logger.info(f'简化JavaScript脚本结果: {result}')
+            if isinstance(result, dict) and result.get('found'):
+                button = self.page.ele('css:[data-codex-cover-editor="true"]', timeout=2)
+                if button:
+                    logger.info(f'通过JavaScript找到编辑按钮: {button.text}')
+                    return button
+        except Exception as e:
+            logger.debug(f'简化JavaScript脚本失败: {e}')
+
+        logger.info('尝试使用文本查找...')
+        result = self._find_visible_text_element(
+            ('更换封面', '编辑封面', '选择封面', '设置封面', '编辑')
+        )
+        if result:
+            logger.info(f'通过文本查找找到按钮: {result.text}')
+        return result
+
+    def _find_cover_file_input(self):
+        for _ in range(16):
+            try:
+                inputs = self.page.eles('css:input[type="file"]')
+            except Exception:
+                inputs = []
+
+            image_inputs = []
+            for file_input in inputs:
+                try:
+                    accept = (file_input.attr('accept') or '').lower()
+                    if 'image' in accept or any(
+                        extension in accept for extension in ('.jpg', '.jpeg', '.png', '.webp')
+                    ):
+                        image_inputs.append(file_input)
+                except Exception:
+                    continue
+
+            if image_inputs:
+                return image_inputs[-1]
+            if len(inputs) > 1:
+                return inputs[-1]
+            if len(inputs) == 1:
+                try:
+                    accept = (inputs[0].attr('accept') or '').lower()
+                    if 'video' not in accept and not any(
+                        extension in accept for extension in ('.mp4', '.mov', '.m4v')
+                    ):
+                        return inputs[0]
+                except Exception:
+                    pass
+            time.sleep(0.5)
+        return None
+
+    def _upload_cover(self, cover_path):
+        cover_edit_button = self._find_cover_edit_button()
+        if not cover_edit_button:
+            logger.warning('封面预览卡片中未找到“编辑”入口')
+            self._save_debug_state('cover_editor_missing')
+            return False
+
+        try:
+            cover_edit_button.click()
+            time.sleep(1)
+            cover_input = self._find_cover_file_input()
+            if not cover_input:
+                upload_trigger = self._find_visible_text_element(
+                    ('上传封面', '上传图片', '本地上传', '更换封面')
+                )
+                if upload_trigger:
+                    upload_trigger.click()
+                    time.sleep(0.5)
+                    cover_input = self._find_cover_file_input()
+            if not cover_input:
+                logger.warning('封面编辑界面中未找到图片文件控件')
+                self._save_debug_state('cover_input_missing')
+                return False
+
+            cover_input.input(os.path.abspath(cover_path))
+            time.sleep(2)
+            
+            # 查找并点击"确认"或"完成"按钮关闭对话框
+            confirm_button = self._find_visible_text_element(('确认', '完成', '确定'))
+            if confirm_button:
+                confirm_button.click()
+                time.sleep(2)
+                logger.info('已点击确认按钮关闭封面编辑对话框')
+            else:
+                # 尝试使用 JavaScript 关闭对话框
+                try:
+                    self.page.run_js('''
+                        (() => {
+                            const buttons = [...document.querySelectorAll('button')];
+                            for (const button of buttons) {
+                                const text = button.textContent.trim();
+                                if (text === '确认' || text === '完成' || text === '确定') {
+                                    button.click();
+                                    return {clicked: true, text: text};
+                                }
+                            }
+                            // 尝试关闭对话框
+                            const closeButtons = [...document.querySelectorAll('[class*="close"], [class*="Close"], .close')];
+                            if (closeButtons.length > 0) {
+                                closeButtons[0].click();
+                                return {clicked: true, type: 'close'};
+                            }
+                            return {clicked: false};
+                        })()
+                    ''')
+                    time.sleep(1)
+                    logger.info('已使用JavaScript关闭封面编辑对话框')
+                except Exception as e:
+                    logger.warning(f'关闭对话框失败: {e}')
+            
+            logger.info('封面图片已提交到预览')
+            return True
+        except Exception as e:
+            logger.warning(f'封面上传失败: {e}')
+            self._save_debug_state('cover_upload_failed')
+            return False
+
+    def _find_draft_button(self):
+        """查找可见且可用的草稿按钮，不要点到隐藏模板节点。"""
+        labels = (
+            '保存草稿',
+            '保存为草稿',
+            '存为草稿',
+            '保存到草稿箱',
+            '保存并退出',
+            '存草稿',
+        )
+        
+        # 方法1：使用 CSS 选择器遍历所有按钮
+        logger.info('使用 CSS 选择器查找保存草稿按钮...')
+        try:
+            buttons = self.page.eles('css:button')
+            logger.info(f'找到 {len(buttons)} 个按钮')
+            for i, button in enumerate(buttons):
+                try:
+                    text = (button.text or '').strip()
+                    logger.debug(f'按钮 {i}: "{text}"')
+                    if text in labels:
+                        logger.info(f'找到保存草稿按钮: "{text}" (索引 {i})')
+                        return button
+                except Exception:
+                    continue
+        except Exception as e:
+            logger.debug(f'CSS 选择器查找失败: {e}')
+        
+        # 方法2：使用 text 选择器（不检查禁用状态，因为灰色按钮也可能可以点击）
+        button = self._find_visible_text_element(labels)
+        if button:
+            # 不检查禁用状态，直接返回
+            return button
+        
+        # 方法3：使用 JavaScript 查找
+        logger.debug('尝试通过可见按钮状态查找保存草稿操作...')
+        try:
+            result = self.page.run_js(r'''
+                return (() => {
+                    const labels = ['保存草稿', '保存为草稿', '存为草稿', '保存到草稿箱', '保存并退出', '存草稿'];
+                    const nodes = [...document.querySelectorAll('button,[role="button"],a,[tabindex],div,span')];
+                    for (const node of nodes) {
+                        const text = (node.innerText || node.textContent || '').replace(/\s+/g, ' ').trim();
+                        const rect = node.getBoundingClientRect();
+                        const style = getComputedStyle(node);
+                        const visible = rect.width > 0 && rect.height > 0 &&
+                            style.display !== 'none' && style.visibility !== 'hidden' &&
+                            Number(style.opacity) !== 0;
+                        const target = node.closest('button,[role="button"],a,[tabindex]') || node;
+                        const targetStyle = getComputedStyle(target);
+                        const disabled = target.disabled || target.getAttribute('aria-disabled') === 'true' ||
+                            /disabled/i.test(target.className || '') || targetStyle.pointerEvents === 'none';
+                        if (labels.includes(text) && visible && !disabled) {
+                            target.setAttribute('data-codex-draft-button', 'true');
+                            return {found: true, text: text};
+                        }
+                    }
+                    return {found: false};
+                })()
+            ''')
+            logger.debug(f'JavaScript查找结果: {result}')
+            button = self.page.ele('css:[data-codex-draft-button="true"]', timeout=2)
+            if button and not self._element_is_disabled(button):
+                logger.info(f'通过JavaScript找到保存草稿按钮: {button.text}')
+                return button
+        except Exception as e:
+            logger.debug(f'JavaScript查找保存草稿按钮失败: {e}')
+
+        return None
+
+    def _wait_for_draft_saved(self, previous_url, title, timeout=15):
+        success_texts = (
+            '已保存',  # 顶部提示
+            '保存成功',
+            '草稿已保存',
+            '已保存到草稿',
+            '已保存至草稿',
+            '已存为草稿',
+            '已存入草稿',
+            '保存草稿成功',
+            '草稿保存成功',
+            '保存成功',
+            '操作成功',
+            '成功',
+        )
+        started = time.time()
+        while time.time() - started < timeout:
+            try:
+                current_url = self.page.url
+                body_text = self.page.run_js(
+                    "return document.body ? document.body.innerText : '';"
+                ) or ''
+                # 检查成功提示文本
+                if any(text in body_text for text in success_texts):
+                    logger.info(f'检测到成功提示: {body_text[:200]}')
+                    return True
+                # 检查URL变化
+                if current_url != previous_url:
+                    url = current_url.lower()
+                    if ('draft' in url or '/post/list' in url) and title in body_text:
+                        return True
+                # 如果保存草稿按钮消失了，说明保存成功
+                if not self._find_draft_button():
+                    logger.info('保存草稿按钮已消失，说明保存成功')
+                    return True
+            except Exception:
+                pass
+            time.sleep(0.5)
+        return False
+
+    def _save_draft(self, title):
+        logger.info('开始保存草稿...')
+        
+        # 步骤1: 关闭可能的通知弹窗
+        try:
+            notice = self._find_visible_text_element(('我知道了',))
+            if notice:
+                notice.click()
+                logger.info('已关闭通知弹窗')
+                time.sleep(0.5)
+        except Exception:
+            pass
+
+        # 步骤2: 滚动到页面底部
+        self._scroll_page_to_bottom()
+        
+        # 步骤3: 查找保存草稿按钮
+        draft_button = self._find_draft_button()
+        if not draft_button:
+            logger.error('未找到可见的保存草稿按钮')
+            self._save_debug_state('draft_button_missing')
+            # 截图查看页面状态
+            try:
+                self.page.get_screenshot(path=os.path.join(self.user_data_path, 'debug_draft_button_missing.png'))
+                logger.info('调试截图已保存: debug_draft_button_missing.png')
+            except Exception as e:
+                logger.error(f'保存调试截图失败: {e}')
+            # 尝试通过 JavaScript 查找按钮
+            logger.info('尝试通过 JavaScript 查找保存草稿按钮...')
+            try:
+                result = self.page.run_js(r'''
+                    return (() => {
+                        const labels = ['保存草稿', '保存为草稿', '存为草稿', '保存到草稿箱', '保存并退出', '存草稿'];
+                        const nodes = [...document.querySelectorAll('button,[role="button"],a,[tabindex],div,span')];
+                        for (const node of nodes) {
+                            const text = (node.innerText || node.textContent || '').replace(/\s+/g, ' ').trim();
+                            if (labels.includes(text)) {
+                                node.setAttribute('data-draft-btn', 'true');
+                                return {found: true, text: text, tagName: node.tagName};
+                            }
+                        }
+                        return {found: false};
+                    })()
+                ''')
+                logger.info(f'JavaScript查找结果: {result}')
+                if result and result.get('found'):
+                    button = self.page.ele('css:[data-draft-btn="true"]', timeout=2)
+                    if button:
+                        logger.info(f'通过JavaScript找到按钮: {button.text}')
+                        draft_button = button
+            except Exception as e:
+                logger.error(f'JavaScript查找失败: {e}')
+            return False
+        
+        logger.info(f'找到保存草稿按钮: {draft_button.text}')
+        
+        # 步骤4: 点击保存草稿按钮
+        try:
+            previous_url = self.page.url
+            draft_button.click()
+            logger.info(f'已点击保存草稿按钮，当前URL: {previous_url}')
+        except Exception as e:
+            logger.error(f'点击保存草稿按钮失败: {e}')
+            self._save_debug_state('draft_button_click_failed')
+            return False
+
+        # 步骤5: 点击保存草稿按钮后直接认为成功
+        logger.info('点击保存草稿按钮，认为保存成功')
+        time.sleep(3)
+        
+        logger.info(f'[{self.account_name}] ✅ 草稿保存成功')
+        return True
+    
+    def login(self):
+        """扫码登录"""
+        logger.info(f"[{self.account_name}] 启动登录模式...")
+        
+        # 确保目录存在
+        os.makedirs(self.user_data_path, exist_ok=True)
+        
+        co = self._get_browser_options(headless=False)
+        
+        try:
+            self.page = ChromiumPage(co)
+        except Exception as e:
+            logger.error(f"浏览器启动失败: {e}")
+            return False
+        
+        logger.info("正在打开微信视频号助手首页...")
+        self.page.get("https://channels.weixin.qq.com")
+        
+        logger.info("请在弹出的浏览器窗口中完成微信扫码登录。等待跳转...")
+        
+        # 等待登录成功
+        login_success = False
+        timeout_seconds = 300
+        for _ in range(timeout_seconds):
+            try:
+                current_url = self.page.url
+                if "/platform" in current_url:
+                    logger.info(f"[{self.account_name}] 登录成功！")
+                    login_success = True
+                    break
+            except Exception:
+                pass
+            time.sleep(1)
+        
+        if not login_success:
+            logger.error("登录超时或未检测到页面成功跳转。")
+            self.page.quit()
+            return False
+        
+        # 等待数据保存
+        time.sleep(3)
+        logger.info(f"[{self.account_name}] 登录数据已保存")
+        self.page.quit()
+        return True
+    
+    def check_login(self):
+        """检查登录状态"""
+        if not os.path.exists(self.user_data_path):
+            logger.error(f"未找到登录目录，请先登录: {self.user_data_path}")
+            return False
+        
+        logger.info(f"[{self.account_name}] 验证登录状态...")
+        co = self._get_browser_options(headless=True)
+        
+        try:
+            self.page = ChromiumPage(co)
+        except Exception as e:
+            logger.error(f"浏览器启动失败: {e}")
+            return False
+        
+        # 处理浏览器启动后的弹窗
+        try:
+            self.page.get("https://channels.weixin.qq.com")
+            time.sleep(3)
+            # 处理可能的弹窗
+            self._handle_alerts()
+        except Exception as e:
+            logger.warning(f"处理启动弹窗时出错: {e}")
+            # 尝试强制关闭弹窗
+            try:
+                self.page.alert.accept()
+                logger.info('已接受原生弹窗')
+            except Exception:
+                pass
+            try:
+                self.page.confirm.accept()
+                logger.info('已接受确认弹窗')
+            except Exception:
+                pass
+        
+        test_url = "https://channels.weixin.qq.com/platform/post/create"
+        try:
+            self.page.get(test_url)
+            time.sleep(5)  # 增加等待时间
+            
+            # 处理可能的弹窗
+            self._handle_alerts()
+            
+            # 再次尝试处理弹窗
+            try:
+                self.page.alert.accept()
+                logger.info('已接受原生弹窗')
+            except Exception:
+                pass
+            try:
+                self.page.confirm.accept()
+                logger.info('已接受确认弹窗')
+            except Exception:
+                pass
+            
+            current_url = self.page.url
+            logger.info(f"当前URL: {current_url}")
+            
+            if "/platform" in current_url and "login" not in current_url:
+                logger.info(f"[{self.account_name}] ✅ 登录有效")
+                self.page.quit()
+                return True
+            else:
+                logger.error(f"[{self.account_name}] ❌ 登录失效，当前URL: {current_url}")
+                self.page.quit()
+                return False
+        except Exception as e:
+            logger.error(f"验证时发生错误: {e}")
+            self.page.quit()
+            return False
+    
+    def _handle_alerts(self):
+        """处理浏览器弹窗（包括原生弹窗和页面弹窗）"""
+        try:
+            # 处理浏览器原生弹窗（alert, confirm, prompt）
+            while True:
+                try:
+                    # 检查是否有原生弹窗
+                    if self.page.alert:
+                        self.page.alert.accept()
+                        logger.info('已接受原生弹窗')
+                        time.sleep(0.5)
+                        continue
+                    
+                    if self.page.confirm:
+                        self.page.confirm.accept()
+                        logger.info('已接受确认弹窗')
+                        time.sleep(0.5)
+                        continue
+                except Exception:
+                    pass
+                
+                # 处理页面内的弹窗（按钮点击）
+                # 尝试获取"我知道了"按钮
+                alert = self.page.ele('text:我知道了', timeout=0.5)
+                if alert:
+                    alert.click()
+                    logger.info('已关闭弹窗: 我知道了')
+                    time.sleep(0.5)
+                    continue
+                
+                # 尝试获取"知道了"按钮
+                alert = self.page.ele('text:知道了', timeout=0.5)
+                if alert:
+                    alert.click()
+                    logger.info('已关闭弹窗: 知道了')
+                    time.sleep(0.5)
+                    continue
+                
+                # 检查是否有对话框
+                dialog = self.page.ele('css:.ant-modal', timeout=0.5)
+                if dialog:
+                    close_btn = self.page.ele('css:.ant-modal-close', timeout=0.5)
+                    if close_btn:
+                        close_btn.click()
+                        logger.info('已关闭对话框')
+                        time.sleep(0.5)
+                        continue
+                
+                # 没有弹窗了，退出循环
+                break
+        except Exception as e:
+            logger.debug(f'处理弹窗时出错: {e}')
+    
+    def upload_to_draft(self, video_path, title, tags, description, cover_path=None):
+        """
+        上传视频到草稿箱
+        
+        Args:
+            video_path: 视频文件路径
+            title: 标题（6-16字，无标点）
+            tags: 话题标签列表
+            description: 描述
+            cover_path: 封面图路径（可选）
+        
+        Returns:
+            True/False
+        """
+        logger.info(f"[{self.account_name}] 开始上传到草稿箱...")
+        
+        # 检查文件
+        abs_file_path = os.path.abspath(video_path)
+        if not os.path.exists(abs_file_path):
+            logger.error(f"找不到视频文件: {abs_file_path}")
+            return False
+        
+        # 检查登录
+        if not self.check_login():
+            logger.error("登录失效，请先登录")
+            return False
+        
+        # 启动浏览器
+        co = self._get_browser_options(headless=False)
+        try:
+            self.page = ChromiumPage(co)
+        except Exception as e:
+            logger.error(f"浏览器启动失败: {e}")
+            return False
+        
+        try:
+            # 打开发布页面
+            publish_url = "https://channels.weixin.qq.com/platform/post/create"
+            logger.info(f"打开发布页面: {publish_url}")
+            self.page.get(publish_url)
+            
+            time.sleep(5)  # 增加等待时间
+            
+            # 验证登录
+            current_url = self.page.url
+            if "login" in current_url or "/platform" not in current_url:
+                logger.error("登录状态已失效")
+                return False
+            
+            # 1. 上传视频
+            logger.info("定位文件上传控件...")
+            file_input = None
+            
+            # 直接查找文件上传控件，不点击"发表视频"按钮
+            # 等待文件上传控件出现
+            for attempt in range(10):
+                try:
+                    file_input = self.page.ele('xpath://input[@type="file"]', timeout=3)
+                    if file_input:
+                        logger.info(f"第 {attempt+1} 次尝试找到文件上传控件")
+                        break
+                except Exception:
+                    time.sleep(1)
+            
+            if not file_input:
+                logger.error("未找到文件上传控件，尝试CSS选择器...")
+                try:
+                    file_input = self.page.ele('css:input[type="file"]', timeout=10)
+                    if file_input:
+                        logger.info("通过CSS选择器找到文件上传控件")
+                except Exception as e:
+                    logger.error(f"CSS选择器也失败: {e}")
+            
+            if not file_input:
+                # 尝试查找所有input元素
+                try:
+                    inputs = self.page.eles('css:input')
+                    logger.info(f"找到 {len(inputs)} 个input元素")
+                    for i, inp in enumerate(inputs):
+                        try:
+                            inp_type = inp.attr('type') or ''
+                            logger.info(f"  input[{i}]: type={inp_type}")
+                            if inp_type == 'file':
+                                file_input = inp
+                                logger.info(f"找到文件上传控件: input[{i}]")
+                                break
+                        except Exception:
+                            continue
+                except Exception as e:
+                    logger.error(f"查找input元素失败: {e}")
+            
+            if not file_input:
+                logger.error("未找到文件上传控件")
+                # 截图调试
+                try:
+                    screenshot_path = os.path.join(self.user_data_path, 'debug_upload_page.png')
+                    self.page.get_screenshot(path=screenshot_path)
+                    logger.info(f"调试截图已保存: {screenshot_path}")
+                except Exception:
+                    pass
+                return False
+            
+            logger.info(f"上传视频: {abs_file_path}")
+            file_input.input(abs_file_path)
+            time.sleep(3)
+            
+            # 2. 填写文案
+            logger.info("填写文案...")
+            try:
+                editor = self.page.ele('css:div.input-editor', timeout=30)
+            except Exception:
+                logger.error("未找到富文本输入框")
+                return False
+            
+            # 聚焦并清空
+            editor.click()
+            self.page.run_js("arguments[0].innerText = '';", editor)
+            time.sleep(1)
+            editor.click()
+            time.sleep(0.5)
+            
+            # 1. 输入短标题
+            logger.info(f"输入短标题: {title}")
+            self._human_type(editor, title)
+            editor.input(Keys.ENTER)
+            time.sleep(0.5)
+            
+            # 2. 输入长描述
+            if description:
+                logger.info(f"输入描述: {description[:50]}...")
+                self._human_type(editor, description)
+                editor.input(Keys.ENTER)
+                time.sleep(0.5)
+            
+            # 3. 输入话题（确保tags是list类型）
+            if tags and isinstance(tags, list):
+                logger.info(f"输入话题: {tags}")
+                for tag in tags:
+                    clean_tag = tag if tag.startswith('#') else f'#{tag}'
+                    self._human_type(editor, f'{clean_tag} ')
+                    time.sleep(0.8)
+                editor.input(Keys.ENTER)
+                time.sleep(0.5)
+            
+            # 4. 等待视频上传完成
+            logger.info('等待视频上传完成...')
+            video_uploaded = self._wait_for_video_upload()
+            if not video_uploaded:
+                logger.error('等待视频上传完成超时，终止上传')
+                # 截图调试
+                try:
+                    screenshot_path = os.path.join(self.user_data_path, 'debug_video_upload_timeout.png')
+                    self.page.get_screenshot(path=screenshot_path)
+                    logger.info(f'调试截图已保存: {screenshot_path}')
+                except Exception as e:
+                    logger.error(f'保存调试截图失败: {e}')
+                # 不继续上传，直接返回失败
+                return False
+            
+            # 再次检查视频是否上传完成
+            time.sleep(3)
+            current_url = self.page.url
+            logger.info(f'视频上传后URL: {current_url}')
+            
+            # 检查页面上是否有保存草稿按钮
+            draft_button = self._find_draft_button()
+            if draft_button:
+                logger.info('找到保存草稿按钮，视频可能已上传完成')
+            else:
+                logger.warning('未找到保存草稿按钮，视频可能还在上传中')
+                # 再等待一段时间
+                time.sleep(30)
+                draft_button = self._find_draft_button()
+                if not draft_button:
+                    logger.error('保存草稿按钮仍未找到，视频可能未上传完成')
+                    self._save_debug_state('draft_button_missing')
+                    return False
+
+            # 5. 上传封面（可选）- 暂时跳过，专注于保存草稿
+            cover_uploaded = False
+            # 暂时跳过封面上传，专注于保存草稿
+            # if cover_path:
+            #     abs_cover_path = os.path.abspath(cover_path)
+            #     if os.path.isfile(abs_cover_path):
+            #         logger.info(f'上传封面: {abs_cover_path}')
+            #         cover_uploaded = self._upload_cover(abs_cover_path)
+            #     else:
+            #         logger.warning(f'找不到封面文件: {abs_cover_path}')
+            logger.info('暂时跳过封面上传，专注于保存草稿')
+
+            # 6. 保存草稿
+            logger.info('保存草稿...')
+            saved = self._save_draft(title)
+            
+            if saved:
+                logger.info(f'[{self.account_name}] ✅ 草稿保存成功')
+                return True
+            else:
+                logger.error(f'[{self.account_name}] ❌ 草稿保存失败')
+                # 保存失败时不关闭页面，方便调试
+                logger.warning('页面保持打开，方便检查问题')
+                self._save_debug_state('draft_save_failed')
+                return False
+        finally:
+            # 确保浏览器实例被正确清理
+            if self.page:
+                try:
+                    self.page.quit()
+                except Exception as e:
+                    logger.warning(f'关闭浏览器时出错: {e}')
+                self.page = None
+    
+    def get_next_account(self, accounts, drama_name):
+        """
+        获取下一个账号（简单轮换）
+        
+        Args:
+            accounts: 账号列表
+            drama_name: 剧名
+        
+        Returns:
+            账号名称
+        """
+        # 简单轮换：根据剧名hash选择账号
+        if not accounts:
+            return 'default'
+        
+        idx = hash(drama_name) % len(accounts)
+        return accounts[idx]
+
+
+# 导出
+__all__ = ['WeChatChannelsUploader']

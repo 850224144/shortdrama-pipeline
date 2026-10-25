@@ -1,0 +1,188 @@
+import sys
+import types
+import unittest
+from pathlib import Path
+from unittest.mock import Mock, patch
+
+
+try:
+    import DrissionPage  # noqa: F401
+except ModuleNotFoundError:
+    drission_page = types.ModuleType('DrissionPage')
+    drission_page.__path__ = []
+
+    class FakeChromiumOptions:
+        def __init__(self):
+            self.arguments = []
+
+        def set_paths(self, **kwargs):
+            self.paths = kwargs
+
+        def set_argument(self, value):
+            self.arguments.append(value)
+
+        def set_user_agent(self, value):
+            self.user_agent = value
+
+    drission_page.ChromiumOptions = FakeChromiumOptions
+    drission_page.ChromiumPage = object
+    common = types.ModuleType('DrissionPage.common')
+    common.Keys = types.SimpleNamespace(ENTER='ENTER')
+    sys.modules['DrissionPage'] = drission_page
+    sys.modules['DrissionPage.common'] = common
+
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+from wechat_uploader import WeChatChannelsUploader
+
+
+class FakeElement:
+    def __init__(self, text='', visible=True, attrs=None):
+        self.text = text
+        self.visible = visible
+        self.attrs = attrs or {}
+        self.click_count = 0
+        self.input_value = None
+
+    def is_displayed(self):
+        return self.visible
+
+    def attr(self, name):
+        return self.attrs.get(name)
+
+    def click(self):
+        self.click_count += 1
+
+    def input(self, value):
+        self.input_value = value
+
+
+class FakePage:
+    def __init__(self, matches=None, selectors=None, js_result=None):
+        self.matches = matches or {}
+        self.selectors = selectors or {}
+        self.js_result = js_result
+        self.js_calls = []
+        self.url = 'https://channels.weixin.qq.com/platform/post/create'
+
+    def eles(self, selector):
+        return self.selectors.get(selector, self.matches.get(selector, []))
+
+    def ele(self, selector, timeout=None):
+        return self.selectors.get(selector)
+
+    def run_js(self, script, *args):
+        self.js_calls.append(script)
+        return self.js_result
+
+
+class WeChatUploaderTests(unittest.TestCase):
+    def make_uploader(self):
+        uploader = object.__new__(WeChatChannelsUploader)
+        uploader.account_name = 'test'
+        uploader.user_data_path = str(Path(__file__).parent)
+        uploader.page = FakePage()
+        return uploader
+
+    def test_headful_browser_starts_maximized(self):
+        uploader = self.make_uploader()
+        options = uploader._get_browser_options(headless=False)
+        self.assertIn('--start-maximized', options.arguments)
+        self.assertNotIn('--headless=new', options.arguments)
+
+    def test_headless_login_check_does_not_request_window_maximize(self):
+        uploader = self.make_uploader()
+        options = uploader._get_browser_options(headless=True)
+        self.assertIn('--headless=new', options.arguments)
+        self.assertNotIn('--start-maximized', options.arguments)
+
+    def test_visible_text_lookup_skips_hidden_matches_and_prefers_exact(self):
+        hidden = FakeElement('保存草稿', visible=False)
+        partial = FakeElement('保存草稿并退出')
+        exact = FakeElement('保存草稿')
+        page = FakePage(matches={'text:保存草稿': [hidden, partial, exact]})
+        uploader = self.make_uploader()
+        uploader.page = page
+
+        self.assertIs(uploader._find_visible_text_element(('保存草稿',)), exact)
+
+    def test_wait_for_upload_rechecks_disabled_publish_action(self):
+        disabled = FakeElement('发表', attrs={'class': 'weui-desktop-btn_disabled'})
+        enabled = FakeElement('发表')
+        uploader = self.make_uploader()
+        uploader._scroll_page_to_bottom = lambda: None
+        uploader._find_publish_button = Mock(side_effect=[disabled, enabled])
+
+        with patch('wechat_uploader.time.sleep'):
+            self.assertIs(uploader._wait_for_video_upload(timeout=2), enabled)
+
+    def test_scroll_uses_native_api_and_brings_draft_action_into_view(self):
+        uploader = self.make_uploader()
+        calls = []
+        uploader.page.scroll = types.SimpleNamespace(to_bottom=lambda: calls.append('bottom'))
+        uploader._scroll_page_to_bottom()
+
+        script = uploader.page.js_calls[0]
+        self.assertEqual(calls, ['bottom'])
+        self.assertIn("draft.scrollIntoView({block: 'center'", script)
+
+    def test_draft_button_lookup_ignores_hidden_and_disabled_buttons(self):
+        hidden = FakeElement('保存草稿', visible=False)
+        disabled = FakeElement('保存草稿', attrs={'class': 'weui-desktop-btn_disabled'})
+        page = FakePage(
+            matches={'text:保存草稿': [hidden, disabled]},
+            selectors={'tag:button': [hidden, disabled]},
+        )
+        uploader = self.make_uploader()
+        uploader.page = page
+
+        self.assertIsNone(uploader._find_draft_button())
+
+    def test_draft_button_lookup_returns_visible_enabled_button(self):
+        hidden = FakeElement('保存草稿', visible=False)
+        visible = FakeElement('保存草稿')
+        page = FakePage(
+            matches={'text:保存草稿': [hidden, visible]},
+            selectors={'tag:button': [hidden, visible]},
+        )
+        uploader = self.make_uploader()
+        uploader.page = page
+
+        self.assertIs(uploader._find_draft_button(), visible)
+
+    def test_draft_button_lookup_uses_marked_visible_dom_button(self):
+        visible = FakeElement('保存草稿')
+        page = FakePage(
+            selectors={'css:[data-codex-draft-button="true"]': visible},
+        )
+        uploader = self.make_uploader()
+        uploader.page = page
+
+        self.assertIs(uploader._find_draft_button(), visible)
+
+    def test_save_draft_requires_platform_confirmation(self):
+        button = FakeElement('保存草稿')
+        uploader = self.make_uploader()
+        uploader._find_visible_text_element = lambda labels: None
+        uploader._find_draft_button = lambda: button
+        uploader._scroll_page_to_bottom = lambda: None
+        uploader._wait_for_draft_saved = lambda previous_url, title: False
+        uploader._save_debug_state = lambda stage: None
+
+        self.assertFalse(uploader._save_draft('示例标题'))
+        self.assertEqual(button.click_count, 1)
+
+    def test_save_draft_succeeds_when_platform_confirms(self):
+        button = FakeElement('保存草稿')
+        uploader = self.make_uploader()
+        uploader._find_visible_text_element = lambda labels: None
+        uploader._find_draft_button = lambda: button
+        uploader._scroll_page_to_bottom = lambda: None
+        uploader._wait_for_draft_saved = lambda previous_url, title: True
+
+        self.assertTrue(uploader._save_draft('示例标题'))
+        self.assertEqual(button.click_count, 1)
+
+
+if __name__ == '__main__':
+    unittest.main()
