@@ -253,17 +253,24 @@ class StateManager:
 
 class LinkExtractor:
     """链接提取器"""
-    
+
     BAIDU_PAN_PATTERN = r'https?://pan\.baidu\.com/s/[a-zA-Z0-9]+(?:\?pwd=[a-zA-Z0-9]+)?'
-    
+
     @classmethod
     def extract(cls, message):
-        """从消息中提取百度网盘链接"""
+        """从消息中提取百度网盘链接，支持URL内pwd和正文提取码两种形式"""
         matches = re.findall(cls.BAIDU_PAN_PATTERN, message)
-        
+
+        # 正文里的提取码（"提取码：9999" / "提取码 9999" / "pwd:9999"）
+        body_pwd = ''
+        m = re.search(r'提取码[:：\s]*([a-zA-Z0-9]{4})', message) \
+            or re.search(r'\bpwd[:：=]\s*([a-zA-Z0-9]{4})\b', message, re.I)
+        if m:
+            body_pwd = m.group(1)
+
         results = []
         seen = set()
-        
+
         for match in matches:
             link_id = re.search(r'pan\.baidu\.com/s/([a-zA-Z0-9]+)', match)
             if link_id:
@@ -271,14 +278,9 @@ class LinkExtractor:
                 if link_id not in seen:
                     seen.add(link_id)
                     pwd = re.search(r'pwd=([a-zA-Z0-9]+)', match)
-                    pwd = pwd.group(1) if pwd else ''
-                    
-                    results.append({
-                        'link': match,
-                        'link_id': link_id,
-                        'pwd': pwd
-                    })
-        
+                    pwd = pwd.group(1) if pwd else body_pwd
+                    results.append({'link': match, 'link_id': link_id, 'pwd': pwd})
+
         return results
 
 
@@ -545,7 +547,12 @@ class PipelineProcessor:
         """手动切片 - 从素材目录直接切片"""
         if not drama_name:
             return {'status': 'failed', 'error': '请输入剧名'}
-        
+
+        # 路径遍历防护：剧名不允许含路径分隔符/..
+        if any(ch in drama_name for ch in ('/', '\\', ':', '*', '?', '"', '<', '>', '|')) \
+           or '..' in drama_name:
+            return {'status': 'failed', 'error': f'剧名含非法字符: {drama_name}'}
+
         self.logger.log('system', 'INFO', f'手动切片：{drama_name}')
         
         # 构建素材目录路径

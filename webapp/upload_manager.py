@@ -93,18 +93,28 @@ class UploadManager:
                      account: str = None, version: int = 1) -> Dict:
         """添加到上传队列"""
         with self.lock:
-            # 检查是否已存在
+            # 检查是否已存在（按 account 去重，两个号可以发同一部剧）
+            _account = account or '福桃说剧'
             with sqlite3.connect(self.db_path) as conn:
                 cursor = conn.cursor()
                 cursor.execute('''
                     SELECT id FROM upload_records 
-                    WHERE drama_name=? AND version=? AND status IN ('pending', 'uploading')
-                ''', (drama_name, version))
+                    WHERE drama_name=? AND version=? AND account=? AND status IN ('pending', 'uploading')
+                ''', (drama_name, version, _account))
                 existing = cursor.fetchone()
             
             if existing:
-                return {'status': 'failed', 'error': f'V{version}已在队列中'}
+                return {'status': 'failed', 'error': f'[{_account}] V{version}已在队列中'}
             
+            # topics 统一成 list 存内存，db 里 json.dumps 存（避免 list 被 str 化成 "[...]"）
+            if isinstance(topics, str):
+                topics_list = [t.strip() for t in topics.split(',') if t.strip()]
+            elif isinstance(topics, list):
+                topics_list = topics
+            else:
+                topics_list = []
+            topics_db = json.dumps(topics_list, ensure_ascii=False)
+
             # 插入数据库
             with sqlite3.connect(self.db_path) as conn:
                 cursor = conn.cursor()
@@ -112,7 +122,7 @@ class UploadManager:
                     INSERT INTO upload_records 
                     (drama_name, version, video_path, cover_path, title, description, topics, account, status)
                     VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'pending')
-                ''', (drama_name, version, video_path, cover_path, title, description, topics, account or '福桃说剧'))
+                ''', (drama_name, version, video_path, cover_path, title, description, topics_db, _account))
                 record_id = cursor.lastrowid
             
             # 添加到内存队列
@@ -124,8 +134,8 @@ class UploadManager:
                 'cover_path': cover_path,
                 'title': title,
                 'description': description,
-                'topics': topics,
-                'account': account or '福桃说剧',
+                'topics': topics_list,
+                'account': _account,
                 'status': 'pending',
                 'retry_count': 0
             }
