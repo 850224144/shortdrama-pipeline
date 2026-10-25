@@ -610,10 +610,10 @@ def get_files():
         if not os.path.exists(dir_path):
             return jsonify({'files': [], 'error': f'目录不存在: {dir_path}'})
         
-        # 路径遍历安全检查 - 只允许访问output目录
-        allowed_dir = os.path.abspath(CONFIG['output_dir'])
-        requested_dir = os.path.abspath(dir_path)
-        if not requested_dir.startswith(allowed_dir):
+        # 路径遍历安全检查 - 只允许访问output目录（用 realpath + 分隔符边界，防 output_备份 这类兄弟目录绕过）
+        allowed_dir = os.path.realpath(CONFIG['output_dir'])
+        requested_dir = os.path.realpath(dir_path)
+        if requested_dir != allowed_dir and not requested_dir.startswith(allowed_dir + os.sep):
             return jsonify({'files': [], 'error': f'无权访问: {requested_dir} 不在 {allowed_dir} 中'}), 403
         
         files = os.listdir(dir_path)
@@ -746,4 +746,4 @@ if __name__ == '__main__':
     print(f'短剧工坊 Web服务启动在 http://localhost:8765')
     print(f'仪表盘：http://localhost:8765')
     print(f'演示：http://localhost:8765/api/demo')
-    socketio.run(app, host='0.0.0.0', port=8765, debug=False, allow_unsafe_werkzeug=True)
+    socketio.run(app, host='127.0.0.1', port=8765, debug=False, allow_unsafe_werkzeug=True)

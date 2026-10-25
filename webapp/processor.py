@@ -36,7 +36,7 @@ CONFIG = {
     'asr_script': r'D:\短剧工坊\webapp\transcribe_dir.py',
     
     'download': {
-        'max_workers': 5,
+        'max_workers': 2,  # 同一百度账号CLI并发不宜过高，5会冲突
         'max_retries': 3,
         'timeout': 1800,
         'transfer_timeout': 120,
@@ -183,7 +183,14 @@ class StateManager:
             
             return state
         except Exception as e:
-            # 如果加载失败，返回默认状态
+            # JSON 损坏：备份原文件再返回空，避免静默丢历史
+            print(f"[WARN] 状态文件损坏({self.state_file}): {e}")
+            try:
+                bak = self.state_file + f'.broken.{int(time.time())}'
+                shutil.copy(self.state_file, bak)
+                print(f"[WARN] 已备份损坏文件到: {bak}")
+            except Exception:
+                pass
             return {
                 'completed': [],
                 'failed': [],
@@ -324,19 +331,16 @@ class PipelineProcessor:
         return re.sub(r'[^\u4e00-\u9fa5a-zA-Z]', '', name)
     
     def is_fuzzy_duplicate(self, name1, name2):
-        """模糊去重"""
+        """模糊去重：用 SequenceMatcher ratio>0.85，避免"归乡检察官"和"归乡检察官2"误判"""
+        import difflib
         norm1 = self.normalize_name(name1)
         norm2 = self.normalize_name(name2)
-        
-        if abs(len(norm1) - len(norm2)) <= 2 and (norm1 in norm2 or norm2 in norm1):
+        if not norm1 or not norm2:
+            return False
+        if norm1 == norm2:
             return True
-        
-        if abs(len(norm1) - len(norm2)) <= 1:
-            match = sum(1 for a, b in zip(norm1, norm2) if a == b)
-            if match >= len(norm1) - 2:
-                return True
-        
-        return False
+        ratio = difflib.SequenceMatcher(None, norm1, norm2).ratio()
+        return ratio >= 0.85
     
     def should_process(self, drama_name, src_dir, out_dir):
         """检查是否应该处理"""
@@ -2024,8 +2028,9 @@ class PipelineProcessor:
     
     def _add_cover_badge(self, cover_path, version_idx):
         """给封面加角标"""
-        badges = {1: "第1集", 2: "第2集", 3: "第3集", 4: "第4集", 5: "完整版", 6: "大结局"}
-        badge_text = badges.get(version_idx, f"第{version_idx}集")
+        badges = {1: "第1集", 2: "第2集", 3: "第3集", 4: "第4集", 5: "完整版",
+                  6: "大结局", 7: "加长版", 8: "精编版"}
+        badge_text = badges.get(version_idx, f"精编版V{version_idx}")
         
         try:
             cmd = [
@@ -2059,6 +2064,15 @@ class PipelineProcessor:
     def _write_report(self, out_dir, drama_name, count, cut_method='未知'):
         """写交付报告 - 从 edl_config_v{i}.json 读取实际文案"""
         try:
+            # 扫描 out_dir 里实际存在的 mp4，建 V编号→文件名 映射，不再写死
+            v_to_file = {}
+            try:
+                for f in os.listdir(out_dir):
+                    m = re.search(r'V(\d+)', f)
+                    if m and f.endswith('.mp4') and 'test' not in f.lower():
+                        v_to_file[int(m.group(1))] = f
+            except Exception:
+                pass
             report = f"""# {drama_name} 交付报告
 - 账号：{self.assign_account(drama_name)}
 - 切完时间：{datetime.now().strftime('%Y-%m-%d %H:%M')}
@@ -2095,19 +2109,21 @@ class PipelineProcessor:
                     else:
                         topics_str = f'#{topics}'
                     
+                    fname = v_to_file.get(i+1, f'{drama_name}_V{i+1}.mp4')
                     report += f"**标题：** {title}\n"
                     report += f"**描述：** {description}\n"
                     report += f"**话题：** {topics_str}\n"
-                    report += f"**文件：** {drama_name}_{i+1}_逆袭_去重版.mp4\n"
-                    report += f"**封面：** covers/{drama_name}_{i+1}_封面.jpg\n"
+                    report += f"**文件：** {fname}\n"
+                    report += f"**封面：** covers/{os.path.splitext(fname)[0]}_封面.jpg\n"
                     
                 except Exception as e:
                     # 如果读取配置失败，使用默认值
+                    fname = v_to_file.get(i+1, f'{drama_name}_V{i+1}.mp4')
                     report += f"**标题：** 待补充\n"
                     report += f"**描述：** 待补充\n"
                     report += f"**话题：** #短剧 #短剧推荐 #追剧 #热门短剧 #好剧推荐\n"
-                    report += f"**文件：** {drama_name}_{i+1}_逆袭_去重版.mp4\n"
-                    report += f"**封面：** covers/{drama_name}_{i+1}_封面.jpg\n"
+                    report += f"**文件：** {fname}\n"
+                    report += f"**封面：** covers/{os.path.splitext(fname)[0]}_封面.jpg\n"
                     self.logger.log('system', 'WARN', f'读取V{i+1}配置失败：{str(e)}')
             
             with open(os.path.join(out_dir, f"{drama_name}_交付报告.md"), "w", encoding="utf-8") as f:
