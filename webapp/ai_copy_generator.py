@@ -8,7 +8,10 @@ import os
 import sys
 import json
 import time
+import logging
 import requests
+
+logger = logging.getLogger('AICopyGenerator')
 
 # API 配置
 SENSENOVA_API_BASE = 'https://token.sensenova.cn/v1'
@@ -27,17 +30,17 @@ class AICopyGenerator:
         self.cache = {}  # 缓存已生成的文案
     
     def generate_copy(self, drama_name, version_idx, version_hook, 
-                      plot_summary='', drama_genre=''):
+                      plot_summary='', drama_genre='', quotes=None):
         """
         生成完整文案（标题、描述、话题）
-        
+
         Args:
             drama_name: 剧名
             version_idx: 版本索引 (1, 2, 3...)
             version_hook: 钩子主题 (逆袭、打脸、真相...)
-            plot_summary: 剧情概要（可选）
+            plot_summary: 剧情概要（可选，应来自ASR金句，不要编）
             drama_genre: 题材类型（可选）
-        
+            quotes: list[str] ASR抽出的真实高光台词（可选，强烈建议传）
         Returns:
             {
                 'title': '标题（6-16字，无标点）',
@@ -45,6 +48,7 @@ class AICopyGenerator:
                 'hashtags': ['#话题1', '#话题2', ...]
             }
         """
+        quotes = quotes or []
         # 检查缓存
         cache_key = f"{drama_name}_{version_idx}_{version_hook}"
         if cache_key in self.cache:
@@ -52,7 +56,7 @@ class AICopyGenerator:
         
         # 构建提示词
         prompt = self._build_prompt(drama_name, version_idx, version_hook, 
-                                    plot_summary, drama_genre)
+                                    plot_summary, drama_genre, quotes)
         
         try:
             # 调用 AI API
@@ -68,44 +72,49 @@ class AICopyGenerator:
             return result
             
         except Exception as e:
-            print(f"[AI] 文案生成失败: {e}")
-            # 返回模板文案作为兜底
+            logger.error(f'[AI] 文案生成失败，返回兜底: {e}')
             return self._generate_template_copy(drama_name, version_idx, version_hook)
     
     def _build_prompt(self, drama_name, version_idx, version_hook, 
-                      plot_summary, drama_genre):
+                      plot_summary, drama_genre, quotes=None):
         """构建 AI 提示词"""
-        
+        quotes = quotes or []
+        quotes_block = ''
+        if quotes:
+            quotes_block = '\n'.join(f'  - {q}' for q in quotes[:5])
+            quotes_block = f'''
+【本剧真实高光台词（ASR提取，请基于这些台词写，不要编造剧情）】
+{quotes_block}
+'''
+
         prompt = f"""你是一个专业的短剧文案策划师。请为以下短剧生成吸引人的文案。
 
 【剧集信息】
 - 剧名: {drama_name}
 - 题材: {drama_genre or '短剧'}
 - 本版钩子: {version_hook}
-- 剧情概要: {plot_summary or '暂无'}
+{quotes_block}
+- 补充信息: {plot_summary or '无'}
 
 【生成要求】
 1. 标题（title）:
    - 6-16个字
    - 不能有标点符号
-   - 吸引眼球，制造悬念
+   - 优先从上面的高光台词里提炼，不要编造人物身份（不要写"隐藏千金"这种我们不知道的剧情）
    - 体现本版钩子主题
 
 2. 描述（description）:
    - 50-100个字
-   - 剧情概要
-   - 制造悬念，引导观看
+   - 基于真实高光台词制造悬念，不要编造"恶霸/豪门/复仇"等具体剧情设定
    - 不能包含剧名
 
 3. 话题（hashtags）:
    - 3-5个话题
    - 每个话题以#开头
    - 包含热门话题和精准话题
-   - 不同版本的话题要有差异化
 
 【版本差异化】
 - 这是第 {version_idx} 个版本
-- 请生成与其他版本不同的文案
 - 突出 {version_hook} 主题
 
 【输出格式】
@@ -182,16 +191,8 @@ class AICopyGenerator:
         # 验证描述
         description = result.get('description', '')
         if not description or len(description) < 30:
-            description_templates = {
-                '逆袭': f"{drama_name}精彩剧情，曾经被欺压的她是隐藏千金，当恶霸再次挑衅时，真相即将揭开...",
-                '打脸': f"豪门千金vs恶霸，一场精彩对决即将上演，打脸瞬间不容错过，快来见证精彩反转！",
-                '真相': f"所有阴谋即将暴露，真相揭开时全场震惊，剧情即将迎来大反转，快来见证真相时刻！",
-                '反转': f"你以为的结局并非真相，剧情反转烧脑至极，快来见证精彩瞬间，意想不到的结局！",
-                '高潮': f"高能预警！剧情高潮来袭，逆袭时刻燃爆全场，精彩不容错过，快来感受精彩瞬间！",
-                '泪目': f"催泪剧情来袭，虐心瞬间泪目全场，快来感受这场情感风暴，精彩内容不容错过！"
-            }
-            description = description_templates.get(version_hook, 
-                                                   f"{drama_name}精彩剧情，不容错过，快来观看！")
+            # 兜底：只基于hook和剧名，不编造"隐藏千金/恶霸"这类具体剧情
+            description = self._generic_description(drama_name, version_hook, quotes=None)
         
         # 验证话题
         hashtags = result.get('hashtags', [])
@@ -204,6 +205,17 @@ class AICopyGenerator:
             'hashtags': hashtags[:5]  # 最多5个话题
         }
     
+    def _generic_description(self, drama_name, version_hook, quotes=None):
+        """通用兜底描述：只基于hook，不编造人物身份/剧情。"""
+        quotes = quotes or []
+        hook_text = {
+            '逆袭': '逆袭时刻', '打脸': '打脸瞬间', '真相': '真相揭开',
+            '反转': '高能反转', '高潮': '高潮片段', '泪目': '泪目名场面',
+        }.get(version_hook, '精彩片段')
+        if quotes:
+            return f'{hook_text}——"{quotes[0]}"，后续剧情更精彩，一口气看完全集。'
+        return f'{drama_name}精选{hook_text}，全程高能无尿点，刷到就是缘分，快来追完它。'
+
     def _generate_title(self, drama_name, version_hook):
         """模板生成标题（AI失败时兜底）"""
         
@@ -240,31 +252,11 @@ class AICopyGenerator:
         return hashtag_templates.get(version_hook, ['#短剧', '#短剧推荐', '#热门'])
     
     def _generate_template_copy(self, drama_name, version_idx, version_hook):
-        """生成模板文案（AI完全失败时兜底）"""
-        
-        # 生成标题
+        """生成模板文案（AI完全失败时兜底）——只基于剧名+hook，不编造剧情。"""
         title = self._generate_title(drama_name, version_hook)
-        
-        # 生成描述
-        description_templates = {
-            '逆袭': f"曾经被欺压的她是隐藏千金，当恶霸再次挑衅时，真相即将揭开...",
-            '打脸': f"豪门千金vs恶霸，一场精彩对决即将上演，打脸瞬间不容错过！",
-            '真相': f"所有阴谋即将暴露，真相揭开时全场震惊，剧情即将迎来大反转...",
-            '反转': f"你以为的结局并非真相，剧情反转烧脑至极，快来见证精彩瞬间！",
-            '高潮': f"高能预警！剧情高潮来袭，逆袭时刻燃爆全场，精彩不容错过！",
-            '泪目': f"催泪剧情来袭，虐心瞬间泪目全场，快来感受这场情感风暴！"
-        }
-        description = description_templates.get(version_hook, 
-                                               f"{drama_name}精彩剧情，不容错过！")
-        
-        # 生成话题
+        description = self._generic_description(drama_name, version_hook)
         hashtags = self._generate_hashtags(version_hook)
-        
-        return {
-            'title': title,
-            'description': description,
-            'hashtags': hashtags
-        }
+        return {'title': title, 'description': description, 'hashtags': hashtags}
     
     def test_api(self):
         """测试 API 连接"""

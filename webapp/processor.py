@@ -1302,8 +1302,16 @@ class PipelineProcessor:
             
             # 后处理
             self._update_state('processing', drama_name, 80, '后处理中')
+            processed_videos = []
             for i, video in enumerate(best_videos):
-                self._post_process(video['path'], video['final_path'], src_dir=src_dir, drama_name=drama_name)
+                ok = self._post_process(video['path'], video['final_path'],
+                                        src_dir=src_dir, drama_name=drama_name)
+                if ok and os.path.exists(video['final_path']):
+                    processed_videos.append(video)
+                else:
+                    self.logger.log(drama_name, 'WARN',
+                        f'V{i+1} 后处理失败，已跳过（不裸发）')
+            best_videos = processed_videos
             
             # 清理测试版本
             self._cleanup_test_versions(out_dir)
@@ -1609,13 +1617,16 @@ class PipelineProcessor:
         for v_idx in range(min(count, len(ep_nums))):
             # 使用AI生成文案
             hook = keywords[v_idx % len(keywords)]
+            # 把ASR抽出的真实金句喂给AI，不再编假plot_summary
+            quote = long_titles[v_idx % len(long_titles)] if long_titles else ''
             try:
                 ai_result = ai_copy.generate_copy(
                     drama_name=drama_name,
                     version_idx=v_idx + 1,
                     version_hook=hook,
-                    plot_summary=f'{drama_name}第{v_idx+1}个版本，{hook}主题',
-                    drama_genre=''
+                    plot_summary=f'本剧高光台词参考：{quote}' if quote else '',
+                    drama_genre='',
+                    quotes=long_titles[:5]
                 )
                 titles.append(ai_result['title'])
                 descriptions.append(ai_result['description'])
@@ -1816,7 +1827,8 @@ class PipelineProcessor:
         valid_videos = []
         for v in videos:
             duration = self._get_video_duration(v.get("path", ""))
-            if 110 <= duration <= 130:
+            # 业务要求成片>=210秒(3.5分钟)，原来错写成110-130，会把短的当最佳
+            if 210 <= duration <= 300:
                 v["duration"] = duration
                 valid_videos.append(v)
         
@@ -1878,18 +1890,23 @@ class PipelineProcessor:
         
         result = subprocess.run(cmd, capture_output=True, timeout=600)
         if result.returncode != 0:
-            self.logger.log('system', 'WARN', f'后处理失败：{result.stderr.decode("utf-8", errors="ignore")[:200]}')
-            # 后处理失败时，复制原文件作为输出
+            stderr_text = result.stderr.decode("utf-8", errors="ignore")[:300]
+            self.logger.log('system', 'ERROR', f'后处理失败(抗查重未完成，跳过此条不裸发): {stderr_text}')
+            # 不再 copy 原文件——裸视频直接发会被平台判重。
+            # 删掉半成品 output，让外层跳过这条。
             try:
-                shutil.copy(input_path, output_path)
+                if os.path.exists(output_path):
+                    os.remove(output_path)
             except Exception:
                 pass
-        
+            return False
+
         # 生成封面
-        self._generate_cover(input_path, output_path, 
+        self._generate_cover(input_path, output_path,
                            drama_name=drama_name,
                            src_dir=src_dir,
                            version_idx=version_idx)
+        return True
     
     def _get_version_idx(self, filepath):
         """从文件名获取版本序号"""
