@@ -26,7 +26,7 @@ from pathlib import Path
 from datetime import datetime
 
 # 配置
-PCS_PATH = r"D:\短剧工坊\tools\BaiduPCS-Go-v4.0.2-windows-x64\BaiduPCS-Go.exe"
+PCS_PATH = r"D:\短剧工坊\素材\BaiduPCS-Go\BaiduPCS-Go-v4.0.2-windows-x64\BaiduPCS-Go.exe"
 FFMPEG = r"D:\ffmpeg-master-latest-win64-gpl-shared\bin\ffmpeg.exe"
 SOURCE_ROOT = r"E:\短剧素材"
 OUTPUT_ROOT = r"D:\短剧工作区\output"

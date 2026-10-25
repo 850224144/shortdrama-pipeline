@@ -475,8 +475,9 @@ class PipelineProcessor:
         
         try:
             # 检查是否是手动切片模式
-            if message.startswith('/cut ') or message.startswith('/切片 '):
-                return self.manual_cut(message[5:].strip())
+            for prefix in ('/cut ', '/切片 '):
+                if message.startswith(prefix):
+                    return self.manual_cut(message[len(prefix):].strip())
             
             # 提取链接
             links = LinkExtractor.extract(message)
@@ -710,6 +711,7 @@ class PipelineProcessor:
                 transfer_cmd,
                 capture_output=True,
                 text=True,
+                encoding="utf-8",
                 timeout=CONFIG['download']['transfer_timeout'],
                 cwd=os.path.dirname(CONFIG['baidupcs_path'])
             )
@@ -733,6 +735,7 @@ class PipelineProcessor:
                         move_cmd,
                         capture_output=True,
                         text=True,
+                        encoding="utf-8",
                         timeout=30,
                         cwd=os.path.dirname(CONFIG['baidupcs_path'])
                     )
@@ -798,6 +801,7 @@ class PipelineProcessor:
                 check_cmd,
                 capture_output=True,
                 text=True,
+                encoding="utf-8",
                 timeout=30,
                 cwd=os.path.dirname(CONFIG['baidupcs_path'])
             )
@@ -812,6 +816,7 @@ class PipelineProcessor:
                     move_cmd,
                     capture_output=True,
                     text=True,
+                    encoding="utf-8",
                     timeout=30,
                     cwd=os.path.dirname(CONFIG['baidupcs_path'])
                 )
@@ -825,6 +830,7 @@ class PipelineProcessor:
                         ls_cmd,
                         capture_output=True,
                         text=True,
+                        encoding="utf-8",
                         timeout=30,
                         cwd=os.path.dirname(CONFIG['baidupcs_path'])
                     )
@@ -849,6 +855,7 @@ class PipelineProcessor:
                                 mv_cmd,
                                 capture_output=True,
                                 text=True,
+                                encoding="utf-8",
                                 timeout=60,
                                 cwd=os.path.dirname(CONFIG['baidupcs_path'])
                             )
@@ -864,6 +871,7 @@ class PipelineProcessor:
                                     rm_cmd,
                                     capture_output=True,
                                     text=True,
+                                    encoding="utf-8",
                                     timeout=30,
                                     cwd=os.path.dirname(CONFIG['baidupcs_path'])
                                 )
@@ -877,20 +885,9 @@ class PipelineProcessor:
             target_dir = os.path.join(CONFIG['download_base_dir'], dir_name)
             os.makedirs(target_dir, exist_ok=True)
             
-            # 检查是否已下载完成
-            existing_files = self._scan_files_recursive(target_dir)
-            existing_mp4 = [f for f in existing_files if f.endswith('.mp4') and '.downloading' not in f]
-            if len(existing_mp4) >= CONFIG['download']['min_download_files']:
-                self.logger.log(dir_name, 'INFO', f'已下载{len(existing_mp4)}集，跳过下载')
-                return {
-                    'success': True,
-                    'downloaded_files': existing_files,
-                    'target_dir': target_dir,
-                    'drama_name': dir_name,
-                    'error': None,
-                    'transferred': True
-                }
-            
+            # 检查是否已下载完成：不再用固定阈值早退（半拉下载会被误判完成），
+            # 直接走 download 命令，它带 --overwrite=never，已下好的文件会自动跳过、续传剩余的。
+
             # 5. 从网盘下载
             download_cmd = [
                 CONFIG['baidupcs_path'], "download",
@@ -913,6 +910,7 @@ class PipelineProcessor:
                 download_cmd,
                 capture_output=True,
                 text=True,
+                encoding="utf-8",
                 timeout=CONFIG['download']['timeout'],
                 cwd=os.path.dirname(CONFIG['baidupcs_path'])
             )
@@ -930,7 +928,23 @@ class PipelineProcessor:
                 for f in downloaded_files[:20]:
                     size = os.path.getsize(f) / (1024*1024)
                     self.logger.log(dir_name, 'INFO', f'  ✓ {os.path.basename(f)} ({size:.1f}MB)')
-                
+
+                # 完整性校验：必须有 mp4，且每个 mp4 > 5MB（短剧单集远大于此，更小的是损坏/残留）
+                MIN_MP4_MB = 5
+                too_small = [f for f in mp4_files if os.path.getsize(f) < MIN_MP4_MB * 1024 * 1024]
+                if not mp4_files or too_small:
+                    self.logger.log(dir_name, 'ERROR',
+                        f'下载不完整：mp4={len(mp4_files)}个，其中{len(too_small)}个小于{MIN_MP4_MB}MB。'
+                        f'保留网盘备份待重试，不删除云端文件。')
+                    return {
+                        'success': False,
+                        'downloaded_files': [],
+                        'target_dir': target_dir,
+                        'drama_name': dir_name,
+                        'error': f'下载不完整：mp4={len(mp4_files)}，损坏{len(too_small)}',
+                        'transferred': True
+                    }
+
                 # 检查集数连续性
                 is_complete, missing_eps, max_ep, continuity_msg = self._check_episode_continuity(target_dir)
                 if is_complete:
@@ -950,6 +964,7 @@ class PipelineProcessor:
                         delete_cmd,
                         capture_output=True,
                         text=True,
+                        encoding="utf-8",
                         timeout=CONFIG['download']['delete_timeout'],
                         cwd=os.path.dirname(CONFIG['baidupcs_path'])
                     )
@@ -1043,6 +1058,7 @@ class PipelineProcessor:
                 ls_cmd,
                 capture_output=True,
                 text=True,
+                encoding="utf-8",
                 timeout=30,
                 cwd=os.path.dirname(CONFIG['baidupcs_path'])
             )
