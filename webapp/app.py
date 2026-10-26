@@ -57,7 +57,7 @@ class BatchCutManager:
     
     def __init__(self, processor, data_dir):
         self.processor = processor
-        self.data_dir = data_db_path
+        self.data_dir = data_dir
         self.queue = []  # 切片队列
         self.current_task = None  # 当前任务
         self.cutting = False  # 是否正在切片
