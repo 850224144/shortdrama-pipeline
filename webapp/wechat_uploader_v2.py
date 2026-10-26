@@ -171,7 +171,7 @@ class WeChatChannelsUploader:
             if not fi:
                 self._shot('no_file_input')
                 return {'status': 'failed', 'error': '未找到视频上传框'}
-            fi.upload(video_path)
+            fi.input(video_path)
             logger.info(f'已提交文件: {os.path.basename(video_path)}')
 
             # 2) 等上传完成（有头：最多 20 分钟）
