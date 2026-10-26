@@ -8,6 +8,7 @@ import os
 import sys
 import json
 import time
+import hashlib
 import logging
 import requests
 
@@ -82,7 +83,11 @@ class AICopyGenerator:
         self.model = SENSENOVA_MODEL
         self.enabled = bool(api_key)  # 未配置 key 时禁用，直接走模板兜底
         self.cache = {}  # 缓存已生成的文案
-        self._zhipu_disabled = False  # 智谱额度用尽后本会话内置 True，跳过备用模型
+        # 智谱熔断：不可用（额度/限流/鉴权失效）后本会话内置 True，跳过备用模型。
+        # 到 cooldown 后半开自动再试一次，所以额度恢复后无需改代码、无需重启 webapp。
+        self._zhipu_disabled = False
+        self._zhipu_disabled_at = 0.0
+        self._zhipu_fuse_cooldown = 900  # 秒
     
     def generate_copy(self, drama_name, version_idx, version_hook, 
                       plot_summary='', drama_genre='', quotes=None):
@@ -139,18 +144,18 @@ class AICopyGenerator:
                 logger.warning(f'[AI] SenseNova失败({e1})，试智谱GLM...')
                 if not ZHIPU_API_KEY:
                     raise  # 备用模型未配置，直接走模板兜底，不发无意义请求
-                if self._zhipu_disabled:
-                    raise  # 智谱额度用尽（本会话已确认），直接走模板兜底
+                if not self._zhipu_available():
+                    raise  # 智谱熔断中（未过冷却期），直接走模板兜底
                 try:
-                    result = self._parse_response(self._call_zhipu(prompt))
+                    result = self._call_zhipu_copy(prompt)
                 except Exception as e2:
-                    # 额度用尽/限流后每个版本都会白发一次注定失败的请求：
-                    # 本会话内直接禁用智谱，后续失败立即走模板兜底。
-                    # 重启 webapp 后自动恢复（额度充值后无需改代码）。
+                    # 额度用尽/限流/鉴权失效后，每个版本都会白发一次注定失败的请求：
+                    # 熔断后跳过备用模型走模板兜底，到冷却期后半开自动再试一次。
                     msg = str(e2)
-                    if any(k in msg for k in ('429', '1113', '1302', '余额', '额度', 'quota', 'balance')):
-                        self._zhipu_disabled = True
-                        logger.warning(f'[AI] 智谱不可用({msg[:80]})，本次运行内改用模板兜底')
+                    if self._trip_zhipu_fuse(msg):
+                        logger.warning(
+                            f'[AI] 智谱不可用({msg[:80]})，'
+                            f'{self._zhipu_fuse_cooldown // 60}分钟内改用模板兜底')
                     raise
 
             # 验证结果
@@ -244,6 +249,49 @@ class AICopyGenerator:
             return response.json()
         except requests.exceptions.RequestException as e:
             raise Exception(f"API 调用失败: {e}")
+
+    # 熔断关键字：限流/额度类 + 鉴权类。401 实测错误体为
+    # {'error': {'code': '401', 'message': '令牌已过期或验证不正确'}}（HTTP 401）
+    _ZHIPU_FUSE_KEYWORDS = ('429', '1113', '1302', '1001', '401',
+                            '余额', '额度', '令牌', 'quota', 'balance')
+
+    def _zhipu_available(self):
+        """智谱熔断状态：熔断后过冷却期自动半开，重新允许一次尝试。"""
+        if not self._zhipu_disabled:
+            return True
+        if time.time() - self._zhipu_disabled_at >= self._zhipu_fuse_cooldown:
+            self._zhipu_disabled = False
+            logger.warning('[AI] 智谱熔断已过冷却期，重新允许尝试')
+            return True
+        return False
+
+    def _trip_zhipu_fuse(self, msg):
+        """错误属于限流/额度/鉴权类则熔断；返回 True 表示本次触发了熔断。"""
+        if any(k in msg for k in self._ZHIPU_FUSE_KEYWORDS):
+            self._zhipu_disabled = True
+            self._zhipu_disabled_at = time.time()
+            return True
+        return False
+
+    def _call_zhipu_copy(self, prompt):
+        """调智谱，并按"标题 6-16 字"要求重试一次。
+
+        glm-4-flash 经常无视该要求（实测 3/3 都是 4 字标题）。若放任，
+        _validate_result 会静默把标题换成模板，而模板恰好是"恶霸/豪门千金"
+        这类提示词明确禁止的编造剧情——等于 AI 白跑还更差。
+        """
+        for attempt in (1, 2):
+            result = self._parse_response(self._call_zhipu(prompt))
+            title = (result.get('title') or '').strip()
+            if 6 <= len(title) <= 16:
+                return result
+            logger.warning(f'[AI] 智谱标题{len(title)}字不在6-16字：'
+                           f'{"重试一次" if attempt == 1 else "仍不合规，交 _validate_result 兜底"}')
+            if attempt == 1:
+                prompt = (prompt
+                          + f'\n\n【重要修正】你上次的标题只有 {len(title)} 个字，'
+                            f'这次标题必须严格写 6-16 个字，不要写这么短。')
+        return result
 
     def _call_zhipu(self, prompt):
         """智谱GLM-4-Flash备用"""
@@ -342,7 +390,11 @@ class AICopyGenerator:
         }
         
         templates = title_templates.get(version_hook, ['精彩剧情不容错过'])
-        return templates[hash(drama_name + version_hook) % len(templates)]
+        # 与 P1-D2 同类：hash() 有 PYTHONHASHSEED 盐值随机化，同一部剧在同一
+        # 进程重启后可能拿到不同模板标题。改用稳定摘要保证重切结果一致。
+        seed = int.from_bytes(
+            hashlib.md5((drama_name + version_hook).encode('utf-8')).digest()[:4], 'big')
+        return templates[seed % len(templates)]
     
     def _generate_hashtags(self, version_hook):
         """模板生成话题（AI失败时兜底）"""
