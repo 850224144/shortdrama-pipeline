@@ -1166,6 +1166,43 @@ class PipelineProcessor:
             self.logger.log('system', 'WARN', f'检查集数连续性失败：{str(e)}')
             return True, [], 0, f'检查失败：{str(e)}'
     
+    def _clean_partial_outputs(self, out_dir, keep_filenames=None, include_configs=True):
+        """清理 out_dir 里的渲染产物（P1-A2/A3）。
+
+        根因：out_dir 没有 run 边界，完成/去重判断全靠数文件名反推——
+        历史失败 run 留下的未后处理 mp4（render_generic 交付名与成品同名）
+        会被 should_process 第三层当成"已有成品"永久跳过重试，被 _{n}_
+        子串收集混进下一次交付，被去重闸门当成品。
+
+        删除对象：.mp4 / .mp4.tmp / edl_config_v*.json。
+        - keep_filenames：交付完成路径传入已交付文件名集合，只删未交付的；
+        - 失败/重切路径传 None 全清（out_dir 是单剧目录，能走到清理说明本剧
+          未被标记完成，里面的 mp4 只可能来自历史失败 run 或本次 run）；
+        - include_configs=False 用于交付完成路径：本 run 的 edl_config 与
+          交付一致，保留可当简易 manifest 排查用。
+
+        Returns: 删除的文件数（仅用于日志）。
+        """
+        removed = 0
+        try:
+            for f in os.listdir(out_dir):
+                p = os.path.join(out_dir, f)
+                if not os.path.isfile(p):
+                    continue
+                if keep_filenames is not None and f in keep_filenames:
+                    continue
+                is_mp4 = f.endswith('.mp4') or f.endswith('.mp4.tmp')
+                is_cfg = include_configs and f.startswith('edl_config_v') and f.endswith('.json')
+                if is_mp4 or is_cfg:
+                    try:
+                        os.remove(p)
+                        removed += 1
+                    except OSError:
+                        pass
+        except OSError as e:
+            self.logger.log('system', 'WARN', f'清理渲染残留失败：{str(e)}')
+        return removed
+
     def cut_batch(self, downloads):
         """批量切片"""
         results = []
@@ -1267,6 +1304,15 @@ class PipelineProcessor:
         try:
             # 更新状态
             self._update_state('processing', drama_name, 0, '开始切片')
+
+            # P1-A2/A3：run 开始先清掉历史失败 run 的残留产物。
+            # 能走到这里说明本剧未被标记完成（state/已切完/去重闸门都已过），
+            # out_dir 里的旧 mp4 只可能是未过后处理的"假成品"：不清则
+            # should_process 第三层会把重试误判为"已有成品"，收集按 _{n}_
+            # 子串还会把旧件混进本次交付。
+            swept = self._clean_partial_outputs(out_dir)
+            if swept:
+                self.logger.log(drama_name, 'WARN', f'run开始清理：删除{swept}个历史残留渲染产物')
             
             # 收集素材 - 使用新的list_episodes方法
             episodes = self.list_episodes(src_dir)
@@ -1357,6 +1403,15 @@ class PipelineProcessor:
                 'edl': len(edl_videos),
                 'total': len(best_videos)
             }, out_dir)
+
+            # P1-A3：交付后清掉未进入交付集的渲染产物（后处理失败被跳过的、
+            # version_count 降级后多余的旧 vid），防"假成品"污染后续闸门。
+            # 本 run 的 edl_config 保留：与交付一致，可当简易 manifest 排查用。
+            delivered = {v['filename'] for v in best_videos}
+            swept = self._clean_partial_outputs(out_dir, keep_filenames=delivered,
+                                                include_configs=False)
+            if swept:
+                self.logger.log(drama_name, 'WARN', f'交付清理：删除{swept}个未交付渲染产物')
             
             self._update_state('idle', '', 100, '完成')
             
@@ -1379,6 +1434,12 @@ class PipelineProcessor:
         except Exception as e:
             self.logger.log(drama_name, 'ERROR', f'切片失败：{str(e)}')
             self.state_manager.add_failed(drama_name, str(e))
+            # P1-A2：失败路径清掉本次 run 的渲染产物，瞬时故障不升级为永久卡死。
+            # out_dir 是单剧目录且 run 开始时已清过，此刻的 mp4 全是本次渲染的
+            # 未交付半成品；留着它们，重试会被"已有成品/已切完"闸门永久跳过。
+            swept = self._clean_partial_outputs(out_dir)
+            if swept:
+                self.logger.log(drama_name, 'WARN', f'失败清理：已删除{swept}个未交付渲染产物')
             return {
                 'name': drama_name,
                 'success': False,
