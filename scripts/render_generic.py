@@ -293,8 +293,9 @@ def process_video(video, config, tmp_base):
     src_pat = config.get("source_pattern", "{name} - 第{ep}集.mp4")
     out_dir = config["output_dir"]
     drama = config["drama_name"]
+    drama_safe = drama.replace('，', '_').replace(',', '_').replace(' ', '_')
 
-    final_path = os.path.join(out_dir, f"{drama}_{vid}_{kw}_去重版.mp4")
+    final_path = os.path.join(out_dir, f"{drama_safe}_{vid}_{kw}_去重版.mp4")
     vtmp = os.path.join(tmp_base, f"v{vid}")
     os.makedirs(vtmp, exist_ok=True)
 
@@ -501,8 +502,8 @@ def main():
             desc = v_cfg.get("description", "")
             tags = v_cfg.get("hashtags", [])
             tags_str = " ".join(tags)
-            fname = f"{drama}_{vid}_{kw}_去重版.mp4"
-            cover = f"covers/{drama}_{vid}_封面.jpg"
+            fname = f"{drama_safe}_{vid}_{kw}_去重版.mp4"
+            cover = f"covers/{drama_safe}_{vid}_封面.jpg"
 
             f.write(f"### V{vid}: {kw}\n")
             f.write(f"{icon} {r['status']} | {r['detail']}\n\n")
