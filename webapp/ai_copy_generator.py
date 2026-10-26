@@ -143,13 +143,13 @@ class AICopyGenerator:
                     'content': prompt
                 }
             ],
-            'temperature': 0.8,  # 创意生成需要更高温度
-            'max_tokens': 2000,  # 增加到2000，避免被截断
-            'reasoning_effort': 'none'  # 关闭推理，快速生成
+            'temperature': 0.8,
+            'max_tokens': 4000,  # reasoning模型会吃token，给够
+            'reasoning_effort': 'none'
         }
         
         try:
-            response = requests.post(url, headers=headers, json=data, timeout=30)
+            response = requests.post(url, headers=headers, json=data, timeout=90)
             response.raise_for_status()
             return response.json()
         except requests.exceptions.RequestException as e:
