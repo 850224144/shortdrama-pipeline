@@ -82,6 +82,7 @@ class AICopyGenerator:
         self.model = SENSENOVA_MODEL
         self.enabled = bool(api_key)  # 未配置 key 时禁用，直接走模板兜底
         self.cache = {}  # 缓存已生成的文案
+        self._zhipu_disabled = False  # 智谱额度用尽后本会话内置 True，跳过备用模型
     
     def generate_copy(self, drama_name, version_idx, version_hook, 
                       plot_summary='', drama_genre='', quotes=None):
@@ -138,7 +139,19 @@ class AICopyGenerator:
                 logger.warning(f'[AI] SenseNova失败({e1})，试智谱GLM...')
                 if not ZHIPU_API_KEY:
                     raise  # 备用模型未配置，直接走模板兜底，不发无意义请求
-                result = self._parse_response(self._call_zhipu(prompt))
+                if self._zhipu_disabled:
+                    raise  # 智谱额度用尽（本会话已确认），直接走模板兜底
+                try:
+                    result = self._parse_response(self._call_zhipu(prompt))
+                except Exception as e2:
+                    # 额度用尽/限流后每个版本都会白发一次注定失败的请求：
+                    # 本会话内直接禁用智谱，后续失败立即走模板兜底。
+                    # 重启 webapp 后自动恢复（额度充值后无需改代码）。
+                    msg = str(e2)
+                    if any(k in msg for k in ('429', '1113', '1302', '余额', '额度', 'quota', 'balance')):
+                        self._zhipu_disabled = True
+                        logger.warning(f'[AI] 智谱不可用({msg[:80]})，本次运行内改用模板兜底')
+                    raise
 
             # 验证结果
             result = self._validate_result(result, drama_name, version_hook)

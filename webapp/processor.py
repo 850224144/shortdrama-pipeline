@@ -1323,7 +1323,30 @@ class PipelineProcessor:
             
             # 清理测试版本
             self._cleanup_test_versions(out_dir)
-            
+
+            # P1-A1：0 个可交付成片时绝不能当作完成。
+            # 此前的行为是照常写报告、add_completed({'total':0})、写已切完.txt，
+            # 三层闸门（state.completed / 已切完.txt / 567 行去重检查）会同时锁死，
+            # 这部剧永远无法重切，只能手工删文件。0 条时必须走 1356 行失败分支。
+            if not best_videos:
+                # 顺手清掉本次残留的非交付 mp4：后处理全部失败时 out_dir 里
+                # 不可能有 *_去重版.mp4（有也会被 567 行去重闸门提前拦下，
+                # 走不到这里），删除是安全的；否则重切时 1637 行按 _{v_idx}_
+                # 收集输出会捞到这些旧半成品。
+                removed = 0
+                try:
+                    for f in os.listdir(out_dir):
+                        if f.endswith('.mp4') and '_去重版' not in f and re.search(r'V\d+', f):
+                            os.remove(os.path.join(out_dir, f))
+                            removed += 1
+                except OSError as e:
+                    self.logger.log('system', 'WARN', f'清理失败残留 mp4 出错：{str(e)}')
+                if removed:
+                    self.logger.log(drama_name, 'WARN', f'已清理{removed}个失败残留的未后处理文件')
+                raise RuntimeError(
+                    f'无可交付成片：{version_count}个版本全部渲染/后处理失败，'
+                    f'已保留失败记录可重切')
+
             # 写交付报告
             self._write_report(out_dir, drama_name, len(best_videos), cut_method)
             
