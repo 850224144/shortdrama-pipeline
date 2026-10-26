@@ -59,18 +59,23 @@ class AICopyGenerator:
                                     plot_summary, drama_genre, quotes)
         
         try:
-            # 调用 AI API
-            response = self._call_api(prompt)
-            result = self._parse_response(response)
-            
+            # 调用 AI API（先试SenseNova，失败试智谱）
+            try:
+                response = self._call_api(prompt)
+                result = self._parse_response(response)
+            except Exception as e1:
+                logger.warning(f'[AI] SenseNova失败({e1})，试智谱GLM...')
+                response = self._call_zhipu(prompt)
+                result = self._parse_response(response)
+
             # 验证结果
             result = self._validate_result(result, drama_name, version_hook)
-            
+
             # 缓存结果
             self.cache[cache_key] = result
-            
+
             return result
-            
+
         except Exception as e:
             logger.error(f'[AI] 文案生成失败，返回兜底: {e}')
             return self._generate_template_copy(drama_name, version_idx, version_hook)
@@ -154,7 +159,24 @@ class AICopyGenerator:
             return response.json()
         except requests.exceptions.RequestException as e:
             raise Exception(f"API 调用失败: {e}")
-    
+
+    def _call_zhipu(self, prompt):
+        """智谱GLM-4-Flash备用"""
+        url = 'https://open.bigmodel.cn/api/paas/v4/chat/completions'
+        headers = {
+            'Authorization': 'Bearer 55f9d6f4864e4088b6cd162df2c5be72.itFPsQE7gz80kWw6',
+            'Content-Type': 'application/json'
+        }
+        data = {
+            'model': 'glm-4-flash',
+            'messages': [{'role': 'user', 'content': prompt}],
+            'temperature': 0.8,
+            'max_tokens': 2000
+        }
+        response = requests.post(url, headers=headers, json=data, timeout=60)
+        response.raise_for_status()
+        return response.json()
+
     def _parse_response(self, response):
         """解析 AI 响应"""
         
