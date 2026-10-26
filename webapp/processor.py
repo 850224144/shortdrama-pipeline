@@ -261,7 +261,7 @@ class StateManager:
 class LinkExtractor:
     """链接提取器"""
 
-    BAIDU_PAN_PATTERN = r'https?://pan\.baidu\.com/s/[a-zA-Z0-9]+(?:\?pwd=[a-zA-Z0-9]+)?'
+    BAIDU_PAN_PATTERN = r'https?://pan\.baidu\.com/s/[a-zA-Z0-9_]+(?:\?pwd=[a-zA-Z0-9]+)?'
 
     @classmethod
     def extract(cls, message):
