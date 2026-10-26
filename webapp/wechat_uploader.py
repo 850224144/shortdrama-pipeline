@@ -483,20 +483,23 @@ return (() => ({
                 try:
                     text = (button.text or '').strip()
                     logger.debug(f'按钮 {i}: "{text}"')
-                    if text in labels:
+                    # 必须可见且未禁用：隐藏按钮点不到；禁用按钮说明视频还没
+                    # 上传完（调用方会等待重试），此时点保存草稿没有意义。
+                    if text in labels \
+                            and button.is_displayed() \
+                            and not self._element_is_disabled(button):
                         logger.info(f'找到保存草稿按钮: "{text}" (索引 {i})')
                         return button
                 except Exception:
                     continue
         except Exception as e:
             logger.debug(f'CSS 选择器查找失败: {e}')
-        
-        # 方法2：使用 text 选择器（不检查禁用状态，因为灰色按钮也可能可以点击）
+
+        # 方法2：text 选择器（_find_visible_text_element 只查可见性，这里补禁用检查）
         button = self._find_visible_text_element(labels)
-        if button:
-            # 不检查禁用状态，直接返回
+        if button and not self._element_is_disabled(button):
             return button
-        
+
         # 方法3：使用 JavaScript 查找
         logger.debug('尝试通过可见按钮状态查找保存草稿操作...')
         try:
@@ -534,8 +537,14 @@ return (() => ({
         return None
 
     def _wait_for_draft_saved(self, previous_url, title, timeout=15):
+        # 只保留跟"保存草稿"动作绑定的确认短语：
+        # - 不放裸 '成功'——发布页在点保存草稿之前往往已显示"上传成功"
+        #  （视频上传完成），会被误判成草稿保存成功
+        # - 不放 '已保存'——草稿页常驻"自动保存中/已保存"这类自动保存指示，
+        #   同样是保存草稿动作之前就存在的文本
+        # URL 跳转和保存按钮消失两个信号各自带额外条件（正文含本条标题、
+        # 按钮确实不再出现），比文案匹配更可靠。
         success_texts = (
-            '已保存',  # 顶部提示
             '保存成功',
             '草稿已保存',
             '已保存到草稿',
@@ -544,9 +553,7 @@ return (() => ({
             '已存入草稿',
             '保存草稿成功',
             '草稿保存成功',
-            '保存成功',
             '操作成功',
-            '成功',
         )
         started = time.time()
         while time.time() - started < timeout:
@@ -559,14 +566,20 @@ return (() => ({
                 if any(text in body_text for text in success_texts):
                     logger.info(f'检测到成功提示: {body_text[:200]}')
                     return True
-                # 检查URL变化
+                # 检查URL变化：必须是合理的保存后跳转，且正文能看到本条标题。
+                # 光凭"URL 变了"或"按钮不见了"都不行——被踢回登录页时两者同时成立，
+                # 但草稿根本没存上。
                 if current_url != previous_url:
                     url = current_url.lower()
                     if ('draft' in url or '/post/list' in url) and title in body_text:
+                        logger.info(f'检测到跳转到草稿列表且正文含标题：{current_url}')
                         return True
-                # 如果保存草稿按钮消失了，说明保存成功
+                    logger.debug(f'URL 变化但不像保存成功：{current_url}')
+                    time.sleep(0.5)
+                    continue
+                # 仍在发布页但保存草稿按钮消失 → 平台就地切到了成功态
                 if not self._find_draft_button():
-                    logger.info('保存草稿按钮已消失，说明保存成功')
+                    logger.info('仍在发布页但保存草稿按钮已消失，说明保存成功')
                     return True
             except Exception:
                 pass
@@ -641,50 +654,17 @@ return (() => ({
 
         # 步骤5: 校验草稿真的保存成功
         # P1-D1：原实现点击后立即 return True——点击事件派发成功 ≠ 平台接受了
-        # 草稿（标题超长/表单未就绪/内容校验失败都会静默失败），且 :633 捕获的
-        # previous_url 从未被使用。现改为等两个可验证信号之一，都没有则判失败。
-        if not self._verify_draft_saved(previous_url):
-            logger.error('草稿保存未确认：既无 URL 跳转也无保存成功提示')
+        # 草稿（标题超长/表单未就绪/内容校验失败都会静默失败），而 previous_url
+        # 捕获了却从未使用。校验函数 _wait_for_draft_saved 此前零调用（只被测试
+        # 引用），等于一直空转。现改为调用它：等成功提示文案、URL 跳转（draft/
+        # 草稿列表且正文含本条标题）、或保存按钮消失，都没有才判失败。
+        if not self._wait_for_draft_saved(previous_url, title):
+            logger.error('草稿保存未确认：平台无成功提示/URL 未跳转/按钮未消失')
             self._save_debug_state('draft_save_unverified')
             return False
 
         logger.info(f'[{self.account_name}] ✅ 草稿保存成功')
         return True
-
-    def _verify_draft_saved(self, previous_url, timeout=20):
-        """确认草稿真的保存成功。
-
-        两个可验证信号，任一命中即视为成功：
-        1. 平台把发布页跳走（保存成功后回创作者后台）——URL 变了且仍在视频号站点
-        2. 页面出现保存成功提示文案
-        两者都不满足就返回 False，绝不把"点了一下"当成功。
-        """
-        success_keywords = ('保存成功', '草稿已保存', '已保存成功', '保存草稿成功')
-        page = self.page
-        if page is None:
-            # 没有活动页面就无法校验，交给调用方按失败处理
-            return False
-        deadline = time.time() + timeout
-        while time.time() < deadline:
-            try:
-                cur = page.url or ''
-            except Exception:
-                cur = ''
-            if previous_url and cur and cur != previous_url:
-                path = cur.split('?')[0]
-                if 'channels.weixin.qq.com' in path \
-                        and '/platform' in path \
-                        and not any(x in path for x in ('login', 'error')):
-                    logger.info(f'草稿保存已确认（URL 跳转：{path}')
-                    return True
-            try:
-                if self._find_visible_text_element(success_keywords):
-                    logger.info('草稿保存已确认（页面成功提示）')
-                    return True
-            except Exception:
-                pass
-            time.sleep(1)
-        return False
     
     def login(self):
         """扫码登录"""

@@ -184,5 +184,51 @@ class WeChatUploaderTests(unittest.TestCase):
         self.assertEqual(button.click_count, 1)
 
 
+    def test_wait_for_draft_saved_ignores_unrelated_success_text(self):
+        """常驻文案不算成功：发布页点保存草稿之前就有"上传成功"，
+        草稿页还常驻"自动保存中/已保存"，都不能当作草稿保存成功。"""
+        page = FakePage(js_result='视频上传成功，自动保存中，已保存。')
+        uploader = self.make_uploader()
+        uploader.page = page
+        uploader._find_draft_button = lambda: FakeElement('保存草稿')
+
+        with patch('wechat_uploader.time.sleep'):
+            self.assertFalse(uploader._wait_for_draft_saved(
+                'https://channels.weixin.qq.com/platform/post/create',
+                '示例标题', timeout=2))
+
+    def test_wait_for_draft_saved_accepts_draft_confirmation_text(self):
+        page = FakePage(js_result='草稿保存成功')
+        uploader = self.make_uploader()
+        uploader.page = page
+
+        with patch('wechat_uploader.time.sleep'):
+            self.assertTrue(uploader._wait_for_draft_saved(
+                'https://channels.weixin.qq.com/platform/post/create',
+                '示例标题', timeout=2))
+
+    def test_wait_for_draft_saved_url_change_requires_title_in_body(self):
+        """URL 跳走后还必须能在正文里看到本条标题，否则可能是别的原因跳走
+        （比如被踢回登录页），不能算保存成功。"""
+        page = FakePage(
+            js_result='创作中心',
+            selectors={'tag:button': []},
+        )
+        page.url = 'https://channels.weixin.qq.com/platform/post/list'
+        uploader = self.make_uploader()
+        uploader.page = page
+
+        with patch('wechat_uploader.time.sleep'):
+            self.assertFalse(uploader._wait_for_draft_saved(
+                'https://channels.weixin.qq.com/platform/post/create',
+                '示例标题', timeout=2))
+
+        page.js_result = '创作中心 示例标题'
+        with patch('wechat_uploader.time.sleep'):
+            self.assertTrue(uploader._wait_for_draft_saved(
+                'https://channels.weixin.qq.com/platform/post/create',
+                '示例标题', timeout=2))
+
+
 if __name__ == '__main__':
     unittest.main()
