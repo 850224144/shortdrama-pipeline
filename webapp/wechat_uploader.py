@@ -7,6 +7,7 @@
 import os
 import sys
 import time
+import hashlib
 import logging
 import random
 from DrissionPage import ChromiumPage, ChromiumOptions
@@ -638,12 +639,52 @@ return (() => ({
             self._save_debug_state('draft_button_click_failed')
             return False
 
-        # 步骤5: 点击保存草稿按钮后直接认为成功
-        logger.info('点击保存草稿按钮，认为保存成功')
-        time.sleep(3)
-        
+        # 步骤5: 校验草稿真的保存成功
+        # P1-D1：原实现点击后立即 return True——点击事件派发成功 ≠ 平台接受了
+        # 草稿（标题超长/表单未就绪/内容校验失败都会静默失败），且 :633 捕获的
+        # previous_url 从未被使用。现改为等两个可验证信号之一，都没有则判失败。
+        if not self._verify_draft_saved(previous_url):
+            logger.error('草稿保存未确认：既无 URL 跳转也无保存成功提示')
+            self._save_debug_state('draft_save_unverified')
+            return False
+
         logger.info(f'[{self.account_name}] ✅ 草稿保存成功')
         return True
+
+    def _verify_draft_saved(self, previous_url, timeout=20):
+        """确认草稿真的保存成功。
+
+        两个可验证信号，任一命中即视为成功：
+        1. 平台把发布页跳走（保存成功后回创作者后台）——URL 变了且仍在视频号站点
+        2. 页面出现保存成功提示文案
+        两者都不满足就返回 False，绝不把"点了一下"当成功。
+        """
+        success_keywords = ('保存成功', '草稿已保存', '已保存成功', '保存草稿成功')
+        page = self.page
+        if page is None:
+            # 没有活动页面就无法校验，交给调用方按失败处理
+            return False
+        deadline = time.time() + timeout
+        while time.time() < deadline:
+            try:
+                cur = page.url or ''
+            except Exception:
+                cur = ''
+            if previous_url and cur and cur != previous_url:
+                path = cur.split('?')[0]
+                if 'channels.weixin.qq.com' in path \
+                        and '/platform' in path \
+                        and not any(x in path for x in ('login', 'error')):
+                    logger.info(f'草稿保存已确认（URL 跳转：{path}')
+                    return True
+            try:
+                if self._find_visible_text_element(success_keywords):
+                    logger.info('草稿保存已确认（页面成功提示）')
+                    return True
+            except Exception:
+                pass
+            time.sleep(1)
+        return False
     
     def login(self):
         """扫码登录"""
@@ -1037,11 +1078,14 @@ return (() => ({
         Returns:
             账号名称
         """
-        # 简单轮换：根据剧名hash选择账号
         if not accounts:
             return 'default'
-        
-        idx = hash(drama_name) % len(accounts)
+
+        # P1-D2：hash() 对 str 有 PYTHONHASHSEED 盐值随机化，同一部剧在不同进程
+        # 里会选到不同账号（进程一重启分配就变），跨进程完全不稳定。
+        # 改用稳定摘要：同一剧名在任何进程、任何平台上都固定选到同一账号。
+        idx = int.from_bytes(
+            hashlib.md5(drama_name.encode('utf-8')).digest()[:4], 'big') % len(accounts)
         return accounts[idx]
 
 
