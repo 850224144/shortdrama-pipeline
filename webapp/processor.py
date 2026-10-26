@@ -279,7 +279,7 @@ class LinkExtractor:
         seen = set()
 
         for match in matches:
-            link_id = re.search(r'pan\.baidu\.com/s/([a-zA-Z0-9]+)', match)
+            link_id = re.search(r'pan\.baidu\.com/s/([a-zA-Z0-9_]+)', match)
             if link_id:
                 link_id = link_id.group(1)
                 if link_id not in seen:
