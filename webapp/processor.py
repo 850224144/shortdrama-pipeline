@@ -2040,11 +2040,19 @@ class PipelineProcessor:
         return None
     
     def _add_cover_badge(self, cover_path, version_idx):
-        """给封面加角标"""
+        """给封面加角标。
+
+        P1-A4：原实现 ffmpeg 直接以 cover_path 同时作输入和输出（与已修掉的
+        _post_process 同类 bug），且 subprocess.run 不看 returncode——角标实际
+        从未加上过，日志却永远显示"角标已添加"。
+        现改为：先写 cover_path.tmp.jpg → returncode 为 0 才 os.replace 落正式名；
+        失败时保留无角标原图交付，但日志带 ffmpeg stderr 说清楚。
+        """
         badges = {1: "第1集", 2: "第2集", 3: "第3集", 4: "第4集", 5: "完整版",
                   6: "大结局", 7: "加长版", 8: "精编版"}
         badge_text = badges.get(version_idx, f"精编版V{version_idx}")
-        
+        tmp_path = cover_path + ".tmp.jpg"
+
         try:
             cmd = [
                 CONFIG['ffmpeg_path'], "-y",
@@ -2054,12 +2062,30 @@ class PipelineProcessor:
                        f"borderw=3:bordercolor=black:"
                        f"x=w-text_w-30:y=h-text_h-30",
                 "-q:v", "2",
-                cover_path
+                tmp_path
             ]
-            subprocess.run(cmd, capture_output=True, timeout=30)
+            r = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
+            if r.returncode != 0:
+                # 角标失败不静默：交付无角标原图，但必须留下真实原因
+                self.logger.log("system", 'WARN',
+                                f'角标添加失败({badge_text})：{(r.stderr or "").strip()[-200:]}')
+                try:
+                    if os.path.exists(tmp_path):
+                        os.remove(tmp_path)
+                except OSError:
+                    pass
+                return False
+            os.replace(tmp_path, cover_path)
             self.logger.log("system", 'INFO', f'角标已添加：{badge_text}')
+            return True
         except Exception as e:
             self.logger.log("system", 'WARN', f'角标添加失败：{str(e)}')
+            try:
+                if os.path.exists(tmp_path):
+                    os.remove(tmp_path)
+            except OSError:
+                pass
+            return False
     
     def _cleanup_test_versions(self, out_dir):
         """清理测试版本"""
