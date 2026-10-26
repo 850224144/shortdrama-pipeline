@@ -528,6 +528,16 @@ def main():
                 f.write(f"- V{o['a']['vid']}/Ep{o['a']['ep']} ↔ V{o['b']['vid']}/Ep{o['b']['ep']}: 重叠 {o['overlap_sec']:.1f}s\n")
 
     log(f"\n📝 报告: {report_path}")
+
+    # 清理临时片段目录
+    import shutil
+    if os.path.exists(tmp_base):
+        try:
+            shutil.rmtree(tmp_base, ignore_errors=True)
+            log(f"🧹 已清理临时目录: {tmp_base}")
+        except Exception as e:
+            log(f"⚠️ 清理临时目录失败: {e}")
+
     return 0 if fail == 0 else 1
 
 

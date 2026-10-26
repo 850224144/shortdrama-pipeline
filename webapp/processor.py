@@ -99,6 +99,20 @@ class Logger:
         os.makedirs(log_dir, exist_ok=True)
         self.logs = []
         self.lock = threading.Lock()
+        self._clean_old_logs()
+
+    def _clean_old_logs(self, keep_days=7):
+        """清理 N 天前的日志文件"""
+        import time as _t
+        cutoff = _t.time() - keep_days * 86400
+        try:
+            for f in os.listdir(self.log_dir):
+                if f.endswith('.log'):
+                    fp = os.path.join(self.log_dir, f)
+                    if os.path.getmtime(fp) < cutoff:
+                        try: os.remove(fp)
+                        except: pass
+        except: pass
     
     def log(self, drama_name, level, message):
         """记录日志"""
@@ -575,7 +589,16 @@ class PipelineProcessor:
             return {'status': 'failed', 'error': f'素材文件不足：{len(mp4_files)}个'}
         
         self.logger.log('system', 'INFO', f'找到{len(mp4_files)}集素材，开始切片...')
-        
+
+        # 重复切片检查：output 下已有该剧成片则跳过
+        for account_dir in os.listdir(CONFIG['output_dir']) if os.path.exists(CONFIG['output_dir']) else []:
+            existing = os.path.join(CONFIG['output_dir'], account_dir, drama_name)
+            if os.path.isdir(existing):
+                done = [f for f in os.listdir(existing) if f.endswith('_去重版.mp4')]
+                if done:
+                    self.logger.log('system', 'INFO', f'已有{len(done)}个成片，跳过重复切片：{existing}')
+                    return {'status': 'skipped', 'reason': 'already_cut', 'output_dir': existing, 'existing': done}
+
         # 构建下载结果
         download_result = {
             'drama_name': drama_name,
