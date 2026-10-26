@@ -22,7 +22,6 @@ from ai_copy_generator import AICopyGenerator
 # 路径配置
 CONFIG = {
     'baidupcs_path': r'D:\短剧工坊\素材\BaiduPCS-Go\BaiduPCS-Go-v4.0.2-windows-x64\BaiduPCS-Go.exe',
-    'mediakit_path': r'D:\短剧工坊\tools\mediakit-cli.exe',
     'download_base_dir': r'E:\短剧素材',
     'scripts_dir': r'D:\短剧工坊\scripts',
     'output_dir': r'D:\短剧工作区\output',
@@ -46,12 +45,6 @@ CONFIG = {
         'min_download_files': 10,  # 已下载最少文件数
     },
     
-    'ai': {
-        'min_duration': 180,
-        'max_duration': 300,
-        'count': 3,
-        'retry': 2
-    },
     
     'edl': {
         'min_duration': 180,
@@ -452,25 +445,6 @@ class PipelineProcessor:
         
         return False, None
     
-    def split_materials(self, all_eps):
-        """分配素材给AI和EDL"""
-        total = len(all_eps)
-        
-        # 素材太少，都用全部
-        if total <= 20:
-            return all_eps, all_eps
-        
-        # 按比例分配
-        ai_count = int(total * 0.6)
-        ai_eps = all_eps[:ai_count]
-        edl_eps = all_eps[ai_count:]
-        
-        # EDL素材不足，补充前面的
-        if len(edl_eps) < 10:
-            supplement = all_eps[:10]
-            edl_eps = supplement + edl_eps
-        
-        return ai_eps, edl_eps
     
     def determine_version_count(self, ep_count):
         """判断版本数"""
@@ -1308,24 +1282,24 @@ class PipelineProcessor:
             transcript_path = self._run_asr(src_dir, drama_name)
             short_titles, long_titles = self._extract_quotes(transcript_path, 10)
             
-            # 分配素材
-            ai_eps, edl_eps = self.split_materials(all_eps)
+            # 全部素材交给 EDL 切片。
+            # AI 高光智剪已移除：它依赖火山引擎 mediakit-cli 的认证，项目未配置该 key，
+            # 每次运行都会白等一次 doctor + 最长 20 分钟任务轮询然后空转。
+            # 版本差异化由 EDL 的倒叙/随机结构 + 钩子主题 + ASR 高光台词保证。
+            edl_eps = all_eps
             
             self.logger.log(drama_name, 'INFO',
-                           f'AI素材：{len(ai_eps)}集，EDL素材：{len(edl_eps)}集')
+                           f'EDL素材：{len(edl_eps)}集（全量）')
             
             # 随机选择切法：倒叙或随机
             use_reverse = random.random() < 0.5
             cut_method = '倒叙结构' if use_reverse else '随机结构'
             self.logger.log(drama_name, 'INFO', f'使用切法：{cut_method}')
             
-            # AI高光智剪
-            self._update_state('processing', drama_name, 30, 'AI高光智剪中')
-            ai_videos = self._generate_ai_highlights(ai_eps, drama_name, out_dir)
-            
-            # EDL手动切片
-            edl_count = version_count - len(ai_videos)
-            self._update_state('processing', drama_name, 60, 'EDL切片中')
+            # EDL手动切片（AI 高光已移除，ai_videos 恒为空，保留变量以兼容报告/状态字段）
+            ai_videos = []
+            edl_count = version_count
+            self._update_state('processing', drama_name, 30, 'EDL切片中')
             edl_videos = self._generate_edl_versions(drama_name, src_dir, edl_eps, edl_count, out_dir, use_reverse, short_titles, long_titles)
             
             # 合并版本
@@ -1499,97 +1473,6 @@ class PipelineProcessor:
         except Exception as e:
             self.logger.log('system', 'ERROR', f'提取台词失败：{str(e)}')
             return [], []
-    
-    def _generate_ai_highlights(self, episode_paths, drama_name, out_dir):
-        """生成AI高光版本 - 调用mediakit-cli"""
-        self.logger.log(drama_name, 'INFO', f'生成AI版本（{len(episode_paths)}集素材）')
-        
-        # 检查认证状态
-        try:
-            check_cmd = [CONFIG['mediakit_path'], 'doctor']
-            check_result = subprocess.run(check_cmd, capture_output=True, text=True, encoding='utf-8', timeout=10)
-            if check_result.returncode != 0:
-                self.logger.log(drama_name, 'WARN', 'AI认证未配置，跳过AI切片，仅使用EDL切片')
-                return []
-        except Exception as e:
-            self.logger.log(drama_name, 'WARN', f'AI检查失败：{str(e)}，跳过AI切片')
-            return []
-        
-        # 提交高光智剪任务
-        batch = episode_paths[:20]
-        params = json.dumps({
-            "max_duration": 230,
-            "min_duration": 210,
-            "max_number": 3,
-            "cut_mode": "Mixed"
-        })
-        
-        cmd = [
-            CONFIG['mediakit_path'], "video", "generate-highlights-microdrama",
-            "--video-urls", ",".join(batch),
-            "--highlight-cuts-param", params,
-            "--enable-return-poster=true"
-        ]
-        
-        try:
-            result = subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8", timeout=300)
-            if result.returncode != 0:
-                self.logger.log(drama_name, 'ERROR', f'mediakit-cli提交失败：{result.stderr[:200]}')
-                return []
-            
-            data = json.loads(result.stdout)
-            task_id = data.get("task_id")
-            if not task_id:
-                self.logger.log(drama_name, 'ERROR', f'未获取到task_id：{result.stdout[:200]}')
-                return []
-            
-            self.logger.log(drama_name, 'INFO', f'任务已提交：{task_id}')
-            
-            # 轮询等待结果
-            res = None
-            for i in range(60):  # 最多等20分钟
-                time.sleep(20)
-                query_cmd = [CONFIG['mediakit_path'], "shared", "query-task", "--task-id", task_id]
-                query_result = subprocess.run(query_cmd, capture_output=True, text=True, encoding="utf-8", timeout=30)
-                
-                if query_result.returncode == 0:
-                    res = json.loads(query_result.stdout)
-                    if res.get("status") == "completed":
-                        self.logger.log(drama_name, 'INFO', f'任务完成，共{len(res.get("mixvideo_info", []))}个版本')
-                        break
-                    elif res.get("status") == "failed":
-                        self.logger.log(drama_name, 'ERROR', f'任务失败：{res.get("error", "")}')
-                        return []
-            
-            if not res or res.get("status") != "completed":
-                self.logger.log(drama_name, 'ERROR', '任务超时')
-                return []
-            
-            # 下载并返回视频
-            videos = []
-            for idx, video in enumerate(res.get("mixvideo_info", [])):
-                url = video["video_url"]
-                save_path = os.path.join(out_dir, f"raw_{idx+1}.mp4")
-                try:
-                    urllib.request.urlretrieve(url, save_path)
-                    final_path = os.path.join(out_dir, f"{drama_name}_V{idx+1}_AI.mp4")
-                    shutil.copy(save_path, final_path)
-                    os.remove(save_path)
-                    videos.append({
-                        'path': final_path,
-                        'final_path': final_path,
-                        'filename': f"V{idx+1}_AI.mp4",
-                        'type': 'ai'
-                    })
-                    self.logger.log(drama_name, 'INFO', f'V{idx+1} AI版本已下载')
-                except Exception as e:
-                    self.logger.log(drama_name, 'ERROR', f'下载V{idx+1}失败：{str(e)}')
-            
-            return videos
-            
-        except Exception as e:
-            self.logger.log(drama_name, 'ERROR', f'AI高光智剪异常：{str(e)}')
-            return []
     
     def parse_episode_number(self, filename):
         """解析文件名中的集数，兼容 '1.mp4' 和 '第1集.mp4' 等格式"""

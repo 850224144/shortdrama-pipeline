@@ -11,7 +11,34 @@ import time
 import logging
 import requests
 
-logger = logging.getLogger('AICopyGenerator')
+def _setup_logger():
+    """把 AI 文案日志落盘。
+
+    原先用 logging 但全项目无 handler，[AI] 的 warning/error 只进 stderr，
+    导致 AI 文案失败（历史 4/34）的原因永久查不到。
+    整段包 try/except：日志调用自身抛错绝不能炸掉文案兜底路径。
+    """
+    lg = logging.getLogger('AICopyGenerator')
+    if lg.handlers:
+        return lg
+    lg.setLevel(logging.INFO)
+    lg.propagate = False
+    try:
+        log_dir = os.path.join(
+            os.path.dirname(os.path.dirname(os.path.abspath(__file__))), 'logs')
+        os.makedirs(log_dir, exist_ok=True)
+        log_file = os.path.join(log_dir, f'ai_copy_{time.strftime("%Y%m%d")}.log')
+        h = logging.FileHandler(log_file, encoding='utf-8')
+        h.setFormatter(logging.Formatter(
+            '[%(asctime)s] [%(levelname)s] [AICopy] %(message)s',
+            datefmt='%Y-%m-%d %H:%M:%S'))
+        lg.addHandler(h)
+    except OSError:
+        pass
+    return lg
+
+
+logger = _setup_logger()
 
 # API 配置（敏感值不入库：读环境变量，缺省回退到项目根 .env）
 _PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -41,6 +68,9 @@ SENSENOVA_API_BASE = os.environ.get('SENSENOVA_API_BASE', 'https://token.senseno
 # 注意：源码里不再存放任何 API key。未配置时 AICopyGenerator.enabled=False，直接走模板兜底。
 SENSENOVA_API_KEY = os.environ.get('SENSENOVA_API_KEY', '')
 SENSENOVA_MODEL = os.environ.get('SENSENOVA_MODEL', 'sensenova-6.8-flash-lite')
+
+# 备用文案模型（智谱 GLM-4-Flash）：SenseNova 失败时自动切换。未配置则直接走模板。
+ZHIPU_API_KEY = os.environ.get('ZHIPU_API_KEY', '')
 
 
 class AICopyGenerator:
@@ -87,13 +117,28 @@ class AICopyGenerator:
         
         try:
             # 调用 AI API（先试SenseNova，失败试智谱）
+            def _try_sensenova(p):
+                """SenseNova 是 reasoning 模型：reasoning_effort='none' 被忽略，
+                实测 1940 个 completion token 里 1841 个花在推理上，content 只剩 186 字
+                且经常 JSON 被截断，偶尔 content 字段整个缺失（表现为 KeyError 'content'）。
+                失败重试一次即可覆盖这种间歇性失败。"""
+                last = None
+                for attempt in (1, 2):
+                    try:
+                        return self._parse_response(self._call_api(p))
+                    except Exception as e:
+                        last = e
+                        if attempt == 1:
+                            logger.warning(f'[AI] SenseNova 第1次失败({e})，重试...')
+                raise last
+
             try:
-                response = self._call_api(prompt)
-                result = self._parse_response(response)
+                result = _try_sensenova(prompt)
             except Exception as e1:
                 logger.warning(f'[AI] SenseNova失败({e1})，试智谱GLM...')
-                response = self._call_zhipu(prompt)
-                result = self._parse_response(response)
+                if not ZHIPU_API_KEY:
+                    raise  # 备用模型未配置，直接走模板兜底，不发无意义请求
+                result = self._parse_response(self._call_zhipu(prompt))
 
             # 验证结果
             result = self._validate_result(result, drama_name, version_hook)
@@ -191,7 +236,7 @@ class AICopyGenerator:
         """智谱GLM-4-Flash备用"""
         url = 'https://open.bigmodel.cn/api/paas/v4/chat/completions'
         headers = {
-            'Authorization': 'Bearer 55f9d6f4864e4088b6cd162df2c5be72.itFPsQE7gz80kWw6',
+            'Authorization': f'Bearer {ZHIPU_API_KEY}',
             'Content-Type': 'application/json'
         }
         data = {
