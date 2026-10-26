@@ -85,7 +85,7 @@ def probe_duration(filepath):
            "-show_entries", "format=duration",
            "-of", "default=noprint_wrappers=1:nokey=1",
            filepath]
-    r = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
+    r = subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=30)
     if r.returncode != 0:
         raise RuntimeError(f"ffprobe failed: {r.stderr.strip()[:200]}")
     return float(r.stdout.strip())
@@ -93,7 +93,7 @@ def probe_duration(filepath):
 
 def probe_info(filepath):
     cmd = [FFPROBE, "-v", "error", "-show_streams", "-of", "json", filepath]
-    r = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
+    r = subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=30)
     if r.returncode != 0:
         raise RuntimeError(f"ffprobe failed: {r.stderr.strip()[:200]}")
     return json.loads(r.stdout)
@@ -217,7 +217,7 @@ def render_segment(source, start, duration, output, crf, preset):
         "-c:a", "aac", "-b:a", "160k",
         output,
     ]
-    r = subprocess.run(cmd, capture_output=True, text=True, timeout=300)
+    r = subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=300)
     if r.returncode != 0:
         raise RuntimeError(f"片段渲染失败: {r.stderr.strip()[-300:]}")
 
@@ -239,7 +239,7 @@ def concat_segments(segment_files, output, crf, preset):
         "-c:a", "aac", "-b:a", "160k",
         output,
     ]
-    r = subprocess.run(cmd, capture_output=True, text=True, timeout=600)
+    r = subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=600)
     # 清理清单文件
     if os.path.exists(concat_list):
         os.remove(concat_list)
@@ -255,7 +255,7 @@ def concat_segments(segment_files, output, crf, preset):
             "-c:a", "aac", "-b:a", "160k",
             output,
         ])
-        r = subprocess.run(cmd2, capture_output=True, text=True, timeout=600)
+        r = subprocess.run(cmd2, capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=600)
     if r.returncode != 0:
         raise RuntimeError(f"拼接失败: {r.stderr.strip()[-300:]}")
 
@@ -274,7 +274,7 @@ def apply_anti_dup(raw, output, ad, crf, preset):
         "-f", "mp4",
         output,
     ]
-    r = subprocess.run(cmd, capture_output=True, text=True, timeout=900)
+    r = subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=900)
     if r.returncode != 0:
         raise RuntimeError(f"抗查重失败: {r.stderr.strip()[-300:]}")
 

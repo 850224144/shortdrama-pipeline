@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 """
-AI 文案生成器 - 使用 SenseNova API
+AI 文案生成器 - 主用智谱 GLM-4-Flash（免费），备用 SenseNova，都失败走模板兜底
 生成标题、描述、话题
 """
 
@@ -70,7 +70,9 @@ SENSENOVA_API_BASE = os.environ.get('SENSENOVA_API_BASE', 'https://token.senseno
 SENSENOVA_API_KEY = os.environ.get('SENSENOVA_API_KEY', '')
 SENSENOVA_MODEL = os.environ.get('SENSENOVA_MODEL', 'sensenova-6.8-flash-lite')
 
-# 备用文案模型（智谱 GLM-4-Flash）：SenseNova 失败时自动切换。未配置则直接走模板。
+# 主文案模型（智谱 GLM-4-Flash，免费）：实测单次约 6s、70-86 token、零推理浪费。
+# SenseNova 为备用（reasoning 模型，6 版并行约 40s，token 大部分花在推理上）。
+# 未配置 GLM 则直接切 SenseNova；两个都没有走模板兜底。
 ZHIPU_API_KEY = os.environ.get('ZHIPU_API_KEY', '')
 
 
@@ -81,10 +83,12 @@ class AICopyGenerator:
         self.api_base = SENSENOVA_API_BASE
         self.api_key = api_key
         self.model = SENSENOVA_MODEL
-        self.enabled = bool(api_key)  # 未配置 key 时禁用，直接走模板兜底
+        # 任一模型可用就算启用；两个都没有才走纯模板兜底
+        self.enabled = bool(SENSENOVA_API_KEY or ZHIPU_API_KEY)
         self.cache = {}  # 缓存已生成的文案
-        # 智谱熔断：不可用（额度/限流/鉴权失效）后本会话内置 True，跳过备用模型。
-        # 到 cooldown 后半开自动再试一次，所以额度恢复后无需改代码、无需重启 webapp。
+        # 智谱熔断：不可用（额度/限流/鉴权失效）后本会话内置 True，跳过智谱
+        # 直接走 SenseNova 备用。到 cooldown 后半开自动再试一次，所以额度恢复后
+        # 无需改代码、无需重启 webapp。
         self._zhipu_disabled = False
         self._zhipu_disabled_at = 0.0
         self._zhipu_fuse_cooldown = 900  # 秒
@@ -122,43 +126,46 @@ class AICopyGenerator:
                                     plot_summary, drama_genre, quotes)
         
         try:
-            # 调用 AI API（先试SenseNova，失败试智谱）
-            def _try_sensenova(p):
-                """SenseNova 是 reasoning 模型：reasoning_effort='none' 被忽略，
-                实测 1940 个 completion token 里 1841 个花在推理上，content 只剩 186 字
-                且经常 JSON 被截断，偶尔 content 字段整个缺失（表现为 KeyError 'content'）。
-                失败重试一次即可覆盖这种间歇性失败。"""
-                last = None
-                for attempt in (1, 2):
-                    try:
-                        return self._parse_response(self._call_api(p))
-                    except Exception as e:
-                        last = e
-                        if attempt == 1:
-                            logger.warning(f'[AI] SenseNova 第1次失败({e})，重试...')
-                raise last
-
+            # 主模型：智谱 GLM-4-Flash（免费）。实测单次约 6s、70-86 个 token、
+            # reasoning_tokens=0，不需要重试；标题过短的问题由 _call_zhipu_copy
+            # 内部的修正提示重试处理。SenseNova 已降为备用（见下方注释）。
             try:
-                result = _try_sensenova(prompt)
-            except Exception as e1:
-                logger.warning(f'[AI] SenseNova失败({e1})，试智谱GLM...')
                 if not ZHIPU_API_KEY:
-                    raise  # 备用模型未配置，直接走模板兜底，不发无意义请求
+                    raise Exception('智谱 GLM 未配置')
                 if not self._zhipu_available():
-                    raise  # 智谱熔断中（未过冷却期），直接走模板兜底
+                    raise Exception('智谱熔断中（未到冷却期）')
+                result = self._call_zhipu_copy(prompt)
+            except Exception as e1:
+                # SenseNova 备用（reasoning 模型：reasoning_effort='none' 被忽略，
+                # 实测 1940 个 completion token 里 1841 个花在推理上，content 只剩
+                # 186 字，经常 JSON 被截断，偶尔 content 字段整个缺失表现为
+                # KeyError 'content'，所以自带重试一次）
+                def _try_sensenova(p):
+                    last = None
+                    for attempt in (1, 2):
+                        try:
+                            return self._parse_response(self._call_api(p))
+                        except Exception as e:
+                            last = e
+                            if attempt == 1:
+                                logger.warning(f'[AI] SenseNova 第1次失败({e})，重试...')
+                    raise last
+
+                msg = str(e1)
+                if self._trip_zhipu_fuse(msg):
+                    logger.warning(
+                        f'[AI] 智谱不可用({msg[:80]})，'
+                        f'{self._zhipu_fuse_cooldown // 60}分钟内跳过智谱直接走 SenseNova')
+                logger.warning(f'[AI] 智谱失败({msg[:80]})，试 SenseNova...')
+                if not self.api_key:
+                    raise  # 备用模型未配置，直接走模板兜底，不发无意义请求
                 try:
-                    result = self._call_zhipu_copy(prompt)
+                    result = _try_sensenova(prompt)
                 except Exception as e2:
-                    # 额度用尽/限流/鉴权失效后，每个版本都会白发一次注定失败的请求：
-                    # 熔断后跳过备用模型走模板兜底，到冷却期后半开自动再试一次。
-                    msg = str(e2)
-                    if self._trip_zhipu_fuse(msg):
-                        logger.warning(
-                            f'[AI] 智谱不可用({msg[:80]})，'
-                            f'{self._zhipu_fuse_cooldown // 60}分钟内改用模板兜底')
+                    logger.warning(f'[AI] SenseNova 也失败({str(e2)[:80]})')
                     raise
 
-            # 验证结果
+            # 验证结果（GLM 成功和备用切换成功两条路径都会走到这里）
             result = self._validate_result(result, drama_name, version_hook)
 
             # 缓存结果
@@ -273,24 +280,46 @@ class AICopyGenerator:
             return True
         return False
 
-    def _call_zhipu_copy(self, prompt):
-        """调智谱，并按"标题 6-16 字"要求重试一次。
+    # 标题里不允许出现的标点（发布平台标题不接受标点）
+    _TITLE_PUNCT = '，。！？、；：,.!?;:"\'“”‘’（）()《》<>【】[]…—·-~@#$%^&*+='
 
-        glm-4-flash 经常无视该要求（实测 3/3 都是 4 字标题）。若放任，
-        _validate_result 会静默把标题换成模板，而模板恰好是"恶霸/豪门千金"
-        这类提示词明确禁止的编造剧情——等于 AI 白跑还更差。
+    @classmethod
+    def _clean_title(cls, title):
+        """去掉标题里的标点并去首尾空白。"""
+        return ''.join(ch for ch in (title or '') if ch not in cls._TITLE_PUNCT).strip()
+
+    @classmethod
+    def _title_ok(cls, title):
+        """标题合规：6-16 字且不含标点。"""
+        return 6 <= len(cls._clean_title(title)) <= 16
+
+    def _call_zhipu_copy(self, prompt, max_attempts=3):
+        """调智谱，标题不合规（不足 6 字 / 超长 / 带标点）就追加修正提示重试。
+
+        glm-4-flash 单次输出质量很差：实测 18 条里 17 条标题不足 6 字、7 条带
+        问号等标点（"好惹？等着"、"新娘怒吼"、"等真相"）。放任的话
+        _validate_result 只会静默换成模板标题，而模板是"恶霸/豪门千金"这类
+        提示词明令禁止的编造剧情——等于 AI 白跑还更差。
         """
-        for attempt in (1, 2):
+        base = prompt
+        result = None
+        for attempt in range(1, max_attempts + 1):
             result = self._parse_response(self._call_zhipu(prompt))
-            title = (result.get('title') or '').strip()
-            if 6 <= len(title) <= 16:
+            title = self._clean_title(result.get('title'))
+            if self._title_ok(title):
                 return result
-            logger.warning(f'[AI] 智谱标题{len(title)}字不在6-16字：'
-                           f'{"重试一次" if attempt == 1 else "仍不合规，交 _validate_result 兜底"}')
-            if attempt == 1:
-                prompt = (prompt
-                          + f'\n\n【重要修正】你上次的标题只有 {len(title)} 个字，'
-                            f'这次标题必须严格写 6-16 个字，不要写这么短。')
+            raw = (result.get('title') or '').strip()
+            issues = []
+            if not 6 <= len(title) <= 16:
+                issues.append(f'标题只有 {len(title)} 个字，必须写到 6-16 个字')
+            if raw != title:
+                issues.append(f'标题「{raw}」带了标点符号，标题里绝对不能有标点')
+            logger.warning(f'[AI] 智谱标题不合规（{"，".join(issues)}）：第{attempt}/{max_attempts}次')
+            if attempt < max_attempts:
+                prompt = (base
+                          + '\n\n【必须修正】你上次的输出不合格：' + '；'.join(issues)
+                          + '。请严格重做：标题必须是 6 到 16 个汉字、完全不含任何'
+                            '标点符号，并且要包含剧名或钩子主题，不要写这种通用碎片。')
         return result
 
     def _call_zhipu(self, prompt):
@@ -338,9 +367,9 @@ class AICopyGenerator:
     def _validate_result(self, result, drama_name, version_hook):
         """验证 AI 生成结果"""
         
-        # 验证标题
-        title = result.get('title', '')
-        if not title or len(title) < 6 or len(title) > 16:
+        # 验证标题：先去掉标点（发布平台标题不接受标点），长度不合规再走模板
+        title = self._clean_title(result.get('title'))
+        if not title or not 6 <= len(title) <= 16:
             title = self._generate_title(drama_name, version_hook)
         
         # 验证描述
