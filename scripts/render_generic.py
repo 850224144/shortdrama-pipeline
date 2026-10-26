@@ -53,6 +53,32 @@ def log(msg):
     print(f"[{time.strftime('%H:%M:%S')}] {msg}", flush=True)
 
 
+def _safe_remove(path):
+    """尽力删除文件；清理路径自身出错不能炸掉主流程"""
+    try:
+        if path and os.path.exists(path):
+            os.remove(path)
+    except OSError:
+        pass
+
+
+def sweep_stale_tmp(out_dir):
+    """清扫历史运行残留的 .tmp 半成品（进程被强杀时 finally 没执行到的）。
+
+    命名固定为 <交付名>.mp4.tmp：对所有 endswith('.mp4') 的收集/去重/上传
+    glob 不可见，因此残留也无害，清扫只是保持交付目录整洁。
+    """
+    n = 0
+    try:
+        for f in os.listdir(out_dir):
+            if f.endswith(".mp4.tmp"):
+                _safe_remove(os.path.join(out_dir, f))
+                n += 1
+    except OSError:
+        pass
+    return n
+
+
 # ===== ffprobe 工具 =====
 def probe_duration(filepath):
     cmd = [FFPROBE, "-v", "error",
@@ -235,6 +261,8 @@ def concat_segments(segment_files, output, crf, preset):
 
 
 def apply_anti_dup(raw, output, ad, crf, preset):
+    # 注意：output 可能是 .mp4.tmp 临时名，ffmpeg 靠扩展名猜封装格式会失败，
+    # 必须显式 -f mp4（正式名场景下显式指定也无害）。
     cmd = [
         FFMPEG, "-y",
         "-i", raw,
@@ -243,6 +271,7 @@ def apply_anti_dup(raw, output, ad, crf, preset):
         "-c:v", "libx264", "-crf", str(crf), "-preset", preset,
         "-c:a", "aac", "-b:a", "160k",
         "-movflags", "+faststart",
+        "-f", "mp4",
         output,
     ]
     r = subprocess.run(cmd, capture_output=True, text=True, timeout=900)
@@ -296,6 +325,9 @@ def process_video(video, config, tmp_base):
     drama_safe = drama.replace('，', '_').replace(',', '_').replace(' ', '_')
 
     final_path = os.path.join(out_dir, f"{drama_safe}_{vid}_{kw}_去重版.mp4")
+    # P0-2：交付名绝不直接当 ffmpeg 输出。先写 .tmp（对 endswith('.mp4') 的
+    # 去重闸门/收集/报告/上传 glob 全部不可见），核验通过才 os.replace 落正式名。
+    tmp_path = final_path + ".tmp"
     vtmp = os.path.join(tmp_base, f"v{vid}")
     os.makedirs(vtmp, exist_ok=True)
 
@@ -333,27 +365,33 @@ def process_video(video, config, tmp_base):
         concat_segments(seg_files, raw, crf, preset)
         log(f"  🔗 拼接完成 ({time.time()-t0:.1f}s)")
 
-        # 4. 抗查重
+        # 4+5. 抗查重 + 核验 —— 三段式原子落盘（P0-2）。
+        #    原实现 ffmpeg 直接写 *_去重版.mp4：编码失败或核验不过都会把
+        #    0 字节~400MB 的残缺文件留在交付目录，manual_cut 数 _去重版.mp4
+        #    误判"已切完"永久跳过重切，收集/上传还会把坏文件当成品。
         t0 = time.time()
-        apply_anti_dup(raw, final_path, ad, crf, preset)
+        apply_anti_dup(raw, tmp_path, ad, crf, preset)
         log(f"  🛡️  抗查重完成 ({time.time()-t0:.1f}s)")
 
-        # 5. 核验
         log(f"  ✅ 核验...")
-        ok, msg = verify_output(final_path)
+        ok, msg = verify_output(tmp_path)
         if ok:
+            os.replace(tmp_path, final_path)  # 同卷原子替换
             log(f"  ✅ 通过: {msg}")
             return {"id": vid, "kw": kw, "status": "OK", "detail": msg, "path": final_path}
         else:
             log(f"  ❌ 核验失败: {msg}")
-            return {"id": vid, "kw": kw, "status": "FAILED", "detail": msg, "path": final_path}
+            _safe_remove(tmp_path)
+            return {"id": vid, "kw": kw, "status": "FAILED", "detail": msg}
 
     except Exception as e:
+        _safe_remove(tmp_path)
         return {"id": vid, "kw": kw, "status": "FAILED", "detail": str(e)}
     finally:
         # 6. 清理临时文件
         if os.path.isdir(vtmp):
             shutil.rmtree(vtmp)
+        _safe_remove(tmp_path)  # 兜底：成功路径 tmp 已被 replace 走，这里通常无事可做
         log(f"  🧹 临时文件已清理")
 
 
@@ -406,6 +444,8 @@ def main():
     src_pat = config.get("source_pattern", "{name} - 第{ep}集.mp4")
     src_dir = config["source_dir"]
     drama = config["drama_name"]
+    # 与 process_video 中的规则保持一致（报告里的文件名要能对上实际交付文件）
+    drama_safe = drama.replace('，', '_').replace(',', '_').replace(' ', '_')
     src_errors = []
     checked = set()
     for s in all_segs:
@@ -464,6 +504,11 @@ def main():
     # 清理临时目录
     if os.path.isdir(tmp_base):
         shutil.rmtree(tmp_base)
+
+    # P0-2：清扫历史运行残留的 .tmp 半成品（上次进程被强杀时 finally 没跑到）
+    swept = sweep_stale_tmp(out_dir)
+    if swept:
+        log(f"🧹 已清扫 {swept} 个历史残留的 .tmp 半成品")
 
     # ===== 报告 =====
     elapsed = time.time() - t_start
@@ -529,15 +574,6 @@ def main():
                 f.write(f"- V{o['a']['vid']}/Ep{o['a']['ep']} ↔ V{o['b']['vid']}/Ep{o['b']['ep']}: 重叠 {o['overlap_sec']:.1f}s\n")
 
     log(f"\n📝 报告: {report_path}")
-
-    # 清理临时片段目录
-    import shutil
-    if os.path.exists(tmp_base):
-        try:
-            shutil.rmtree(tmp_base, ignore_errors=True)
-            log(f"🧹 已清理临时目录: {tmp_base}")
-        except Exception as e:
-            log(f"⚠️ 清理临时目录失败: {e}")
 
     return 0 if fail == 0 else 1
 
