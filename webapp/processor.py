@@ -1705,7 +1705,8 @@ class PipelineProcessor:
             except Exception as e:
                 self.logger.log('system', 'WARN', f'保存EDL配置失败：{str(e)}')
             
-            self.logger.log(drama_name, 'INFO', f'生成EDL配置V{v_idx+1}：{len(segments)}个片段')
+            self.logger.log(drama_name, 'INFO', f'生成EDL配置V{v_idx+1}：{len(segments)}个片段，'
+                                                 f'规划合计{sum(s["duration"] for s in segments):.0f}s')
             
             # 调用render_generic.py
             try:
@@ -1734,6 +1735,19 @@ class PipelineProcessor:
         
         return videos
     
+    # 成片业务窗口 210-300s（见 _select_best_videos）。渲染会跑 atempo=1.05 轻微加速，
+    # 所以 EDL 规划总时长收敛到 230-285s，留出余量确保成片落进窗口。
+    # 之前两个生成器都不看累计时长：10 集能排到 ~370s，成片 350-360s 全部落在窗口外——
+    # 实测「断情七载，前夫求复合」V1 规划 371.5s、成片 354.9s，8 个版本渲染约 48 分钟
+    # 才发现一个都不达标（只有 _select_best_videos 的不足 6 个补全兜底才没归零）。
+    PLANNED_SEGS_MIN = 230.0
+    PLANNED_SEGS_MAX = 285.0
+    MIN_SEG_DUR = 15.0
+
+    def _seg_budget_left(self, segments):
+        """规划总时长预算还剩多少秒（相对 PLANNED_SEGS_MAX）。"""
+        return self.PLANNED_SEGS_MAX - sum(s["duration"] for s in segments)
+
     def _generate_reverse_segments(self, edl_eps, v_idx):
         """生成倒叙结构的segments"""
         segments = []
@@ -1755,7 +1769,10 @@ class PipelineProcessor:
             if duration >= 30:
                 # 确保片段在文件范围内
                 max_start = duration - 5
-                seg_duration = min(random.uniform(30, 50), duration - 10)
+                # 炸点也受累计时长预算约束
+                seg_duration = round(max(self.MIN_SEG_DUR,
+                                          min(random.uniform(30, 50), duration - 10,
+                                              self._seg_budget_left(segments))), 1)
                 seg_start = random.uniform(0, max(max_start - seg_duration, 0))
                 segments.append({
                     "episode": self._get_episode_num(last_ep),
@@ -1774,11 +1791,16 @@ class PipelineProcessor:
             start = random.uniform(5, 15)
             
             for _ in range(num_segments):
+                # 累计时长预算用完就停手，保证成片落在 210-300s 窗口内
+                left = self._seg_budget_left(segments)
+                if left <= self.MIN_SEG_DUR:
+                    break
                 # 确保片段不超过剩余时长
                 remaining = duration - start - 5
                 if remaining < 15:
                     break
-                seg_duration = min(random.uniform(30, 75), remaining)
+                # 先按预算 clamp 再 round：round 可能向上舍入，会让累计值悄悄越过预算
+                seg_duration = round(min(random.uniform(30, 75), remaining, left), 1)
                 if seg_duration < 15:
                     break
                 segments.append({
@@ -1787,9 +1809,9 @@ class PipelineProcessor:
                     "duration": round(seg_duration, 1)
                 })
                 start += seg_duration + random.uniform(1, 3)
-        
+
         return segments
-    
+
     def _generate_random_segments(self, edl_eps, v_idx):
         """生成随机结构的segments - 检查时长有效性"""
         segments = []
@@ -1808,11 +1830,16 @@ class PipelineProcessor:
             start = random.uniform(5, 15)
             
             for _ in range(num_segments):
+                # 累计时长预算用完就停手，保证成片落在 210-300s 窗口内
+                left = self._seg_budget_left(segments)
+                if left <= self.MIN_SEG_DUR:
+                    break
                 # 确保片段不超过剩余时长
                 remaining = duration - start - 5
                 if remaining < 15:
                     break
-                seg_duration = min(random.uniform(30, 75), remaining)
+                # 先按预算 clamp 再 round：round 可能向上舍入，会让累计值悄悄越过预算
+                seg_duration = round(min(random.uniform(30, 75), remaining, left), 1)
                 if seg_duration < 15:
                     break
                 segments.append({
@@ -1821,9 +1848,9 @@ class PipelineProcessor:
                     "duration": round(seg_duration, 1)
                 })
                 start += seg_duration + random.uniform(1, 3)
-        
+
         return segments
-    
+
     def _get_episode_num(self, filepath):
         """从文件名获取集数 - 兼容两种格式"""
         fname = os.path.basename(filepath)
