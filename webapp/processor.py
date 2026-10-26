@@ -1748,67 +1748,125 @@ class PipelineProcessor:
         """规划总时长预算还剩多少秒（相对 PLANNED_SEGS_MAX）。"""
         return self.PLANNED_SEGS_MAX - sum(s["duration"] for s in segments)
 
-    def _generate_reverse_segments(self, edl_eps, v_idx):
-        """生成倒叙结构的segments"""
-        segments = []
-        
-        # 倒叙结构：开头炸点→倒回起因→发展→高潮→再升级→结尾钩子
-        # 从后往前取素材
-        eps = list(edl_eps)
-        random.shuffle(eps)
-        eps = eps[:10]  # 最多10集
-        
-        if not eps:
+    # 冲突/悬念词库：给逐句台词打分，用来定位高能点
+    # 冲突词权重 2（情绪爆发），悬念词权重 1（信息揭示）
+    CONFLICT_WORDS = ('打脸', '傻', '死', '滚', '敢', '凭什么', '不可能', '疯了',
+                      '骗', '恨', '杀', '血', '泪', '离婚', '出轨', '复合', '孩子',
+                      '怀孕', '亿', '婚约', '下不来台', '后悔')
+    SUSPENSE_WORDS = ('发现', '秘密', '真相', '原来', '竟然', '居然', '突然',
+                      '没想到', '终于', '七年', '前妻', '复婚')
+
+    def _load_episode_highlights(self, edl_eps):
+        """逐集 ASR 转写 -> 每集的高能窗口候选（按分数降序）。
+
+        转写文件约定：<src_dir>/transcribe/EP<集文件名去掉.mp4>.json，内容形如
+        [{"start":0.0,"end":3.28,"text":"..."}, ...]，时间戳是单集内的相对秒。
+        窗口在原句边界外扩（前 2s 铺垫 + 后 6s 反应），再夹进 0..ep_dur。
+        """
+        if not edl_eps:
             return []
-        
-        # 开头炸点（最后一集）
-        last_ep = eps[-1] if eps else None
-        if last_ep:
-            duration = self._get_video_duration(last_ep)
-            # 跳过损坏的文件
-            if duration >= 30:
-                # 确保片段在文件范围内
-                max_start = duration - 5
-                # 炸点也受累计时长预算约束
-                seg_duration = round(max(self.MIN_SEG_DUR,
-                                          min(random.uniform(30, 50), duration - 10,
-                                              self._seg_budget_left(segments))), 1)
-                seg_start = random.uniform(0, max(max_start - seg_duration, 0))
-                segments.append({
-                    "episode": self._get_episode_num(last_ep),
-                    "start": round(seg_start, 1),
-                    "duration": round(seg_duration, 1)
-                })
-        
-        # 中间部分（倒序）
-        for ep_file in reversed(eps[:-1]):
-            duration = self._get_video_duration(ep_file)
-            # 跳过损坏或过短的文件
-            if duration < 30:
+        hi_dir = os.path.join(os.path.dirname(os.path.abspath(edl_eps[0])), "transcribe")
+        out = []
+        for ep_file in edl_eps:
+            jpath = os.path.join(hi_dir,
+                                  "EP" + os.path.splitext(os.path.basename(ep_file))[0] + ".json")
+            if not os.path.exists(jpath):
                 continue
-            
-            num_segments = random.randint(2, 3)
-            start = random.uniform(5, 15)
-            
-            for _ in range(num_segments):
-                # 累计时长预算用完就停手，保证成片落在 210-300s 窗口内
-                left = self._seg_budget_left(segments)
-                if left <= self.MIN_SEG_DUR:
-                    break
-                # 确保片段不超过剩余时长
-                remaining = duration - start - 5
-                if remaining < 15:
-                    break
-                # 先按预算 clamp 再 round：round 可能向上舍入，会让累计值悄悄越过预算
-                seg_duration = round(min(random.uniform(30, 75), remaining, left), 1)
-                if seg_duration < 15:
-                    break
-                segments.append({
+            try:
+                with open(jpath, 'r', encoding='utf-8') as f:
+                    raw = json.load(f)
+            except Exception:
+                continue
+            if not isinstance(raw, list) or not raw:
+                continue
+            ep_dur = max((float(s.get("end", 0)) for s in raw), default=0.0)
+            # 先收集逐句打分，再按时间顺序把相邻高分句合并成连续窗口：
+            # 冲突戏是一串快速来回（"你敢…""打脸"…），不是单句，合并后才是完整高潮。
+            hits = []
+            for s in raw:
+                text = s.get("text") or ""
+                score = sum(1 for w in self.CONFLICT_WORDS if w in text) * 2 + \
+                        sum(1 for w in self.SUSPENSE_WORDS if w in text)
+                if not score:
+                    continue
+                hits.append([float(s.get("start", 0)),
+                             float(s.get("end", float(s.get("start", 0)))) ,
+                             score])
+            hits.sort()
+            merged = []
+            for st, en, sc in hits:
+                # 4s 以内的空档视为同一场戏
+                if merged and st - merged[-1][1] <= 4.0:
+                    merged[-1][1] = max(merged[-1][1], en)
+                    merged[-1][2] += sc
+                else:
+                    merged.append([st, en, sc])
+            cands = []
+            for st, en, sc in merged:
+                start = max(0.0, st - 2.0)          # 前 2s 铺垫
+                dur = en - start + 4.0              # 后 4s 反应
+                dur = min(dur, max(0.0, ep_dur - start))
+                if dur < 15.0:
+                    continue
+                cands.append((sc, round(start, 1), round(min(dur, 60.0), 1)))
+            if cands:
+                cands.sort(key=lambda c: -c[0])
+                out.append({
                     "episode": self._get_episode_num(ep_file),
-                    "start": round(start, 1),
-                    "duration": round(seg_duration, 1)
+                    "path": ep_file,
+                    "dur": ep_dur,
+                    "cands": cands,
                 })
-                start += seg_duration + random.uniform(1, 3)
+        return out
+
+    def _generate_reverse_segments(self, edl_eps, v_idx):
+        """倒叙结构：开头上全局最高能点，随后按集号逆序铺开每集的最高能窗口。
+
+        高能点由逐集 ASR 转写按冲突/悬念词命中打分定位。此前的实现是
+        random.shuffle 后取 eps[-1] 当「最后一集」、再 reversed(eps[:-1]) 铺中间——
+        打乱之后再取尾、再反转，两者都不成立，所以「开头直接上最炸画面」从来没
+        真正实现过，开头片段其实是随机一集在随机偏移处。
+        """
+        eps_hl = self._load_episode_highlights(edl_eps)
+        if not eps_hl:
+            # 没有 ASR 转写（未跑通或素材缺转写）：退回随机逻辑，保证版本开得出
+            return self._generate_random_segments(edl_eps, v_idx)
+
+        segments = []
+
+        def add(ep_num, start, dur):
+            """按累计时长预算追加片段；预算耗尽返回 False"""
+            left = self._seg_budget_left(segments)
+            if left <= self.MIN_SEG_DUR:
+                return False
+            d = round(min(dur, left), 1)
+            if d < self.MIN_SEG_DUR:
+                return False
+            segments.append({
+                "episode": ep_num,
+                "start": round(max(0.0, start), 1),
+                "duration": d,
+            })
+            return True
+
+        # 1. 开头炸点：锁最后一集（结局/反转），取该集分数最高的窗口
+        top = max(eps_hl, key=lambda x: x["episode"])
+        open_cand = top["cands"][0]
+        add(top["episode"], open_cand[1], open_cand[2])
+
+        # 2. 按集号逆序铺开，每集取该集未被占用的高能窗口
+        used = set()
+        used.add((top["episode"], open_cand[1]))
+        for e in sorted(eps_hl, key=lambda x: -x["episode"]):
+            if self._seg_budget_left(segments) <= self.MIN_SEG_DUR:
+                break
+            for c in e["cands"]:
+                key = (e["episode"], c[1])
+                if key in used:
+                    continue
+                used.add(key)
+                if add(e["episode"], c[1], c[2]):
+                    break
 
         return segments
 
@@ -1906,52 +1964,62 @@ class PipelineProcessor:
         ]
         pos = positions[version_idx % 4]
         
-        vf = (
-            "setpts=PTS/1.05,"
-            "crop=1080:1860:0:30,pad=1080:1920:0:30:black,"
-            "eq=contrast=1.05:saturation=1.1:brightness=0.02,"
-            "noise=alls=8:allf=t,rotate=0.008:fillcolor=black,fps=29.97,"
-            f"drawtext=fontfile='C:/Windows/Fonts/msyh.ttc':"
-            f"text='{watermark}':fontsize=36:fontcolor=white@0.3:"
-            f"x={pos[0]}:y={pos[1]}"
-        )
-        af = "atempo=1.05,equalizer=f=3000:t=h:width=1000:g=3," \
-             "equalizer=f=100:t=h:width=50:g=-2"
-        
-        # 输入输出同路径会让ffmpeg边读边写导致失败/损坏，先写临时文件再原子替换
-        tmp_path = output_path + ".post.tmp.mp4"
-        cmd = [
-            CONFIG['ffmpeg_path'], "-y", "-i", input_path,
-            "-vf", vf, "-af", af,
-            "-c:v", "libx264", "-preset", "ultrafast", "-crf", "23", "-c:a", "aac", "-b:a", "128k",
-            tmp_path
-        ]
-        
-        result = subprocess.run(cmd, capture_output=True, timeout=600)
-        if result.returncode != 0:
-            stderr_text = result.stderr.decode("utf-8", errors="ignore")[:300]
-            self.logger.log('system', 'ERROR', f'后处理失败(抗查重未完成，跳过此条不裸发): {stderr_text}')
-            # 不再 copy 原文件——裸视频直接发会被平台判重。
-            # 只清理临时文件，绝不删除渲染好的原始成片。
+        # 抗查重只在「输入还没抗查重」时做。EDL 渲染阶段 render_generic.apply_anti_dup
+        # 已经跑过完整抗查重链（产物名带 _去重版.mp4），再跑一遍等于：
+        #   时长 354.9s → 338.0s（又 ÷1.05）、306MB → 713MB（码率 7→16.9Mbps）、
+        #   两次有损转码（noise 加噪再压一次）、每版多花 ~3 分钟。
+        # 实测「断情七载」8 个版本因此多跑了约 24 分钟且体积翻 2.3 倍。
+        already_dedup = "_去重版.mp4" in os.path.basename(input_path)
+        if already_dedup:
+            self.logger.log('system', 'INFO',
+                            f'跳过重复抗查重（{os.path.basename(input_path)} 已在渲染阶段完成）')
+        else:
+            vf = (
+                "setpts=PTS/1.05,"
+                "crop=1080:1860:0:30,pad=1080:1920:0:30:black,"
+                "eq=contrast=1.05:saturation=1.1:brightness=0.02,"
+                "noise=alls=8:allf=t,rotate=0.008:fillcolor=black,fps=29.97,"
+                f"drawtext=fontfile='C:/Windows/Fonts/msyh.ttc':"
+                f"text='{watermark}':fontsize=36:fontcolor=white@0.3:"
+                f"x={pos[0]}:y={pos[1]}"
+            )
+            af = "atempo=1.05,equalizer=f=3000:t=h:width=1000:g=3," \
+                 "equalizer=f=100:t=h:width=50:g=-2"
+            
+            # 输入输出同路径会让ffmpeg边读边写导致失败/损坏，先写临时文件再原子替换
+            tmp_path = output_path + ".post.tmp.mp4"
+            cmd = [
+                CONFIG['ffmpeg_path'], "-y", "-i", input_path,
+                "-vf", vf, "-af", af,
+                "-c:v", "libx264", "-preset", "ultrafast", "-crf", "23", "-c:a", "aac", "-b:a", "128k",
+                tmp_path
+            ]
+            
+            result = subprocess.run(cmd, capture_output=True, timeout=600)
+            if result.returncode != 0:
+                stderr_text = result.stderr.decode("utf-8", errors="ignore")[:300]
+                self.logger.log('system', 'ERROR', f'后处理失败(抗查重未完成，跳过此条不裸发): {stderr_text}')
+                # 不再 copy 原文件——裸视频直接发会被平台判重。
+                # 只清理临时文件，绝不删除渲染好的原始成片。
+                try:
+                    if os.path.exists(tmp_path):
+                        os.remove(tmp_path)
+                except Exception:
+                    pass
+                return False
+            
+            # 后处理成功，用临时文件原子替换最终成片
             try:
-                if os.path.exists(tmp_path):
-                    os.remove(tmp_path)
-            except Exception:
-                pass
-            return False
+                os.replace(tmp_path, output_path)
+            except Exception as e:
+                self.logger.log('system', 'ERROR', f'替换成片失败：{str(e)}')
+                try:
+                    if os.path.exists(tmp_path):
+                        os.remove(tmp_path)
+                except Exception:
+                    pass
+                return False
         
-        # 后处理成功，用临时文件原子替换最终成片
-        try:
-            os.replace(tmp_path, output_path)
-        except Exception as e:
-            self.logger.log('system', 'ERROR', f'替换成片失败：{str(e)}')
-            try:
-                if os.path.exists(tmp_path):
-                    os.remove(tmp_path)
-            except Exception:
-                pass
-            return False
-
         # 生成封面
         self._generate_cover(input_path, output_path,
                            drama_name=drama_name,
@@ -1959,11 +2027,19 @@ class PipelineProcessor:
                            version_idx=version_idx)
         return True
     
+    # 交付文件名格式：{剧名安全名}_{版本号}_{钩子关键词}_去重版.mp4
+    # 剧名可能含数字，所以锚定「_数字_单token_去重版.mp4$」，不能用裸 V\d+。
+    # 之前用 re.search(r'V(\d+)') 永远匹配不到（EDL 文件名没有 V 前缀）→ 恒返回 1
+    # → positions[1] 左上角 → 8 个版本水印全挤同一角，四角轮换是死代码。
+    _VERSION_RE = re.compile(r'_(\d+)_[^_]+_去重版\.mp4(?:\.post\.tmp\.mp4)?$')
+
     def _get_version_idx(self, filepath):
-        """从文件名获取版本序号"""
+        """从交付文件名解析版本序号；解析不到返回 1"""
         try:
             fname = os.path.basename(filepath)
-            match = re.search(r'V(\d+)', fname)
+            match = self._VERSION_RE.search(fname)
+            if not match:
+                match = re.search(r'V(\d+)', fname)  # 兼容 AI 版本的 V1.mp4 命名
             if match:
                 return int(match.group(1))
         except Exception:
