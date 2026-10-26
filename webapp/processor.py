@@ -1924,11 +1924,13 @@ class PipelineProcessor:
         af = "atempo=1.05,equalizer=f=3000:t=h:width=1000:g=3," \
              "equalizer=f=100:t=h:width=50:g=-2"
         
+        # 输入输出同路径会让ffmpeg边读边写导致失败/损坏，先写临时文件再原子替换
+        tmp_path = output_path + ".post.tmp.mp4"
         cmd = [
             CONFIG['ffmpeg_path'], "-y", "-i", input_path,
             "-vf", vf, "-af", af,
             "-c:v", "libx264", "-preset", "ultrafast", "-crf", "23", "-c:a", "aac", "-b:a", "128k",
-            output_path
+            tmp_path
         ]
         
         result = subprocess.run(cmd, capture_output=True, timeout=600)
@@ -1936,10 +1938,22 @@ class PipelineProcessor:
             stderr_text = result.stderr.decode("utf-8", errors="ignore")[:300]
             self.logger.log('system', 'ERROR', f'后处理失败(抗查重未完成，跳过此条不裸发): {stderr_text}')
             # 不再 copy 原文件——裸视频直接发会被平台判重。
-            # 删掉半成品 output，让外层跳过这条。
+            # 只清理临时文件，绝不删除渲染好的原始成片。
             try:
-                if os.path.exists(output_path):
-                    os.remove(output_path)
+                if os.path.exists(tmp_path):
+                    os.remove(tmp_path)
+            except Exception:
+                pass
+            return False
+        
+        # 后处理成功，用临时文件原子替换最终成片
+        try:
+            os.replace(tmp_path, output_path)
+        except Exception as e:
+            self.logger.log('system', 'ERROR', f'替换成片失败：{str(e)}')
+            try:
+                if os.path.exists(tmp_path):
+                    os.remove(tmp_path)
             except Exception:
                 pass
             return False
