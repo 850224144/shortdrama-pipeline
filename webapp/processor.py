@@ -1728,7 +1728,7 @@ class PipelineProcessor:
                 if result.returncode == 0:
                     self.logger.log(drama_name, 'INFO', f'V{v_idx+1} EDL渲染成功')
                     # 查找输出文件
-                    output_files = [f for f in os.listdir(out_dir) if f.endswith(".mp4") and f"V{v_idx+1}" in f]
+                    output_files = [f for f in os.listdir(out_dir) if f.endswith(".mp4") and f"_{v_idx+1}_" in f]
                     for output_file in output_files:
                         videos.append({
                             'path': os.path.join(out_dir, output_file),
