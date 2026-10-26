@@ -13,10 +13,34 @@ import requests
 
 logger = logging.getLogger('AICopyGenerator')
 
-# API 配置
-SENSENOVA_API_BASE = 'https://token.sensenova.cn/v1'
-SENSENOVA_API_KEY = 'sk-qA5e29R5Uo5d8ylCyioHA3wC88U5YunO'
-SENSENOVA_MODEL = 'sensenova-6.8-flash-lite'
+# API 配置（敏感值不入库：读环境变量，缺省回退到项目根 .env）
+_PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+_ENV_PATH = os.path.join(_PROJECT_ROOT, '.env')
+
+
+def _load_env(path=_ENV_PATH):
+    """极简 .env 加载器（无第三方依赖）。已存在的环境变量优先，不被 .env 覆盖。"""
+    if not os.path.exists(path):
+        return False
+    try:
+        with open(path, 'r', encoding='utf-8') as f:
+            for line in f:
+                line = line.strip()
+                if not line or line.startswith('#') or '=' not in line:
+                    continue
+                k, _, v = line.partition('=')
+                os.environ.setdefault(k.strip(), v.strip().strip('"').strip("'"))
+        return True
+    except OSError:
+        return False
+
+
+_load_env()
+
+SENSENOVA_API_BASE = os.environ.get('SENSENOVA_API_BASE', 'https://token.sensenova.cn/v1')
+# 注意：源码里不再存放任何 API key。未配置时 AICopyGenerator.enabled=False，直接走模板兜底。
+SENSENOVA_API_KEY = os.environ.get('SENSENOVA_API_KEY', '')
+SENSENOVA_MODEL = os.environ.get('SENSENOVA_MODEL', 'sensenova-6.8-flash-lite')
 
 
 class AICopyGenerator:
@@ -26,7 +50,7 @@ class AICopyGenerator:
         self.api_base = SENSENOVA_API_BASE
         self.api_key = api_key
         self.model = SENSENOVA_MODEL
-        self.enabled = True
+        self.enabled = bool(api_key)  # 未配置 key 时禁用，直接走模板兜底
         self.cache = {}  # 缓存已生成的文案
     
     def generate_copy(self, drama_name, version_idx, version_hook, 
@@ -49,6 +73,9 @@ class AICopyGenerator:
             }
         """
         quotes = quotes or []
+        # 未配置 API key：直接走模板，不做无意义的 API 调用
+        if not self.enabled:
+            return self._generate_template_copy(drama_name, version_idx, version_hook)
         # 检查缓存
         cache_key = f"{drama_name}_{version_idx}_{version_hook}"
         if cache_key in self.cache:
