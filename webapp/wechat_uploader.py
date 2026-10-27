@@ -142,7 +142,7 @@ class WeChatChannelsUploader:
             visible = []
             for candidate in candidates:
                 try:
-                    if candidate and candidate.is_displayed():
+                    if candidate and candidate.states.is_displayed:
                         text = (candidate.text or '').strip()
                         if label in text:
                             visible.append((text != label, candidate))
@@ -155,6 +155,14 @@ class WeChatChannelsUploader:
 
     @staticmethod
     def _element_is_disabled(element):
+        # 优先使用 DrissionPage 原生 states.is_enabled（4.1.x 推荐）
+        try:
+            states = getattr(element, 'states', None)
+            if states is not None and hasattr(states, 'is_enabled'):
+                return not bool(states.is_enabled)
+        except Exception:
+            pass
+        # 回退到 HTML 属性检查
         try:
             classes = (element.attr('class') or '').lower()
             aria_disabled = (element.attr('aria-disabled') or '').lower()
@@ -509,7 +517,7 @@ return (() => ({
                     # 必须可见且未禁用：隐藏按钮点不到；禁用按钮说明视频还没
                     # 上传完（调用方会等待重试），此时点保存草稿没有意义。
                     if text in labels \
-                            and button.is_displayed() \
+                            and button.states.is_displayed \
                             and not self._element_is_disabled(button):
                         logger.info(f'找到保存草稿按钮: "{text}" (索引 {i})')
                         return button
