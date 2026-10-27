@@ -438,7 +438,6 @@ class UploadManager:
             co = ChromiumOptions()
             co.set_paths(user_data_path=user_data_path)
             co.set_argument('--disable-blink-features=AutomationControlled')
-            co.set_argument('--start-maximized')
             
             page = ChromiumPage(co)
             page.get('https://channels.weixin.qq.com/platform/post/draft')

@@ -538,7 +538,7 @@ def add_upload_task():
 def open_draft_box():
     """打开草稿箱浏览器窗口"""
     try:
-        data = request.get_json() or {}
+        data = request.get_json(force=True) or {}
         account = data.get('account')
         if not account:
             return jsonify({'status': 'failed', 'error': '缺少账号参数'}), 400
