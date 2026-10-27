@@ -213,7 +213,7 @@ def render_segment(source, start, duration, output, crf, preset):
         "-ss", str(start), "-i", source,
         "-t", str(duration),
         "-vf", "scale=1080:1920:force_original_aspect_ratio=decrease,pad=1080:1920:(ow-iw)/2:(oh-ih)/2:color=black",
-        "-c:v", "libx264", "-crf", str(crf), "-preset", preset,
+        "-c:v", "h264_nvenc", "-preset", "p4", "-cq", "23", "-rc", "vbr",
         "-c:a", "aac", "-b:a", "160k",
         output,
     ]
@@ -235,7 +235,7 @@ def concat_segments(segment_files, output, crf, preset):
         FFMPEG, "-y",
         "-f", "concat", "-safe", "0",
         "-i", concat_list,
-        "-c:v", "libx264", "-crf", str(crf), "-preset", preset,
+        "-c:v", "h264_nvenc", "-preset", "p4", "-cq", "23", "-rc", "vbr",
         "-c:a", "aac", "-b:a", "160k",
         output,
     ]
@@ -251,7 +251,7 @@ def concat_segments(segment_files, output, crf, preset):
         cmd2.extend([
             "-filter_complex", concat_filter(n),
             "-map", "[v]", "-map", "[a]",
-            "-c:v", "libx264", "-crf", str(crf), "-preset", preset,
+            "-c:v", "h264_nvenc", "-preset", "p4", "-cq", "23", "-rc", "vbr",
             "-c:a", "aac", "-b:a", "160k",
             output,
         ])
@@ -268,7 +268,7 @@ def apply_anti_dup(raw, output, ad, crf, preset):
         "-i", raw,
         "-vf", build_vf(ad),
         "-af", build_af(ad),
-        "-c:v", "libx264", "-crf", str(crf), "-preset", preset,
+        "-c:v", "h264_nvenc", "-preset", "p4", "-cq", "23", "-rc", "vbr",
         "-c:a", "aac", "-b:a", "160k",
         "-movflags", "+faststart",
         "-f", "mp4",

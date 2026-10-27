@@ -2147,7 +2147,7 @@ class PipelineProcessor:
                 "setpts=PTS/1.05,"
                 "crop=1080:1860:0:30,pad=1080:1920:0:30:black,"
                 "eq=contrast=1.05:saturation=1.1:brightness=0.02,"
-                "noise=alls=8:allf=t,rotate=0.008:fillcolor=black,fps=29.97,"
+                "noise=alls=8:allf=t,rotate=0.008:fillcolor=black:bilinear=0,fps=29.97,"
                 f"drawtext=fontfile='C:/Windows/Fonts/msyh.ttc':"
                 f"text='{watermark}':fontsize=36:fontcolor=white@0.3:"
                 f"x={pos[0]}:y={pos[1]}"
@@ -2160,7 +2160,7 @@ class PipelineProcessor:
             cmd = [
                 CONFIG['ffmpeg_path'], "-y", "-i", input_path,
                 "-vf", vf, "-af", af,
-                "-c:v", "libx264", "-preset", "ultrafast", "-crf", "23", "-c:a", "aac", "-b:a", "128k",
+                "-c:v", "h264_nvenc", "-preset", "p4", "-cq", "23", "-rc", "vbr", "-c:a", "aac", "-b:a", "128k",
                 tmp_path
             ]
             
@@ -2253,7 +2253,10 @@ class PipelineProcessor:
                     
                     return
             
-            # 3. 兜底：从视频第5秒截取
+            # 3. 无官方封面：跳过封面生成（用户规则：不生成封面，需程序判断）
+            self.logger.log("system", 'INFO', f'无官方封面，跳过封面生成：{os.path.basename(cover_path)}')
+            return
+            # 兜底：从视频第5秒截取（默认关闭，仅在需要时启用）
             cmd = [
                 CONFIG['ffmpeg_path'], "-y",
                 "-i", input_path,

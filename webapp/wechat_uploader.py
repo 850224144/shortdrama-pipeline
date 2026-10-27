@@ -97,7 +97,11 @@ class WeChatChannelsUploader:
         co.set_argument('--disable-gpu')
         
         if headless:
-            co.set_argument('--headless=new')
+            # Chrome 155 的 headless 模式与 DrissionPage 4.1.1.4 不兼容：
+            # --headless=new 启动后 CDP 连接 404，co.headless()/旧版 --headless 同样失败。
+            # 回退为有头模式（实测能正常启动），check_login 预检会短暂弹窗（10-20s），可接受。
+            # 若要恢复真 headless：升级 DrissionPage 或降级 Chrome，且需实测通过。
+            co.set_argument('--start-maximized')
         else:
             co.set_argument('--start-maximized')
         
@@ -108,6 +112,45 @@ class WeChatChannelsUploader:
         )
         
         return co
+    
+    def _new_page(self, co):
+        """创建页面并启用自动处理原生提示框（alert/confirm）。
+        accept=True：原生 confirm 自动点"确定"（微信"将此次编辑保留? 不保存保存"的
+        确定=保存草稿），避免 DrissionPage AlertExistsError 拦截所有 JS 操作。"""
+        page = ChromiumPage(co)
+        try:
+            page.set.auto_handle_alert(on_off=True, accept=True)
+        except Exception as e:
+            logger.debug(f'设置自动处理提示框失败: {e}')
+        return page
+    
+    def _handle_draft_popup(self):
+        """处理"将此次编辑保留? 不保存保存"弹窗——点"保存"（=保存草稿）。
+        原生 confirm 由 auto_handle_alert accept 自动处理；此处兜底点 DOM 弹窗的"保存"。"""
+        try:
+            result = self.page.run_js(r'''
+            return (() => {
+                const normalize = v => (v||'').replace(/\s+/g,' ').trim();
+                const popups = [...document.querySelectorAll(
+                    '.weui-desktop-dialog,[role="dialog"],.weui-desktop-popover,.weui-desktop-dialog__wrp'
+                )];
+                for (const popup of popups) {
+                    const text = normalize(popup.innerText||popup.textContent);
+                    if (text.includes('将此次编辑保留') || text.includes('使用定时发表')) {
+                        const btns = [...popup.querySelectorAll('button,[role="button"],a,span')];
+                        const saveBtn = btns.find(b => normalize(b.innerText||b.textContent)==='保存');
+                        if (saveBtn) { saveBtn.click(); return 'saved'; }
+                    }
+                }
+                return 'none';
+            })()
+            ''')
+            if result == 'saved':
+                logger.info('离开确认弹窗已点"保存"（保存草稿）')
+            return result
+        except Exception as e:
+            logger.debug(f'处理离开确认弹窗失败: {e}')
+            return None
     
     def _human_type(self, element, text):
         """模拟人类打字"""
@@ -199,17 +242,17 @@ class WeChatChannelsUploader:
         try:
             self.page.run_js(r"""
 return (() => {
-    const elements = [document.scrollingElement, document.body, document.documentElement,
+    const scrollingElements = [document.scrollingElement, document.body, document.documentElement,
         ...document.querySelectorAll('*')];
-    for (const element of elements) {
+    for (const element of scrollingElements) {
         if (element && element.scrollHeight > element.clientHeight + 2) {
             element.scrollTop = element.scrollHeight;
         }
     }
     window.scrollTo(0, document.documentElement.scrollHeight);
     const labels = ['保存草稿', '保存为草稿', '存为草稿', '保存到草稿箱', '保存并退出', '存草稿'];
-    const elements = [...document.querySelectorAll('button,[role="button"],a,[tabindex],div,span')];
-    const draft = elements.find(element => labels.includes((element.innerText || element.textContent || '')
+    const candidateNodes = [...document.querySelectorAll('button,[role="button"],a,[tabindex],div,span')];
+    const draft = candidateNodes.find(element => labels.includes((element.innerText || element.textContent || '')
         .replace(/\s+/g, ' ').trim()) && element.getBoundingClientRect().width > 0);
     if (draft) draft.scrollIntoView({block: 'center', inline: 'nearest'});
     return {viewport: [window.innerWidth, window.innerHeight], draftFound: Boolean(draft)};
@@ -254,72 +297,355 @@ return (() => ({
         except Exception as e:
             logger.debug(f'读取页面诊断信息失败: {e}')
 
-    def _wait_for_video_upload(self, timeout=300):
-        """等待视频上传完成。优先等待发布按钮出现，只有长时间不出现时才检查保存草稿按钮。"""
+    def _read_upload_runtime_state(self):
+        """递归读取发布页运行时状态，不依赖 iframe 外层的可见尺寸。
+
+        wujie 会把业务 DOM 放在 0x0 iframe 或 open shadow root 中，
+        DrissionPage 对这类节点做坐标/可见性判断会失真。这里直接在页面内
+        合并所有 same-origin document 和 shadow root，返回稳定可序列化状态。
+        """
+        return self.page.run_js(r'''
+return (() => {
+    const normalize = value => (value || '').replace(/\s+/g, ' ').trim();
+    const roots = [];
+    const seenRoots = new WeakSet();
+    let frameCount = 0;
+    let shadowRootCount = 0;
+
+    const addRoot = (root, depth = 0) => {
+        if (!root || seenRoots.has(root) || depth > 8) return;
+        seenRoots.add(root);
+        roots.push(root);
+
+        let nodes = [];
+        try {
+            nodes = [...root.querySelectorAll('*')];
+        } catch (e) {
+            return;
+        }
+
+        for (const element of nodes) {
+            if (element.shadowRoot) {
+                shadowRootCount += 1;
+                addRoot(element.shadowRoot, depth + 1);
+            }
+        }
+        for (const frame of root.querySelectorAll('iframe,frame')) {
+            try {
+                const frameDocument = frame.contentDocument;
+                if (frameDocument) {
+                    frameCount += 1;
+                    addRoot(frameDocument, depth + 1);
+                }
+            } catch (e) {}
+        }
+    };
+    addRoot(document);
+
+    const elements = [];
+    const seenElements = new Set();
+    for (const root of roots) {
+        const scope = root.documentElement || root;
+        let nodes = [];
+        try {
+            nodes = [...scope.querySelectorAll('*')];
+        } catch (e) {
+            continue;
+        }
+        for (const element of nodes) {
+            if (!seenElements.has(element)) {
+                seenElements.add(element);
+                elements.push(element);
+            }
+        }
+    }
+
+    const visible = element => {
+        try {
+            if (!element || !element.isConnected) return false;
+            if (element.closest('[aria-hidden="true"],[hidden]')) return false;
+            const ownerWindow = element.ownerDocument && element.ownerDocument.defaultView;
+            if (!ownerWindow) return false;
+            const style = ownerWindow.getComputedStyle(element);
+            return style.display !== 'none' &&
+                style.visibility !== 'hidden' &&
+                Number(style.opacity || 1) > 0;
+        } catch (e) {
+            return false;
+        }
+    };
+
+    const controlFor = element => {
+        // 优先取元素内部的实际 <button>（保存草稿/发表是 <button>，disabled
+        // 在 button 上；外层 DIV 检测不到 disabled，会误判按钮可用）。
+        const innerButton = element.querySelector && element.querySelector('button');
+        if (innerButton) return innerButton;
+        return element.closest('button,[role="button"],a,[tabindex]') || element;
+    };
+    const disabled = element => {
+        try {
+            const ownerWindow = element.ownerDocument && element.ownerDocument.defaultView;
+            const style = ownerWindow ? ownerWindow.getComputedStyle(element) : null;
+            return element.disabled === true ||
+                element.getAttribute('aria-disabled') === 'true' ||
+                /disabled|is-disabled/i.test(element.className || '') ||
+                (style && style.pointerEvents === 'none');
+        } catch (e) {
+            return false;
+        }
+    };
+
+    const actionByText = labels => {
+        const seen = new Set();
+        const candidates = [];
+        for (const element of elements) {
+            if (!visible(element)) continue;
+            const text = normalize(element.innerText || element.textContent);
+            if (!labels.includes(text)) continue;
+            const control = controlFor(element);
+            if (seen.has(control)) continue;
+            seen.add(control);
+            candidates.push({
+                found: true,
+                text,
+                disabled: disabled(control),
+                tag: control.tagName || '',
+            });
+        }
+        candidates.sort((left, right) => Number(left.disabled) - Number(right.disabled));
+        return candidates[0] || {found: false, text: '', disabled: true, tag: ''};
+    };
+
+    const publishLabels = ['发表', '发表视频', '发布', '发布视频', '发布作品'];
+    const draftLabels = [
+        '保存草稿', '保存为草稿', '存为草稿', '保存到草稿箱', '保存并退出',
+        '存草稿', '保存草稿箱', '保存至草稿箱', '存入草稿箱',
+    ];
+    const publishButton = actionByText(publishLabels);
+    const draftButton = actionByText(draftLabels);
+    const cancelButton = actionByText(['取消上传']);
+    const deleteButton = actionByText(['删除']);
+
+    const progressElements = elements.filter(element => {
+        if (!visible(element)) return false;
+        const role = element.getAttribute('role');
+        return role === 'progressbar' || element.hasAttribute('aria-valuenow');
+    });
+
+    const percentages = [];
+    for (const element of elements) {
+        if (!visible(element)) continue;
+        const text = normalize(element.innerText || element.textContent);
+        if (!text || text.length > 18) continue;
+        const match = text.match(/^(?:上传(?:进度)?\s*)?(\d{1,3})\s*%$/);
+        if (!match) continue;
+        const value = Number(match[1]);
+        if (value >= 0 && value <= 100) percentages.push(value);
+    }
+    const progressPercentage = percentages.length ? Math.max(...percentages) : null;
+
+    const failureNodes = elements.filter(element => {
+        if (!visible(element)) return false;
+        const text = normalize(element.innerText || element.textContent);
+        return text.length > 0 && text.length <= 100 &&
+            /(?:视频)?上传失败|视频处理失败|上传出错/.test(text);
+    });
+
+    const videos = elements
+        .filter(element => element.tagName === 'VIDEO')
+        .map(video => {
+            const duration = Number.isFinite(video.duration) ? video.duration : null;
+            const source = video.currentSrc || video.src || '';
+            return {
+                duration,
+                readyState: Number(video.readyState || 0),
+                width: Number(video.videoWidth || 0),
+                sourceKind: /^https?:/i.test(source) ? 'remote' :
+                    (/^blob:/i.test(source) ? 'blob' : (source ? 'other' : 'none')),
+            };
+        });
+    const readyVideos = videos.filter(video =>
+        video.readyState >= 1 && video.duration !== null && video.duration > 0
+    );
+    const remoteReadyVideos = readyVideos.filter(video => video.sourceKind === 'remote');
+
+    const visibleControlTexts = [];
+    const seenControlTexts = new Set();
+    for (const element of elements) {
+        if (visibleControlTexts.length >= 30 || !visible(element)) continue;
+        const tag = element.tagName || '';
+        const role = element.getAttribute('role') || '';
+        if (!['BUTTON', 'A'].includes(tag) && role !== 'button') continue;
+        const text = normalize(element.innerText || element.textContent);
+        if (text && !seenControlTexts.has(text)) {
+            seenControlTexts.add(text);
+            visibleControlTexts.push(text.slice(0, 60));
+        }
+    }
+
+    return {
+        root_count: roots.length,
+        frame_count: frameCount,
+        shadow_root_count: shadowRootCount,
+        element_count: elements.length,
+        publish_button: publishButton,
+        draft_button: draftButton,
+        cancel_upload_visible: cancelButton.found,
+        preview_delete_visible: deleteButton.found,
+        progress_visible: percentages.length > 0,
+        progress_percentage: progressPercentage,
+        video_count: videos.length,
+        video_ready_count: readyVideos.length,
+        video_remote_ready_count: remoteReadyVideos.length,
+        video_duration: readyVideos.length
+            ? Math.max(...readyVideos.map(video => video.duration))
+            : null,
+        video_ready_state: videos.length
+            ? Math.max(...videos.map(video => video.readyState))
+            : 0,
+        upload_failed: failureNodes.length > 0,
+        visible_controls: visibleControlTexts,
+    };
+})()
+''')
+
+    @staticmethod
+    def _upload_readiness(state):
+        publish_button = state.get('publish_button') or {}
+        draft_button = state.get('draft_button') or {}
+        publish_ready = bool(publish_button.get('found') and not publish_button.get('disabled'))
+        preview_ready = bool(
+            state.get('preview_delete_visible')
+            and (state.get('video_count', 0) > 0 or draft_button.get('found'))
+        )
+        remote_media_ready = state.get('video_remote_ready_count', 0) > 0
+        # 保存草稿按钮可用（enabled）= 视频上传完成（实测：发布页初始/上传中
+        # 按钮带 weui-desktop-btn_disabled，视频就绪后才 enabled）——可靠完成信号。
+        draft_ready = bool(draft_button.get('found') and not draft_button.get('disabled'))
+        positive_ready = publish_ready or preview_ready or remote_media_ready or draft_ready
+        cancel_visible = bool(state.get('cancel_upload_visible'))
+        progress_visible = bool(state.get('progress_visible'))
+        upload_active = cancel_visible or progress_visible
+
+        evidence = []
+        if publish_ready:
+            evidence.append('发表按钮可用')
+        if preview_ready:
+            evidence.append('视频预览已就绪')
+        if remote_media_ready:
+            evidence.append('远程视频元数据可用')
+        if draft_ready:
+            evidence.append('保存草稿按钮可用')
+        return {
+            'positive_ready': positive_ready,
+            'upload_active': upload_active,
+            'publish_ready': publish_ready,
+            'preview_ready': preview_ready,
+            'remote_media_ready': remote_media_ready,
+            'draft_ready': draft_ready,
+            'cancel_visible': cancel_visible,
+            'progress_visible': progress_visible,
+            'evidence': evidence,
+        }
+
+    def _wait_for_video_upload(self, timeout=300, settle_seconds=10):
+        """等待视频真正上传完成。
+
+        保存草稿按钮在上传中也可能可见且 enabled，因此绝不能作为完成信号。
+        完成必须同时满足：上传活跃信号消失、存在完成证据、状态连续稳定。
+        """
         self._scroll_page_to_bottom()
-        started = time.time()
-        last_log = 0
-        last_draft_check = 60  # 至少等待60秒才检查保存草稿按钮
-        debug_count = 0
-        last_debug_dump = 0
-        
-        while time.time() - started < timeout:
-            # 1. 优先检查发布按钮（最可靠的判断）
-            button = self._find_publish_button()
-            if button:
-                if not self._element_is_disabled(button):
-                    logger.info('视频上传完成（发布按钮可用）')
-                    return button
+        started = time.monotonic()
+        effective_deadline = started + max(30, timeout)
+        hard_deadline = started + max(timeout, min(1800, timeout + 300))
+        ready_since = None
+        ready_polls = 0
+        saw_upload_active = False
+        last_progress = None
+        last_progress_at = started
+        last_log_at = 0
+        last_state = {}
+
+        while time.monotonic() < effective_deadline:
+            now = time.monotonic()
+            elapsed = now - started
+            try:
+                state = self._read_upload_runtime_state() or {}
+            except Exception as e:
+                logger.debug(f'读取上传运行时状态失败: {e}')
+                state = {}
+            last_state = state
+
+            readiness = self._upload_readiness(state)
+            positive_ready = readiness['positive_ready']
+            upload_active = readiness['upload_active']
+
+            if upload_active:
+                saw_upload_active = True
+
+            if state.get('upload_failed'):
+                logger.error(f'平台报告视频上传失败，停止等待: {state}')
+                return None
+
+            if positive_ready and not upload_active and saw_upload_active:
+                if ready_since is None:
+                    ready_since = now
+                    ready_polls = 1
                 else:
-                    if time.time() - last_log >= 10:
-                        logger.info('视频正在上传（发布按钮禁用）...')
-                        last_log = time.time()
-            
-            # 2. 等待60秒后，才检查保存草稿按钮（备用判断）
-            elapsed = time.time() - started
-            if elapsed >= last_draft_check:
-                self._scroll_page_to_bottom()
-                draft_button = self._find_draft_button()
-                if draft_button:
-                    logger.info('视频发布表单已就绪（保存草稿按钮可用）')
-                    return draft_button
-            
-            # 3. 日志
-            if elapsed >= 30 and time.time() - last_log >= 10:
-                logger.info(f'等待发布操作区加载... ({int(elapsed)}s)')
-                last_log = time.time()
-            
-            # 4. 每120秒dump一次按钮文本（调试用）
-            if elapsed >= 120 and time.time() - last_debug_dump >= 120:
-                try:
-                    buttons = self.page.eles('css:button')
-                    texts = []
-                    for b in buttons:
-                        try:
-                            t = (b.text or '').strip()
-                            if t and len(texts) < 30:
-                                texts.append(t)
-                        except:
-                            pass
-                    logger.info(f'页面按钮文本采样: {texts[:20]}')
-                    last_debug_dump = time.time()
-                except Exception as e:
-                    logger.debug(f'按钮文本dump失败: {e}')
-            
-            # 5. 每60秒保存一次调试截图
-            if time.time() - last_log >= 60 and debug_count < 5:
-                try:
-                    screenshot_path = os.path.join(self.user_data_path, f'debug_waiting_{debug_count}.png')
-                    self.page.get_screenshot(path=screenshot_path)
-                    logger.info(f'调试截图已保存: {screenshot_path}')
-                    debug_count += 1
-                except Exception as e:
-                    logger.error(f'保存调试截图失败: {e}')
-            
-            time.sleep(1)
-        
-        logger.error(f'等待视频上传完成超时（{timeout}秒）')
-        self._save_debug_state('video_upload_timeout')
+                    ready_polls += 1
+
+                stable_for = now - ready_since
+                if stable_for >= settle_seconds and ready_polls >= 3:
+                    evidence = list(readiness['evidence'])
+                    if state.get('video_duration'):
+                        evidence.append(f"duration={state['video_duration']:.1f}s")
+                    logger.info(
+                        f'视频上传完成，完成证据: {"、".join(evidence)}；'
+                        f'稳定 {stable_for:.1f}s'
+                    )
+                    return state
+            else:
+                ready_since = None
+                ready_polls = 0
+
+            progress = state.get('progress_percentage')
+            if progress is not None and progress != last_progress:
+                last_progress = progress
+                last_progress_at = now
+                if now >= effective_deadline - 60 and now < hard_deadline:
+                    effective_deadline = min(hard_deadline, now + 120)
+
+            # 无进度UI兜底：60s 内未观察到上传活跃信号（cancel/progress），
+            # 说明走的是无进度条的上传路径（实测V2重传、小视频），
+            # 提前交给保存重试验证（视频就绪则保存成功，未就绪则重试）。
+            if now >= 60 and not saw_upload_active:
+                logger.warning(
+                    f'60s 内未观察到上传进度UI（cancel/progress），'
+                    f'可能无进度信号上传路径，提前交给保存重试验证'
+                )
+                return None
+
+            if now - last_log_at >= 10:
+                logger.info(
+                    f'等待视频上传 ({int(elapsed)}s): '
+                    f'progress={progress}%, active={upload_active}, '
+                    f'cancel={readiness["cancel_visible"]}, duration={state.get("video_duration")}, '
+                    f'publish={state.get("publish_button", {})}, '
+                    f'preview_delete={state.get("preview_delete_visible", False)}, '
+                    f'roots={state.get("root_count")}/frames={state.get("frame_count")}/'
+                    f'shadows={state.get("shadow_root_count")}'
+                )
+                last_log_at = now
+
+            if now >= effective_deadline:
+                if (progress is not None and now - last_progress_at < 60
+                        and now < hard_deadline):
+                    effective_deadline = min(hard_deadline, now + 120)
+                    continue
+                break
+            time.sleep(2)
+
+        logger.error(f'等待视频上传完成超时（{timeout}秒）: {last_state}')
         return None
 
     def _find_cover_edit_button(self):
@@ -583,7 +909,90 @@ return (() => ({
 
         return None
 
-    def _wait_for_draft_saved(self, previous_url, title, timeout=20):
+    def _click_draft_button_in_page(self):
+        """在顶层、iframe 和 shadow root 中直接触发保存草稿按钮。"""
+        return self.page.run_js(r'''
+return (() => {
+    const normalize = value => (value || '').replace(/\s+/g, ' ').trim();
+    const labels = [
+        '保存草稿', '保存为草稿', '存为草稿', '保存到草稿箱', '保存并退出',
+        '存草稿', '保存草稿箱', '保存至草稿箱', '存入草稿箱',
+    ];
+    const seenRoots = new WeakSet();
+
+    const visible = element => {
+        try {
+            if (!element || !element.isConnected) return false;
+            if (element.closest('[aria-hidden="true"],[hidden]')) return false;
+            const ownerWindow = element.ownerDocument && element.ownerDocument.defaultView;
+            if (!ownerWindow) return false;
+            const style = ownerWindow.getComputedStyle(element);
+            return style.display !== 'none' &&
+                style.visibility !== 'hidden' &&
+                Number(style.opacity || 1) > 0;
+        } catch (e) {
+            return false;
+        }
+    };
+
+    const isDisabled = element => {
+        try {
+            const ownerWindow = element.ownerDocument && element.ownerDocument.defaultView;
+            const style = ownerWindow ? ownerWindow.getComputedStyle(element) : null;
+            return element.disabled === true ||
+                element.getAttribute('aria-disabled') === 'true' ||
+                /disabled|is-disabled/i.test(element.className || '') ||
+                (style && style.pointerEvents === 'none');
+        } catch (e) {
+            return false;
+        }
+    };
+
+    const findButton = root => {
+        if (!root || seenRoots.has(root)) return null;
+        seenRoots.add(root);
+
+        let nodes = [];
+        try {
+            nodes = [...root.querySelectorAll(
+                'button,[role="button"],a,[tabindex],div,span'
+            )];
+        } catch (e) {}
+
+        for (const node of nodes) {
+            const text = normalize(node.innerText || node.textContent);
+            if (!labels.includes(text) || !visible(node)) continue;
+            const button = (node.querySelector && node.querySelector('button'))
+                || node.closest('button,[role="button"],a,[tabindex]') || node;
+            if (!visible(button) || isDisabled(button)) continue;
+            return {button, text};
+        }
+
+        for (const node of nodes) {
+            if (node.shadowRoot) {
+                const result = findButton(node.shadowRoot);
+                if (result) return result;
+            }
+        }
+        for (const frame of root.querySelectorAll('iframe,frame')) {
+            try {
+                if (frame.contentDocument) {
+                    const result = findButton(frame.contentDocument);
+                    if (result) return result;
+                }
+            } catch (e) {}
+        }
+        return null;
+    };
+
+    const result = findButton(document);
+    if (!result) return {found: false, clicked: false, text: ''};
+    result.button.click();
+    return {found: true, clicked: true, text: result.text};
+})()
+''')
+
+    def _wait_for_draft_saved(self, previous_url, title, timeout=90):
         """点击保存草稿后，导航到草稿箱检查标题是否存在——最可靠的验证。
 
         此前用「成功提示文案 / URL 跳转 / 保存按钮消失」三个信号判成功，
@@ -595,10 +1004,13 @@ return (() => ({
         draft_url = 'https://channels.weixin.qq.com/platform/post/draftListManager'
         started = time.time()
         # 给平台一点时间落库
-        time.sleep(2)
+        time.sleep(3)
         last_nav = 0
         while time.time() - started < timeout:
             try:
+                # 处理"将此次编辑保留? 不保存保存"离开确认弹窗——点"保存"（=保存草稿）。
+                # 视频未就绪时保存无效会弹此窗，点"保存"重试；视频就绪后点"保存"即成功。
+                self._handle_draft_popup()
                 # 若发布页已自己跳到草稿箱（SPA 路由），无需重复导航
                 current_url = self.page.url or ''
                 if 'draftlist' not in current_url.lower() and 'draft' not in current_url.lower():
@@ -609,19 +1021,31 @@ return (() => ({
                 # 递归读取草稿列表文本（含 iframe）
                 body_text = self.page.run_js(r'''
                     return (() => {
-                        const getText = (doc) => {
-                            let t = doc.body ? doc.body.innerText : '';
-                            for (const f of doc.querySelectorAll('iframe')) {
+                        const seen = new WeakSet();
+                        const getText = root => {
+                            if (!root || seen.has(root)) return '';
+                            seen.add(root);
+                            let text = root.body ? root.body.innerText : '';
+                            for (const element of root.querySelectorAll('*')) {
+                                if (element.shadowRoot) {
+                                    text += '\n' + getText(element.shadowRoot);
+                                }
+                            }
+                            for (const frame of root.querySelectorAll('iframe,frame')) {
                                 try {
-                                    if (f.contentDocument) t += '\n' + getText(f.contentDocument);
+                                    if (frame.contentDocument) {
+                                        text += '\n' + getText(frame.contentDocument);
+                                    }
                                 } catch(e){}
                             }
-                            return t;
+                            return text;
                         };
                         return getText(document);
                     })()
                 ''') or ''
-                if title in body_text:
+                expected_title = ''.join(title.split())
+                compact_body = ''.join(body_text.split())
+                if expected_title and expected_title in compact_body:
                     logger.info(f'草稿箱已找到标题: {title}')
                     return True
                 # 没找到：草稿可能还在处理，等一会重新导航刷新列表
@@ -648,45 +1072,13 @@ return (() => ({
         # 步骤2: 滚动到页面底部
         self._scroll_page_to_bottom()
         
-        # 步骤3: 查找保存草稿按钮
+        # 步骤3: 查找保存草稿按钮。DrissionPage 找不到不代表按钮不存在，
+        # wujie 的 0x0 iframe 仍可直接通过页面内 JS 点击。
         draft_button = self._find_draft_button()
-        if not draft_button:
-            logger.error('未找到可见的保存草稿按钮')
-            self._save_debug_state('draft_button_missing')
-            # 截图查看页面状态
-            try:
-                self.page.get_screenshot(path=os.path.join(self.user_data_path, 'debug_draft_button_missing.png'))
-                logger.info('调试截图已保存: debug_draft_button_missing.png')
-            except Exception as e:
-                logger.error(f'保存调试截图失败: {e}')
-            # 尝试通过 JavaScript 查找按钮
-            logger.info('尝试通过 JavaScript 查找保存草稿按钮...')
-            try:
-                result = self.page.run_js(r'''
-                    return (() => {
-                        const labels = ['保存草稿', '保存为草稿', '存为草稿', '保存到草稿箱', '保存并退出', '存草稿'];
-                        const nodes = [...document.querySelectorAll('button,[role="button"],a,[tabindex],div,span')];
-                        for (const node of nodes) {
-                            const text = (node.innerText || node.textContent || '').replace(/\s+/g, ' ').trim();
-                            if (labels.includes(text)) {
-                                node.setAttribute('data-draft-btn', 'true');
-                                return {found: true, text: text, tagName: node.tagName};
-                            }
-                        }
-                        return {found: false};
-                    })()
-                ''')
-                logger.info(f'JavaScript查找结果: {result}')
-                if result and result.get('found'):
-                    button = self.page.ele('css:[data-draft-btn="true"]', timeout=2)
-                    if button:
-                        logger.info(f'通过JavaScript找到按钮: {button.text}')
-                        draft_button = button
-            except Exception as e:
-                logger.error(f'JavaScript查找失败: {e}')
-            return False
-        
-        logger.info(f'找到保存草稿按钮: {draft_button.text}')
+        if draft_button:
+            logger.info(f'找到保存草稿按钮: {draft_button.text}')
+        else:
+            logger.info('DrissionPage 未直接定位保存草稿按钮，改用递归 JS 查找')
         
         # 步骤4: 点击保存草稿按钮
         # 页面是 wujie 微前端架构：发布表单渲染在 iframe[0]（empty.html）内，
@@ -695,37 +1087,22 @@ return (() => ({
         # 触发 button.click()，坐标点击仅作回退。
         try:
             previous_url = self.page.url
-            js_clicked = self.page.run_js(r'''
-                return (() => {
-                    const labels = ['保存草稿','保存为草稿','存为草稿','保存到草稿箱','保存并退出','存草稿','保存草稿箱','保存至草稿箱','存入草稿箱'];
-                    const findBtn = (doc) => {
-                        for (const b of doc.querySelectorAll('button')) {
-                            if (labels.includes((b.innerText||b.textContent||'').replace(/\s+/g,' ').trim())) {
-                                return b;
-                            }
-                        }
-                        for (const f of doc.querySelectorAll('iframe')) {
-                            try {
-                                if (f.contentDocument) {
-                                    const r = findBtn(f.contentDocument);
-                                    if (r) return r;
-                                }
-                            } catch(e){}
-                        }
-                        return null;
-                    };
-                    const btn = findBtn(document);
-                    if (!btn) return false;
-                    btn.click();
-                    return true;
-                })()
-            ''')
-            if js_clicked:
-                logger.info(f'通过 JS 在 iframe 内点击保存草稿按钮，当前URL: {previous_url}')
-            else:
-                logger.warning('JS 未找到保存草稿按钮，回退到坐标点击')
+            click_result = self._click_draft_button_in_page() or {}
+            if click_result.get('clicked'):
+                logger.info(
+                    f'通过 JS 点击保存草稿按钮: {click_result.get("text")}, '
+                    f'当前URL: {previous_url}'
+                )
+                # 点击后可能弹出"将此次编辑保留? 不保存保存"离开确认弹窗
+                # （视频未就绪时保存无效），点"保存"（=保存草稿）。
+                self._handle_draft_popup()
+            elif draft_button:
+                logger.warning('JS 未点击保存草稿按钮，回退到 DrissionPage 点击')
                 draft_button.click()
-                logger.info(f'已用坐标点击保存草稿按钮，当前URL: {previous_url}')
+                logger.info(f'已用 DrissionPage 点击保存草稿按钮，当前URL: {previous_url}')
+            else:
+                logger.error('顶层、iframe 和 shadow root 中均未找到保存草稿按钮')
+                return False
         except Exception as e:
             logger.error(f'点击保存草稿按钮失败: {e}')
             self._save_debug_state('draft_button_click_failed')
@@ -865,7 +1242,7 @@ return (() => ({
         try:
             co = self._get_browser_options(headless=False)
             try:
-                self.page = ChromiumPage(co)
+                self.page = self._new_page(co)
             except Exception as e:
                 logger.error(f"浏览器启动失败: {e}")
                 return False
@@ -927,7 +1304,7 @@ return (() => ({
         try:
             co = self._get_browser_options(headless=True)
             try:
-                self.page = ChromiumPage(co)
+                self.page = self._new_page(co)
             except Exception as e:
                 logger.error(f"浏览器启动失败: {e}")
                 return False
@@ -1053,7 +1430,7 @@ return (() => ({
         # 启动浏览器
         co = self._get_browser_options(headless=False)
         try:
-            self.page = ChromiumPage(co)
+            self.page = self._new_page(co)
         except Exception as e:
             logger.error(f"浏览器启动失败: {e}")
             return False
@@ -1173,37 +1550,21 @@ return (() => ({
             upload_timeout = max(300, min(900, int(file_size_mb * 2) + 120))
             logger.info(f'视频 {file_size_mb:.0f}MB，等待超时 {upload_timeout} 秒')
             logger.info('等待视频上传完成...')
-            video_uploaded = self._wait_for_video_upload(timeout=upload_timeout)
-            if not video_uploaded:
-                logger.error('等待视频上传完成超时，终止上传')
-                # 截图调试
-                try:
-                    screenshot_path = os.path.join(self.user_data_path, 'debug_video_upload_timeout.png')
-                    self.page.get_screenshot(path=screenshot_path)
-                    logger.info(f'调试截图已保存: {screenshot_path}')
-                except Exception as e:
-                    logger.error(f'保存调试截图失败: {e}')
-                # 不继续上传，直接返回失败
-                return False
-            
-            # 再次检查视频是否上传完成
-            time.sleep(3)
+            upload_state = self._wait_for_video_upload(timeout=upload_timeout)
+            if not upload_state:
+                logger.warning(
+                    '等待视频上传未得到完成信号（可能无进度UI），'
+                    '继续尝试保存草稿，由保存重试验证视频是否就绪'
+                )
+
+            upload_state = upload_state or {}
+            logger.info(
+                f'视频上传状态已稳定: duration={upload_state.get("video_duration")}, '
+                f'publish={upload_state.get("publish_button")}, '
+                f'preview_delete={upload_state.get("preview_delete_visible")}'
+            )
             current_url = self.page.url
             logger.info(f'视频上传后URL: {current_url}')
-            
-            # 检查页面上是否有保存草稿按钮
-            draft_button = self._find_draft_button()
-            if draft_button:
-                logger.info('找到保存草稿按钮，视频可能已上传完成')
-            else:
-                logger.warning('未找到保存草稿按钮，视频可能还在上传中')
-                # 再等待一段时间
-                time.sleep(30)
-                draft_button = self._find_draft_button()
-                if not draft_button:
-                    logger.error('保存草稿按钮仍未找到，视频可能未上传完成')
-                    self._save_debug_state('draft_button_missing')
-                    return False
 
             # 5. 上传封面（可选）- 暂时跳过，专注于保存草稿
             cover_uploaded = False
@@ -1217,10 +1578,26 @@ return (() => ({
             #         logger.warning(f'找不到封面文件: {abs_cover_path}')
             logger.info('暂时跳过封面上传，专注于保存草稿')
 
-            # 6. 保存草稿
+            # 6. 保存草稿（重试：视频可能仍在上传，保存被拒则等待重试）
             logger.info('保存草稿...')
-            saved = self._save_draft(title)
-            
+            saved = False
+            for attempt in range(5):
+                logger.info(f'保存草稿（第{attempt+1}次尝试）...')
+                saved = self._save_draft(title)
+                if saved:
+                    break
+                logger.warning(
+                    f'草稿保存未确认（第{attempt+1}次），'
+                    f'视频可能仍在上传，等待30s后重试'
+                )
+                time.sleep(30)
+                # 回发布页重试（_save_draft 失败时可能已导航到草稿箱）
+                try:
+                    self.page.get(publish_url)
+                    time.sleep(5)
+                except Exception as e:
+                    logger.debug(f'返回发布页失败: {e}')
+
             if saved:
                 logger.info(f'[{self.account_name}] ✅ 草稿保存成功')
                 return True

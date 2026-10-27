@@ -43,6 +43,10 @@ class FakeElement:
         self.attrs = attrs or {}
         self.click_count = 0
         self.input_value = None
+        self.states = types.SimpleNamespace(
+            is_displayed=visible,
+            is_enabled='disabled' not in (self.attrs.get('class') or '').lower(),
+        )
 
     def is_displayed(self):
         return self.visible
@@ -70,6 +74,9 @@ class FakePage:
 
     def ele(self, selector, timeout=None):
         return self.selectors.get(selector)
+
+    def get(self, url):
+        self.url = url
 
     def run_js(self, script, *args):
         self.js_calls.append(script)
@@ -106,15 +113,73 @@ class WeChatUploaderTests(unittest.TestCase):
 
         self.assertIs(uploader._find_visible_text_element(('保存草稿',)), exact)
 
-    def test_wait_for_upload_rechecks_disabled_publish_action(self):
-        disabled = FakeElement('发表', attrs={'class': 'weui-desktop-btn_disabled'})
-        enabled = FakeElement('发表')
+    def test_upload_readiness_rejects_active_upload_with_enabled_draft_button(self):
+        state = {
+            'cancel_upload_visible': True,
+            'progress_visible': True,
+            'progress_percentage': 41,
+            'publish_button': {'found': True, 'disabled': True},
+            'draft_button': {'found': True, 'disabled': False},
+            'preview_delete_visible': False,
+            'video_count': 1,
+            'video_remote_ready_count': 0,
+        }
+
+        readiness = WeChatChannelsUploader._upload_readiness(state)
+
+        self.assertTrue(readiness['upload_active'])
+        self.assertFalse(readiness['positive_ready'])
+
+    def test_upload_readiness_accepts_completed_preview(self):
+        state = {
+            'cancel_upload_visible': False,
+            'progress_visible': False,
+            'publish_button': {'found': False, 'disabled': True},
+            'draft_button': {'found': True, 'disabled': False},
+            'preview_delete_visible': True,
+            'video_count': 1,
+            'video_duration': 180,
+            'video_remote_ready_count': 0,
+        }
+
+        readiness = WeChatChannelsUploader._upload_readiness(state)
+
+        self.assertFalse(readiness['upload_active'])
+        self.assertTrue(readiness['positive_ready'])
+        self.assertIn('视频预览已就绪', readiness['evidence'])
+
+    def test_wait_for_upload_requires_stable_ready_state(self):
+        active = {
+            'cancel_upload_visible': True,
+            'progress_visible': True,
+            'progress_percentage': 41,
+            'publish_button': {'found': False, 'disabled': True},
+            'draft_button': {'found': True, 'disabled': False},
+            'preview_delete_visible': False,
+            'video_count': 1,
+            'video_remote_ready_count': 0,
+        }
+        ready = {
+            'cancel_upload_visible': False,
+            'progress_visible': False,
+            'publish_button': {'found': True, 'disabled': False},
+            'draft_button': {'found': True, 'disabled': False},
+            'preview_delete_visible': True,
+            'video_count': 1,
+            'video_duration': 181,
+            'video_remote_ready_count': 1,
+        }
         uploader = self.make_uploader()
         uploader._scroll_page_to_bottom = lambda: None
-        uploader._find_publish_button = Mock(side_effect=[disabled, enabled])
+        uploader._read_upload_runtime_state = Mock(
+            side_effect=[active, ready, ready, ready]
+        )
 
         with patch('wechat_uploader.time.sleep'):
-            self.assertIs(uploader._wait_for_video_upload(timeout=2), enabled)
+            self.assertIs(
+                uploader._wait_for_video_upload(timeout=2, settle_seconds=0),
+                ready,
+            )
 
     def test_scroll_uses_native_api_and_brings_draft_action_into_view(self):
         uploader = self.make_uploader()
@@ -165,6 +230,9 @@ class WeChatUploaderTests(unittest.TestCase):
         uploader = self.make_uploader()
         uploader._find_visible_text_element = lambda labels: None
         uploader._find_draft_button = lambda: button
+        uploader._click_draft_button_in_page = lambda: {
+            'found': False, 'clicked': False, 'text': ''
+        }
         uploader._scroll_page_to_bottom = lambda: None
         uploader._wait_for_draft_saved = lambda previous_url, title: False
         uploader._save_debug_state = lambda stage: None
@@ -177,11 +245,26 @@ class WeChatUploaderTests(unittest.TestCase):
         uploader = self.make_uploader()
         uploader._find_visible_text_element = lambda labels: None
         uploader._find_draft_button = lambda: button
+        uploader._click_draft_button_in_page = lambda: {
+            'found': False, 'clicked': False, 'text': ''
+        }
         uploader._scroll_page_to_bottom = lambda: None
         uploader._wait_for_draft_saved = lambda previous_url, title: True
 
         self.assertTrue(uploader._save_draft('示例标题'))
         self.assertEqual(button.click_count, 1)
+
+    def test_save_draft_uses_recursive_js_when_drission_has_no_element(self):
+        uploader = self.make_uploader()
+        uploader._find_visible_text_element = lambda labels: None
+        uploader._find_draft_button = lambda: None
+        uploader._click_draft_button_in_page = lambda: {
+            'found': True, 'clicked': True, 'text': '保存草稿'
+        }
+        uploader._scroll_page_to_bottom = lambda: None
+        uploader._wait_for_draft_saved = lambda previous_url, title: True
+
+        self.assertTrue(uploader._save_draft('示例标题'))
 
 
     def test_wait_for_draft_saved_ignores_unrelated_success_text(self):
@@ -195,17 +278,17 @@ class WeChatUploaderTests(unittest.TestCase):
         with patch('wechat_uploader.time.sleep'):
             self.assertFalse(uploader._wait_for_draft_saved(
                 'https://channels.weixin.qq.com/platform/post/create',
-                '示例标题', timeout=2))
+                '示例标题', timeout=0.05))
 
-    def test_wait_for_draft_saved_accepts_draft_confirmation_text(self):
-        page = FakePage(js_result='草稿保存成功')
+    def test_wait_for_draft_saved_accepts_title_in_draft_list(self):
+        page = FakePage(js_result='草稿箱 示例标题')
         uploader = self.make_uploader()
         uploader.page = page
 
         with patch('wechat_uploader.time.sleep'):
             self.assertTrue(uploader._wait_for_draft_saved(
                 'https://channels.weixin.qq.com/platform/post/create',
-                '示例标题', timeout=2))
+                '示例标题', timeout=0.05))
 
     def test_wait_for_draft_saved_url_change_requires_title_in_body(self):
         """URL 跳走后还必须能在正文里看到本条标题，否则可能是别的原因跳走
@@ -221,13 +304,13 @@ class WeChatUploaderTests(unittest.TestCase):
         with patch('wechat_uploader.time.sleep'):
             self.assertFalse(uploader._wait_for_draft_saved(
                 'https://channels.weixin.qq.com/platform/post/create',
-                '示例标题', timeout=2))
+                '示例标题', timeout=0.05))
 
         page.js_result = '创作中心 示例标题'
         with patch('wechat_uploader.time.sleep'):
             self.assertTrue(uploader._wait_for_draft_saved(
                 'https://channels.weixin.qq.com/platform/post/create',
-                '示例标题', timeout=2))
+                '示例标题', timeout=0.05))
 
 
 if __name__ == '__main__':
