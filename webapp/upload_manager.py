@@ -32,6 +32,7 @@ class UploadManager:
         self.queue = []  # 待上传队列
         self.current_task = None  # 当前上传任务
         self.uploading = False  # 是否正在上传
+        self.prechecking = False  # 是否正在预检登录
         self.paused = False  # 是否暂停
         self.completed = []  # 已完成任务
         self.failed = []  # 失败任务
@@ -146,25 +147,26 @@ class UploadManager:
             return {'status': 'success', 'id': record_id}
     
     def start_upload(self):
-        """开始上传"""
+        """开始上传（先预检登录，全部有效才真正开传）"""
         with self.lock:
-            if self.uploading:
-                return {'status': 'failed', 'error': '正在上传中'}
-            
+            if self.uploading or self.prechecking:
+                return {'status': 'failed', 'error': '正在上传或预检中'}
+
             if not self.queue:
                 return {'status': 'failed', 'error': '队列为空'}
-            
+
             self.uploading = True
+            self.prechecking = True
             self.paused = False
             self.current_account = self.queue[0].get('account')
-            
-            # 启动上传线程
+
+            # 启动上传线程（线程内第一步是登录预检）
             self.upload_thread = threading.Thread(target=self._upload_worker, daemon=True)
             self.upload_thread.start()
-            
-            self._log('info', f'开始上传：{len(self.queue)}个任务')
-            
-            return {'status': 'success', 'message': f'开始上传{len(self.queue)}个任务'}
+
+            self._log('info', f'开始上传：{len(self.queue)}个任务（先预检登录）')
+
+            return {'status': 'success', 'message': f'开始预检并上传{len(self.queue)}个任务'}
     
     def pause_upload(self):
         """暂停上传"""
@@ -232,6 +234,7 @@ class UploadManager:
         with self.lock:
             return {
                 'uploading': self.uploading,
+                'prechecking': self.prechecking,
                 'paused': self.paused,
                 'queue_length': len(self.queue),
                 'completed_count': len(self.completed),
@@ -260,6 +263,17 @@ class UploadManager:
     
     def _upload_worker(self):
         """上传工作线程 - 缩小锁范围，避免死锁"""
+        # 先预检所有待上传账号的登录态。
+        # 不预检的代价：队列里每个任务都要单独开一次 headless 浏览器校验
+        # （每次 10-20s），登录过期时整条队列白跑、全部标失败。
+        self._log('info', '预检登录状态...')
+        if not self._precheck_logins():
+            with self.lock:
+                self.uploading = False
+                self.prechecking = False
+                self.current_task = None
+            return
+
         while True:
             # 获取任务（短暂持锁）
             with self.lock:
@@ -327,6 +341,67 @@ class UploadManager:
             self.current_task = None
             self._log('info', '上传完成')
     
+    def _precheck_logins(self) -> bool:
+        """上传前校验队列里每个账号的登录态。全通过返回 True；
+        有未登录的账号则把整条队列标失败并返回 False（不启动上传）。"""
+        self.prechecking = True
+        try:
+            with self.lock:
+                accounts = []
+                for t in self.queue:
+                    if t.get('account') not in accounts:
+                        accounts.append(t.get('account'))
+
+            bad, ok = [], []
+            for acct in accounts:
+                u = WeChatChannelsUploader(acct)
+                if u.check_login():
+                    ok.append(acct)
+                    self._log('info', f'登录校验通过：{acct}')
+                else:
+                    bad.append(acct)
+                    self._log('error', f'登录校验失败：{acct}')
+
+            if not bad:
+                self._log('info', f'预检通过（{len(accounts)}个账号）')
+                return True
+
+            self._log('error', f'预检未通过，未登录账号：{", ".join(bad)}')
+            failed_now = []
+            with self.lock:
+                # 注意：边遍历边 remove 会跳元素，必须遍历副本。
+                for t in list(self.queue):
+                    if t.get('account') in bad:
+                        t['status'] = 'failed'
+                        t['error_message'] = f'账号 {t.get("account")} 未登录，请先完成登录再上传'
+                        t['completed_at'] = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+                        self.failed.append(t)
+                        failed_now.append(t)
+                        self.queue.remove(t)
+                # 其余账号这次也不传：登录失效通常意味着整批都要先处理，
+                # 留着会在 prechecking=False 后无人消费，挂在队列里。
+                for t in list(self.queue):
+                    t['status'] = 'failed'
+                    t['error_message'] = '预检未通过（其他账号登录失效），请重新提交'
+                    t['completed_at'] = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+                    self.failed.append(t)
+                    failed_now.append(t)
+                    self.queue.remove(t)
+
+            for t in failed_now:
+                try:
+                    with sqlite3.connect(self.db_path) as conn:
+                        conn.execute(
+                            "UPDATE upload_records SET status='failed', completed_at=?, "
+                            "error_message=? WHERE id=?",
+                            (t['completed_at'], t['error_message'], t['id']))
+                except Exception as e:
+                    self._log('error', f'写失败记录出错：{e}')
+
+            return False
+        finally:
+            self.prechecking = False
+
     def _execute_upload(self, task: Dict) -> bool:
         """执行单个上传任务"""
         try:

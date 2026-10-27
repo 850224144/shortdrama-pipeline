@@ -416,11 +416,18 @@ def check_login_status():
     
     try:
         from wechat_uploader import WeChatChannelsUploader
+        # 登录进程活着时 check_login 不会开浏览器（profile 锁互斥），
+        # 但前端需要这个标志才能停掉轮询——否则登录窗口关了之后还会一直轮。
+        in_progress = WeChatChannelsUploader.is_login_in_progress(account)
         uploader = WeChatChannelsUploader(account)
         is_logged_in = uploader.check_login()
-        return jsonify({'logged_in': is_logged_in, 'account': account})
+        return jsonify({
+            'logged_in': is_logged_in,
+            'login_in_progress': in_progress,
+            'account': account,
+        })
     except Exception as e:
-        return jsonify({'logged_in': False, 'error': str(e)})
+        return jsonify({'logged_in': False, 'login_in_progress': False, 'error': str(e)})
 
 @app.route('/api/login/start', methods=['POST'])
 def start_login():
@@ -439,6 +446,15 @@ def start_login():
         # 现改为：账号走 argv 传入（不进入源码，天然免疫注入）、不写临时文件、
         # cwd 用绝对路径、stdout/stderr 落到日志文件便于排查。
         import subprocess
+
+        from wechat_uploader import WeChatChannelsUploader
+
+        # 已有同账号登录进程在跑时不重复弹窗口（会互相抢 profile）
+        if WeChatChannelsUploader.is_login_in_progress(account):
+            return jsonify({
+                'status': 'failed',
+                'error': f'{account} 已有登录窗口在等待扫码，请先完成它'
+            })
 
         child_script = (
             "import sys\n"

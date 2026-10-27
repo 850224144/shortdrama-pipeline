@@ -1224,6 +1224,10 @@
         }
 
         // 轮询登录状态
+        // 注意：check_login 会开 headless 浏览器。如果它和可见的扫码窗口
+        // 抢同一个 profile 目录，扫码窗口会被挤掉（二维码还没扫就没了）。
+        // 所以必须盯着 login_in_progress：登录进程一结束就立刻停轮询，
+        // 不要再抢 profile。
         let loginPollTimer = null;
         async function startLoginPolling(account) {
             if (loginPollTimer) {
@@ -1239,13 +1243,18 @@
                         clearInterval(loginPollTimer);
                         loginPollTimer = null;
                         showNotification(`${account} 登录成功！`, 'success');
+                    } else if (result.login_in_progress === false) {
+                        // 登录进程已经结束（成功/超时/被关）——停止抢 profile
+                        clearInterval(loginPollTimer);
+                        loginPollTimer = null;
+                        showNotification(`${account} 登录窗口已关闭，请重新点击登录`, 'warning');
                     }
                 } catch (error) {
                     console.error('轮询登录状态失败:', error);
                 }
-            }, 3000); // 每3秒检查一次
+            }, 5000); // 每5秒检查一次
 
-            showNotification('等待登录中...（每3秒检查一次）', 'info');
+            showNotification('等待登录中...（每5秒检查一次）', 'info');
         }
 
         // 加载剧列表

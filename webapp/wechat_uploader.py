@@ -7,6 +7,7 @@
 import os
 import sys
 import time
+import ctypes
 import hashlib
 import logging
 import random
@@ -666,121 +667,226 @@ return (() => ({
         logger.info(f'[{self.account_name}] ✅ 草稿保存成功')
         return True
     
-    def login(self):
-        """扫码登录"""
-        logger.info(f"[{self.account_name}] 启动登录模式...")
-        
-        # 确保目录存在
-        os.makedirs(self.user_data_path, exist_ok=True)
-        
-        co = self._get_browser_options(headless=False)
-        
+    def _login_state(self):
+        """读取当前页面的登录态，返回 'logged_in' / 'logged_out' / 'unknown'。
+
+        不能只看 URL。channels.weixin.qq.com 的跳转链是：
+            / → /platform/post/create（瞬态，<6s）→ /login.html（未登录最终态）
+        只看 '/platform' in url 会把重定向链里的瞬态当成登录成功，二维码窗口
+        几秒就被关掉——用户根本来不及扫码。
+        两个权威信号：URL 含 'login'，或页面里挂着微信扫码 iframe（qrconnect）。
+        """
         try:
-            self.page = ChromiumPage(co)
+            url = (self.page.url or '').lower()
+            if 'login' in url:
+                return 'logged_out'
+            n = self.page.run_js(
+                "return document.querySelectorAll('iframe[src*=qrconnect]').length")
+            if n and int(n) > 0:
+                return 'logged_out'
+            if '/platform' in url:
+                return 'logged_in'
         except Exception as e:
-            logger.error(f"浏览器启动失败: {e}")
+            logger.warning(f"读取登录态失败: {e}")
+        return 'unknown'
+
+    @staticmethod
+    def _pid_alive(pid):
+        """进程是否还活着（Windows: OpenProcess + GetExitCodeProcess）。"""
+        if not pid or pid <= 0:
             return False
-        
-        logger.info("正在打开微信视频号助手首页...")
-        self.page.get("https://channels.weixin.qq.com")
-        
-        logger.info("请在弹出的浏览器窗口中完成微信扫码登录。等待跳转...")
-        
-        # 等待登录成功
-        login_success = False
-        timeout_seconds = 300
-        for _ in range(timeout_seconds):
+        PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
+        STILL_ACTIVE = 259
+        h = ctypes.windll.kernel32.OpenProcess(
+            PROCESS_QUERY_LIMITED_INFORMATION, False, int(pid))
+        if not h:
+            return False
+        code = ctypes.c_ulong()
+        try:
+            ok = ctypes.windll.kernel32.GetExitCodeProcess(h, ctypes.byref(code))
+            return bool(ok and code.value == STILL_ACTIVE)
+        finally:
+            ctypes.windll.kernel32.CloseHandle(h)
+
+    @staticmethod
+    def _lock_holder(lock_path):
+        """返回持有锁的存活 PID；锁不存在或持有进程已死返回 None。"""
+        try:
+            with open(lock_path, encoding='utf-8') as f:
+                pid = int((f.read() or '').strip() or 0)
+        except (OSError, ValueError):
+            return None
+        return pid if WeChatChannelsUploader._pid_alive(pid) else None
+
+    def _acquire_profile_lock(self):
+        """跨进程独占账号 profile 目录，成功返回锁文件路径；拿不到返回 None。
+
+        两次 login() 共用同一 user_data_path 时，两个 Chrome 会互相踢掉对方的
+        profile（表现为「再发起登录，登录页面没被打开」）。用 O_EXCL 原子创建
+        的哨兵文件做硬互斥——比 msvcrt.locking 可靠（后者在 append 模式下
+        seek 被 O_APPEND 忽略，实测加锁成功但解锁 PermissionError）。
+        持有进程崩溃留下的死锁也能自动接管。
+        """
+        os.makedirs(self.user_data_path, exist_ok=True)
+        p = os.path.join(self.user_data_path, 'profile.lock')
+        for _ in range(4):
             try:
-                current_url = self.page.url
-                if "/platform" in current_url:
-                    logger.info(f"[{self.account_name}] 登录成功！")
-                    login_success = True
-                    break
-            except Exception:
-                pass
-            time.sleep(1)
-        
-        if not login_success:
-            logger.error("登录超时或未检测到页面成功跳转。")
-            self.page.quit()
+                fd = os.open(p, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+                with os.fdopen(fd, 'w', encoding='utf-8') as f:
+                    f.write(str(os.getpid()))
+                return p
+            except FileExistsError:
+                if self._lock_holder(p) is None:     # 持有者已死，接管
+                    try:
+                        os.remove(p)
+                    except OSError:
+                        pass
+                    continue
+                return None
+            except OSError:
+                return None
+        return None
+
+    def _release_profile_lock(self, lock_path):
+        if not lock_path:
+            return
+        try:
+            os.remove(lock_path)
+        except OSError:
+            pass
+
+    @staticmethod
+    def is_login_in_progress(account_name):
+        """该账号是否已有登录进程在用 profile（供 Web 端前置检查）。"""
+        return WeChatChannelsUploader._lock_holder(
+            os.path.join(USER_DATA_BASE, account_name, 'profile.lock')) is not None
+
+    def _quit_page(self):
+        """安全关闭浏览器页面。"""
+        if self.page:
+            try:
+                self.page.quit()
+            except Exception as e:
+                logger.warning(f"关闭浏览器时出错: {e}")
+            self.page = None
+
+    def login(self):
+        """扫码登录。窗口会一直开着直到真的扫上码或超时。"""
+        logger.info(f"[{self.account_name}] 启动登录模式...")
+        os.makedirs(self.user_data_path, exist_ok=True)
+
+        lock = self._acquire_profile_lock()
+        if lock is None:
+            logger.error(f"[{self.account_name}] 已有登录进程在使用该账号，本次放弃")
             return False
-        
-        # 等待数据保存
-        time.sleep(3)
-        logger.info(f"[{self.account_name}] 登录数据已保存")
-        self.page.quit()
-        return True
-    
+
+        try:
+            co = self._get_browser_options(headless=False)
+            try:
+                self.page = ChromiumPage(co)
+            except Exception as e:
+                logger.error(f"浏览器启动失败: {e}")
+                return False
+
+            logger.info("正在打开微信视频号助手首页...")
+            try:
+                self.page.get("https://channels.weixin.qq.com")
+            except Exception as e:
+                logger.error(f"打开首页失败: {e}")
+                return False
+
+            logger.info("请在弹出的浏览器窗口中完成微信扫码登录。等待扫码...")
+
+            # 等真登录：状态需连续 3 秒稳定为 logged_in。
+            # 单次读到 /platform 不算——那可能是重定向链里的瞬态。
+            timeout_seconds = 300
+            stable = 0
+            for i in range(timeout_seconds):
+                st = self._login_state()
+                if st == 'logged_in':
+                    stable += 1
+                    if stable >= 3:
+                        logger.info(f"[{self.account_name}] 登录成功！")
+                        break
+                else:
+                    stable = 0
+                if st != 'unknown':
+                    logger.info(f"[{self.account_name}] 当前状态: {st} | {self.page.url}")
+                time.sleep(1)
+            else:
+                logger.error("登录超时：未在窗口内检测到登录完成。")
+                return False
+
+            # 登录态要落盘（cookie / localStorage 写回 profile），留足时间。
+            time.sleep(5)
+            logger.info(f"[{self.account_name}] 登录数据已保存")
+            return True
+        finally:
+            self._quit_page()
+            self._release_profile_lock(lock)
+
     def check_login(self):
-        """检查登录状态"""
+        """检查登录状态（headless，不弹窗口）。"""
         if not os.path.exists(self.user_data_path):
             logger.error(f"未找到登录目录，请先登录: {self.user_data_path}")
             return False
-        
+
+        # 有登录进程在用 profile 时，headless 去抢会失败/读到半成品状态。
+        if self.is_login_in_progress(self.account_name):
+            logger.warning(f"[{self.account_name}] 登录进行中，暂无法校验")
+            return False
+
         logger.info(f"[{self.account_name}] 验证登录状态...")
-        co = self._get_browser_options(headless=True)
-        
-        try:
-            self.page = ChromiumPage(co)
-        except Exception as e:
-            logger.error(f"浏览器启动失败: {e}")
+        lock = self._acquire_profile_lock()
+        if lock is None:
+            logger.warning(f"[{self.account_name}] 登录进行中，暂无法校验")
             return False
-        
-        # 处理浏览器启动后的弹窗
+
         try:
-            self.page.get("https://channels.weixin.qq.com")
-            time.sleep(3)
-            # 处理可能的弹窗
-            self._handle_alerts()
-        except Exception as e:
-            logger.warning(f"处理启动弹窗时出错: {e}")
-            # 尝试强制关闭弹窗
+            co = self._get_browser_options(headless=True)
             try:
-                self.page.alert.accept()
-                logger.info('已接受原生弹窗')
-            except Exception:
-                pass
-            try:
-                self.page.confirm.accept()
-                logger.info('已接受确认弹窗')
-            except Exception:
-                pass
-        
-        test_url = "https://channels.weixin.qq.com/platform/post/create"
-        try:
-            self.page.get(test_url)
-            time.sleep(5)  # 增加等待时间
-            
-            # 处理可能的弹窗
-            self._handle_alerts()
-            
-            # 再次尝试处理弹窗
-            try:
-                self.page.alert.accept()
-                logger.info('已接受原生弹窗')
-            except Exception:
-                pass
-            try:
-                self.page.confirm.accept()
-                logger.info('已接受确认弹窗')
-            except Exception:
-                pass
-            
-            current_url = self.page.url
-            logger.info(f"当前URL: {current_url}")
-            
-            if "/platform" in current_url and "login" not in current_url:
-                logger.info(f"[{self.account_name}] ✅ 登录有效")
-                self.page.quit()
-                return True
-            else:
-                logger.error(f"[{self.account_name}] ❌ 登录失效，当前URL: {current_url}")
-                self.page.quit()
+                self.page = ChromiumPage(co)
+            except Exception as e:
+                logger.error(f"浏览器启动失败: {e}")
                 return False
-        except Exception as e:
-            logger.error(f"验证时发生错误: {e}")
-            self.page.quit()
+
+            try:
+                self.page.get("https://channels.weixin.qq.com")
+                self._handle_alerts()
+            except Exception as e:
+                logger.warning(f"处理启动弹窗时出错: {e}")
+
+            # 等跳转链走到底：未登录最终态是 /login.html（可能经数秒瞬态）。
+            # 只看最终态判断，避免把瞬态 /platform 误判为登录成功。
+            last = ''
+            for _ in range(12):
+                try:
+                    cur = self.page.url or ''
+                except Exception:
+                    cur = ''
+                if cur == last:
+                    break
+                last = cur
+                time.sleep(1)
+
+            st = self._login_state()
+            logger.info(f"[{self.account_name}] 登录态={st} | {last}")
+            if st == 'logged_in':
+                logger.info(f"[{self.account_name}] ✅ 登录有效")
+                return True
+
+            # 二次确认：未登录态再等一轮，排除跳转未完成
+            time.sleep(3)
+            st2 = self._login_state()
+            if st2 == 'logged_in':
+                logger.info(f"[{self.account_name}] ✅ 登录有效（二次确认）")
+                return True
+
+            logger.error(f"[{self.account_name}] ❌ 登录失效（状态={st2}）")
             return False
+        finally:
+            self._quit_page()
+            self._release_profile_lock(lock)
     
     def _handle_alerts(self):
         """处理浏览器弹窗（包括原生弹窗和页面弹窗）"""
