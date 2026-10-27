@@ -606,9 +606,20 @@ return (() => ({
         while time.time() - started < timeout:
             try:
                 current_url = self.page.url
-                body_text = self.page.run_js(
-                    "return document.body ? document.body.innerText : '';"
-                ) or ''
+                body_text = self.page.run_js(r'''
+                    return (() => {
+                        const getText = (doc) => {
+                            let t = doc.body ? doc.body.innerText : '';
+                            for (const f of doc.querySelectorAll('iframe')) {
+                                try {
+                                    if (f.contentDocument) t += '\n' + getText(f.contentDocument);
+                                } catch(e){}
+                            }
+                            return t;
+                        };
+                        return getText(document);
+                    })()
+                ''') or ''
                 # 检查成功提示文本
                 if any(text in body_text for text in success_texts):
                     logger.info(f'检测到成功提示: {body_text[:200]}')
@@ -690,10 +701,43 @@ return (() => ({
         logger.info(f'找到保存草稿按钮: {draft_button.text}')
         
         # 步骤4: 点击保存草稿按钮
+        # 页面是 wujie 微前端架构：发布表单渲染在 iframe[0]（empty.html）内，
+        # 该 iframe 的 getBoundingClientRect 尺寸为 0，DrissionPage 的坐标点击
+        # （element.click()）会算错坐标而静默失效。改为用 JS 在 iframe 内直接
+        # 触发 button.click()，坐标点击仅作回退。
         try:
             previous_url = self.page.url
-            draft_button.click()
-            logger.info(f'已点击保存草稿按钮，当前URL: {previous_url}')
+            js_clicked = self.page.run_js(r'''
+                return (() => {
+                    const labels = ['保存草稿','保存为草稿','存为草稿','保存到草稿箱','保存并退出','存草稿','保存草稿箱','保存至草稿箱','存入草稿箱'];
+                    const findBtn = (doc) => {
+                        for (const b of doc.querySelectorAll('button')) {
+                            if (labels.includes((b.innerText||b.textContent||'').replace(/\s+/g,' ').trim())) {
+                                return b;
+                            }
+                        }
+                        for (const f of doc.querySelectorAll('iframe')) {
+                            try {
+                                if (f.contentDocument) {
+                                    const r = findBtn(f.contentDocument);
+                                    if (r) return r;
+                                }
+                            } catch(e){}
+                        }
+                        return null;
+                    };
+                    const btn = findBtn(document);
+                    if (!btn) return false;
+                    btn.click();
+                    return true;
+                })()
+            ''')
+            if js_clicked:
+                logger.info(f'通过 JS 在 iframe 内点击保存草稿按钮，当前URL: {previous_url}')
+            else:
+                logger.warning('JS 未找到保存草稿按钮，回退到坐标点击')
+                draft_button.click()
+                logger.info(f'已用坐标点击保存草稿按钮，当前URL: {previous_url}')
         except Exception as e:
             logger.error(f'点击保存草稿按钮失败: {e}')
             self._save_debug_state('draft_button_click_failed')
