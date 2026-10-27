@@ -749,6 +749,7 @@
                         <button class="btn btn-secondary" id="pauseUploadBtn" onclick="pauseUpload()" disabled>⏸️ 暂停</button>
                         <button class="btn btn-danger" id="stopUploadBtn" onclick="stopUpload()" disabled>⏹️ 停止</button>
                         <button class="btn btn-secondary" onclick="clearUploadQueue()">🧹 清除队列</button>
+                        <button class="btn btn-success" id="openDraftBtn" onclick="openDraftBox()">📋 打开草稿箱</button>
                     </div>
                     
                     <div class="drama-selector">
@@ -1488,6 +1489,53 @@
             }
         }
         
+        // 打开草稿箱
+        async function openDraftBox() {
+            const account = document.getElementById('uploadAccount').value;
+            if (!account) {
+                showNotification('请选择账号', 'error');
+                return;
+            }
+            
+            try {
+                const response = await fetch('/api/upload/open-draft', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ account: account })
+                });
+                const result = await response.json();
+                
+                if (result.status === 'success') {
+                    showNotification(result.message, 'success');
+                    updateDraftBtn();
+                } else {
+                    showNotification('打开草稿箱失败: ' + result.error, 'error');
+                }
+            } catch (error) {
+                showNotification('打开草稿箱失败: ' + error.message, 'error');
+            }
+        }
+        
+        // 更新草稿箱按钮状态
+        async function updateDraftBtn() {
+            try {
+                const response = await fetch('/api/upload/draft-status');
+                const status = await response.json();
+                const btn = document.getElementById('openDraftBtn');
+                if (status.open_accounts && status.open_accounts.length > 0) {
+                    btn.textContent = '📋 草稿箱已打开';
+                    btn.classList.remove('btn-success');
+                    btn.classList.add('btn-secondary');
+                } else {
+                    btn.textContent = '📋 打开草稿箱';
+                    btn.classList.remove('btn-secondary');
+                    btn.classList.add('btn-success');
+                }
+            } catch (error) {
+                console.error('更新草稿箱状态失败:', error);
+            }
+        }
+        
         // 更新上传界面
         async function updateUploadUI() {
             try {
@@ -1525,6 +1573,9 @@
                     pauseBtn.textContent = '⏸️ 暂停';
                     pauseBtn.onclick = pauseUpload;
                 }
+                
+                // 更新草稿箱按钮状态
+                updateDraftBtn();
                 
                 // 更新队列
                 const queueContainer = document.getElementById('uploadQueue');

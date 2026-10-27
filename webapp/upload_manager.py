@@ -50,6 +50,9 @@ class UploadManager:
         self.accounts = []
         self.current_account = None
         
+        # 草稿箱浏览器实例（account → ChromiumPage）
+        self.draft_pages = {}
+        
     def _init_database(self):
         """初始化数据库"""
         conn = sqlite3.connect(self.db_path)
@@ -406,6 +409,56 @@ class UploadManager:
         finally:
             self.prechecking = False
 
+    def open_draft_box(self, account: str) -> Dict:
+        """打开草稿箱浏览器窗口（复用上传时的登录态）"""
+        if account in self.draft_pages:
+            return {'status': 'success', 'message': f'{account} 草稿箱已打开'}
+        
+        # 检查是否正在上传（profile 锁互斥）
+        if self.uploading and self.current_account == account:
+            return {'status': 'failed', 'error': f'{account} 正在上传，请等上传完成后再打开草稿箱'}
+        
+        try:
+            from DrissionPage import ChromiumPage, ChromiumOptions
+            from wechat_uploader import WeChatChannelsUploader
+            
+            uploader = WeChatChannelsUploader(account)
+            user_data_path = uploader.user_data_path
+            os.makedirs(user_data_path, exist_ok=True)
+            
+            co = ChromiumOptions()
+            co.set_paths(user_data_path=user_data_path)
+            co.set_argument('--disable-blink-features=AutomationControlled')
+            co.set_argument('--start-maximized')
+            
+            page = ChromiumPage(co)
+            page.get('https://channels.weixin.qq.com/platform/post/draft')
+            
+            self.draft_pages[account] = page
+            self._log('info', f'{account} 草稿箱已打开')
+            return {'status': 'success', 'message': f'{account} 草稿箱已打开，请在浏览器中编辑发布'}
+        except Exception as e:
+            self._log('error', f'打开草稿箱失败：{e}')
+            return {'status': 'failed', 'error': str(e)}
+    
+    def close_draft_box(self, account: str) -> Dict:
+        """关闭草稿箱浏览器窗口"""
+        if account not in self.draft_pages:
+            return {'status': 'failed', 'error': f'{account} 草稿箱未打开'}
+        
+        try:
+            page = self.draft_pages.pop(account)
+            page.quit()
+            self._log('info', f'{account} 草稿箱已关闭')
+            return {'status': 'success', 'message': f'{account} 草稿箱已关闭'}
+        except Exception as e:
+            self.draft_pages.pop(account, None)
+            return {'status': 'failed', 'error': str(e)}
+    
+    def get_draft_status(self) -> Dict:
+        """获取草稿箱打开状态"""
+        return {'open_accounts': list(self.draft_pages.keys())}
+    
     def _execute_upload(self, task: Dict) -> bool:
         """执行单个上传任务 - 从 edl_config_v{version}.json 读取 AI 生成的文案"""
         try:

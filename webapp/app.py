@@ -534,6 +534,48 @@ def add_upload_task():
         import json
         return Response(json.dumps({'status': 'failed', 'error': str(e)}, ensure_ascii=False), mimetype='application/json', status=500)
 
+@app.route('/api/upload/open-draft', methods=['POST'])
+def open_draft_box():
+    """打开草稿箱浏览器窗口"""
+    try:
+        data = request.get_json() or {}
+        account = data.get('account')
+        if not account:
+            return jsonify({'status': 'failed', 'error': '缺少账号参数'}), 400
+        result = upload_manager.open_draft_box(account)
+        from flask import Response
+        import json as _json
+        return Response(_json.dumps(result, ensure_ascii=False), mimetype='application/json')
+    except Exception as e:
+        from flask import Response
+        import json as _json
+        return Response(_json.dumps({'status': 'failed', 'error': str(e)}, ensure_ascii=False), mimetype='application/json', status=500)
+
+@app.route('/api/upload/close-draft', methods=['POST'])
+def close_draft_box():
+    """关闭草稿箱浏览器窗口"""
+    try:
+        data = request.get_json() or {}
+        account = data.get('account')
+        if not account:
+            return jsonify({'status': 'failed', 'error': '缺少账号参数'}), 400
+        result = upload_manager.close_draft_box(account)
+        from flask import Response
+        import json as _json
+        return Response(_json.dumps(result, ensure_ascii=False), mimetype='application/json')
+    except Exception as e:
+        from flask import Response
+        import json as _json
+        return Response(_json.dumps({'status': 'failed', 'error': str(e)}, ensure_ascii=False), mimetype='application/json', status=500)
+
+@app.route('/api/upload/draft-status')
+def get_draft_status():
+    """获取草稿箱打开状态"""
+    try:
+        return jsonify(upload_manager.get_draft_status())
+    except Exception as e:
+        return jsonify({'status': 'failed', 'error': str(e)}), 500
+
 @app.route('/api/upload/start', methods=['POST'])
 def start_upload():
     """开始上传"""
