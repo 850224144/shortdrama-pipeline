@@ -339,6 +339,68 @@ class AICopyGenerator:
         response.raise_for_status()
         return response.json()
 
+    def chat_json(self, prompt, temperature=0.0, max_attempts=2):
+        """通用 JSON 对话：GLM-4-Flash 主 / SenseNova 备用，返回原始 content 字符串。
+
+        给需要自定义输出 schema 的调用方用（如高光打分），复用 generate_copy 那条
+        熔断 + 降级链，但不做文案字段的解析与校验。
+        temperature 默认 0——打分要可复现，不像写标题需要发散。
+        """
+        if not self.enabled:
+            return None
+        if ZHIPU_API_KEY and self._zhipu_available():
+            try:
+                resp = requests.post(
+                    'https://open.bigmodel.cn/api/paas/v4/chat/completions',
+                    headers={'Authorization': f'Bearer {ZHIPU_API_KEY}',
+                             'Content-Type': 'application/json'},
+                    json={'model': 'glm-4-flash',
+                          'messages': [{'role': 'user', 'content': prompt}],
+                          'temperature': temperature,
+                          'max_tokens': 800},
+                    timeout=60)
+                resp.raise_for_status()
+                return self._extract_content(resp.json())
+            except Exception as e:
+                # 该熔断才熔断（限流/额度/鉴权），普通网络抖动不熔断
+                self._trip_zhipu_fuse(str(e))
+                logger.warning(f'[AI] GLM 调用失败，转 SenseNova：{e}')
+        return self._sensenova_json(prompt, temperature, max_attempts)
+
+    @staticmethod
+    def _extract_content(resp):
+        """从 OpenAI 兼容响应取 content，容错 ```json 代码块包裹。"""
+        content = resp['choices'][0]['message']['content']
+        if '```json' in content:
+            content = content.split('```json')[1].split('```')[0].strip()
+        elif '```' in content:
+            content = content.split('```')[1].split('```')[0].strip()
+        return content
+
+    def _sensenova_json(self, prompt, temperature, max_attempts):
+        """SenseNova 备用。reasoning 模型常把 JSON 截断，重试 max_attempts 次。"""
+        if not SENSENOVA_API_KEY:
+            return None
+        last = None
+        for attempt in range(1, max_attempts + 1):
+            try:
+                resp = requests.post(
+                    f'{self.api_base}/chat/completions',
+                    headers={'Authorization': f'Bearer {self.api_key}',
+                             'Content-Type': 'application/json'},
+                    json={'model': self.model,
+                          'messages': [{'role': 'user', 'content': prompt}],
+                          'temperature': temperature,
+                          'max_tokens': 4000,
+                          'reasoning_effort': 'none'},
+                    timeout=90)
+                resp.raise_for_status()
+                return self._extract_content(resp.json())
+            except Exception as e:
+                last = e
+        logger.warning(f'[AI] SenseNova 备用也失败：{last}')
+        return None
+
     def _parse_response(self, response):
         """解析 AI 响应"""
         

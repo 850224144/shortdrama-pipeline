@@ -1652,7 +1652,8 @@ class PipelineProcessor:
         for v_idx in range(min(count, len(ep_nums))):
             # 根据倒叙或随机生成segments
             if use_reverse:
-                segments = self._generate_reverse_segments(edl_eps, v_idx)
+                segments = self._generate_reverse_segments(edl_eps, v_idx,
+                                                           drama_name=drama_name)
             else:
                 segments = self._generate_random_segments(edl_eps, v_idx)
             
@@ -1748,7 +1749,7 @@ class PipelineProcessor:
         """规划总时长预算还剩多少秒（相对 PLANNED_SEGS_MAX）。"""
         return self.PLANNED_SEGS_MAX - sum(s["duration"] for s in segments)
 
-    # 冲突/悬念词库：给逐句台词打分，用来定位高能点
+    # 冲突/悬念词库：LLM 不可用时的兜底打分
     # 冲突词权重 2（情绪爆发），悬念词权重 1（信息揭示）
     CONFLICT_WORDS = ('打脸', '傻', '死', '滚', '敢', '凭什么', '不可能', '疯了',
                       '骗', '恨', '杀', '血', '泪', '离婚', '出轨', '复合', '孩子',
@@ -1756,20 +1757,157 @@ class PipelineProcessor:
     SUSPENSE_WORDS = ('发现', '秘密', '真相', '原来', '竟然', '居然', '突然',
                       '没想到', '终于', '七年', '前妻', '复婚')
 
-    def _load_episode_highlights(self, edl_eps):
-        """逐集 ASR 转写 -> 每集的高能窗口候选（按分数降序）。
+    # LLM 高光打分提示词。业界共识（字节 agentkit 短剧高光、DramaClip）是
+    # 「输出时间窗 + 分数 + 理由」，理由必须可审计。score 用整数便于跨集比较。
+    _HIGHLIGHT_PROMPT = (
+        "你是短剧高光剪辑师。下面是《{drama}》第{ep}集的台词转写（带时间轴）。\n"
+        "判断这一集值不值得被剪进 2-4 分钟的推广成片。\n\n"
+        "台词（[起-止] 秒）：\n{lines}\n\n"
+        "只输出一个 JSON 对象，不要解释、不要 markdown 代码块：\n"
+        '{{"score": 0到10的整数, "reason": "不超过40字，说清这一集真实发生了什么", '
+        '"start": 窗口起点秒, "end": 窗口终点秒, "hook_type": "类型"}}\n\n'
+        "评分标准：\n"
+        "9-10 强烈冲突爆发或关键反转，能当开头钩子\n"
+        "7-8  明确冲突或对峙\n"
+        "5-6  有推进但不够爆\n"
+        "3-4  过渡铺垫\n"
+        "0-2  平淡无冲突，不值得剪\n\n"
+        "要求：\n"
+        "- hook_type 只能是：逆袭、打脸、真相、反转、高潮、泪目、平淡 七选一\n"
+        "- start/end 必须落在台词时间范围内，窗口 12 到 40 秒，尽量覆盖完整一轮冲突\n"
+        "- reason 只描述台词里真实发生的事，不要脑补剧情\n"
+        "- 没冲突就老实给低分，不要为了好看而拔高"
+    )
+
+    def _keyword_cands(self, raw, ep_dur):
+        """兜底打分：冲突/悬念词命中 + 4s 内相邻高分句合并成连续窗口。
+
+        关键词只找到 13/45 集（覆盖率 29%）且有假阳性（"死""钱"在平淡对话也命中），
+        所以它只是 LLM 失效时的保底，不是主路径。
+        """
+        hits = []
+        for s in raw:
+            text = s.get("text") or ""
+            score = sum(1 for w in self.CONFLICT_WORDS if w in text) * 2 + \
+                    sum(1 for w in self.SUSPENSE_WORDS if w in text)
+            if not score:
+                continue
+            hits.append([float(s.get("start", 0)),
+                         float(s.get("end", float(s.get("start", 0)))),
+                         score])
+        hits.sort()
+        merged = []
+        for st, en, sc in hits:
+            # 4s 以内的空档视为同一场戏（冲突戏是一串快速来回，不是单句）
+            if merged and st - merged[-1][1] <= 4.0:
+                merged[-1][1] = max(merged[-1][1], en)
+                merged[-1][2] += sc
+            else:
+                merged.append([st, en, sc])
+        cands = []
+        for st, en, sc in merged:
+            start = max(0.0, st - 2.0)          # 前 2s 铺垫
+            dur = en - start + 4.0              # 后 4s 反应
+            dur = min(dur, max(0.0, ep_dur - start))
+            if dur < 15.0:
+                continue
+            cands.append({"score": sc, "start": round(start, 1),
+                          "dur": round(min(dur, 60.0), 1), "src": "kw",
+                          "hook_type": "", "reason": "关键词兜底"})
+        cands.sort(key=lambda c: -c["score"])
+        return cands
+
+    def _score_episode_llm(self, ai, drama_name, ep_num, raw, ep_dur):
+        """LLM 给单集打高光分；失败返回 None，由调用方回退关键词。"""
+        lines = "\n".join(
+            f"[{float(s.get('start', 0)):.1f}-{float(s.get('end', 0)):.1f}] "
+            f"{s.get('text', '')}" for s in raw)
+        if len(lines) > 3000:      # 防御：超长截断，避免撞上下文上限
+            lines = lines[:3000]
+        content = ai.chat_json(self._HIGHLIGHT_PROMPT.format(
+            drama=drama_name or "", ep=ep_num, lines=lines))
+        if not content:
+            return None
+        try:
+            data = json.loads(content)
+        except json.JSONDecodeError:
+            # LLM 偶尔多嘴包一层文本，尽力抢救第一个 {...}
+            i, j = content.find('{'), content.rfind('}')
+            if i < 0 or j <= i:
+                return None
+            try:
+                data = json.loads(content[i:j + 1])
+            except json.JSONDecodeError:
+                return None
+        try:
+            score = max(0, min(10, int(round(float(data['score'])))))
+            start = float(data['start'])
+            end = float(data['end'])
+        except (KeyError, TypeError, ValueError):
+            return None
+        # 窗口必须落在本集时间轴内，否则 LLM 在编时间码
+        if not (0 <= start < end <= ep_dur + 0.5):
+            return None
+        # LLM 常按精确台词边界给短窗口（5-9s）。短是它判断得准，不该丢弃——
+        # 往外扩到至少 12s（前铺垫+后反应），扩不动才放弃。
+        MIN_WIN = 12.0
+        need = MIN_WIN - (end - start)
+        if need > 0:
+            add_l = min(need, start)
+            add_r = min(need - add_l, max(0.0, ep_dur - end))
+            start -= add_l
+            end += add_r
+        if end - start < 8.0:      # 整集都不到 8s，没法剪
+            return None
+        return {
+            "score": score,
+            "reason": str(data.get("reason", ""))[:60],
+            "start": round(start, 1),
+            "end": round(end, 1),
+            "hook_type": str(data.get("hook_type", "高潮"))[:4],
+        }
+
+    def _save_highlight_cache(self, cache_path, scores):
+        """高光打分结果落盘，按剧缓存。重跑不重复调用 API。"""
+        try:
+            os.makedirs(os.path.dirname(cache_path), exist_ok=True)
+            tmp = cache_path + ".tmp"
+            with open(tmp, 'w', encoding='utf-8') as f:
+                json.dump(scores, f, ensure_ascii=False, indent=1)
+            os.replace(tmp, cache_path)
+        except Exception as e:
+            self.logger.log('system', 'WARN', f'高光打分缓存写入失败：{e}')
+
+    def _load_episode_highlights(self, edl_eps, drama_name=None, force_llm=False):
+        """逐集高能窗口候选。主路径 LLM 打分（reason 落日志可审计），
+        单集失败回退关键词，转写全缺返回空（由生成器退回随机逻辑）。
 
         转写文件约定：<src_dir>/transcribe/EP<集文件名去掉.mp4>.json，内容形如
         [{"start":0.0,"end":3.28,"text":"..."}, ...]，时间戳是单集内的相对秒。
-        窗口在原句边界外扩（前 2s 铺垫 + 后 6s 反应），再夹进 0..ep_dur。
         """
         if not edl_eps:
             return []
-        hi_dir = os.path.join(os.path.dirname(os.path.abspath(edl_eps[0])), "transcribe")
-        out = []
+        hi_dir = os.path.join(os.path.dirname(os.path.abspath(edl_eps[0])),
+                              "transcribe")
+        cache_path = os.path.join(hi_dir, "highlight_scores.json")
+
+        # 1) 缓存（按剧持久化，第二个版本起全命中）
+        cached = {}
+        if not force_llm:
+            try:
+                with open(cache_path, 'r', encoding='utf-8') as f:
+                    disk = json.load(f)
+                if isinstance(disk, dict):
+                    cached = {int(k): v for k, v in disk.items()
+                              if isinstance(v, dict) and 'score' in v}
+            except Exception:
+                pass
+
+        # 2) 读逐集转写
+        eps_data = []
         for ep_file in edl_eps:
-            jpath = os.path.join(hi_dir,
-                                  "EP" + os.path.splitext(os.path.basename(ep_file))[0] + ".json")
+            jpath = os.path.join(hi_dir, "EP" +
+                                  os.path.splitext(os.path.basename(ep_file))[0] + ".json")
             if not os.path.exists(jpath):
                 continue
             try:
@@ -1779,55 +1917,73 @@ class PipelineProcessor:
                 continue
             if not isinstance(raw, list) or not raw:
                 continue
-            ep_dur = max((float(s.get("end", 0)) for s in raw), default=0.0)
-            # 先收集逐句打分，再按时间顺序把相邻高分句合并成连续窗口：
-            # 冲突戏是一串快速来回（"你敢…""打脸"…），不是单句，合并后才是完整高潮。
-            hits = []
-            for s in raw:
-                text = s.get("text") or ""
-                score = sum(1 for w in self.CONFLICT_WORDS if w in text) * 2 + \
-                        sum(1 for w in self.SUSPENSE_WORDS if w in text)
-                if not score:
-                    continue
-                hits.append([float(s.get("start", 0)),
-                             float(s.get("end", float(s.get("start", 0)))) ,
-                             score])
-            hits.sort()
-            merged = []
-            for st, en, sc in hits:
-                # 4s 以内的空档视为同一场戏
-                if merged and st - merged[-1][1] <= 4.0:
-                    merged[-1][1] = max(merged[-1][1], en)
-                    merged[-1][2] += sc
-                else:
-                    merged.append([st, en, sc])
+            eps_data.append((self._get_episode_num(ep_file), ep_file, raw,
+                             max((float(s.get("end", 0)) for s in raw), default=0.0)))
+        if not eps_data:
+            return []
+
+        # 3) LLM 打分（只打缓存里没有的）
+        todo = [e for e in eps_data if e[0] not in cached]
+        if todo:
+            ai = AICopyGenerator()
+            if ai.enabled:
+                hits = 0
+                for ep_num, ep_file, raw, ep_dur in todo:
+                    res = self._score_episode_llm(ai, drama_name, ep_num, raw, ep_dur)
+                    if res:
+                        res = dict(res, src="llm")
+                        cached[ep_num] = res
+                        hits += 1
+                        self.logger.log(
+                            'system', 'INFO',
+                            f'高光打分 第{ep_num}集：{res["score"]}分 '
+                            f'[{res["hook_type"]}] {res["start"]}-{res["end"]}s '
+                            f'｜ {res["reason"]}')
+                    else:
+                        self.logger.log(
+                            'system', 'WARN',
+                            f'高光打分 第{ep_num}集：LLM 未返回有效结果，该集走关键词兜底')
+                self._save_highlight_cache(cache_path, cached)
+                self.logger.log('system', 'INFO',
+                                f'高光打分完成：{hits}/{len(todo)} 集由 LLM 判定，'
+                                f'结果已缓存 {cache_path}')
+            else:
+                self.logger.log('system', 'WARN',
+                                '高光打分：AI 未配置，全部走关键词兜底')
+        else:
+            self.logger.log('system', 'INFO',
+                            f'高光打分：{len(eps_data)} 集全部命中缓存，不调用 API')
+
+        # 4) 组装候选窗口
+        out = []
+        for ep_num, ep_file, raw, ep_dur in eps_data:
+            s = cached.get(ep_num)
             cands = []
-            for st, en, sc in merged:
-                start = max(0.0, st - 2.0)          # 前 2s 铺垫
-                dur = en - start + 4.0              # 后 4s 反应
-                dur = min(dur, max(0.0, ep_dur - start))
-                if dur < 15.0:
-                    continue
-                cands.append((sc, round(start, 1), round(min(dur, 60.0), 1)))
+            if s:
+                # LLM 给的是绝对窗口，外扩一点前后文再夹进本集时长
+                start = max(0.0, s["start"] - 1.5)
+                dur = min(s["end"] - start + 3.0, ep_dur - start)
+                if dur >= 12.0:
+                    cands = [{"score": s["score"], "start": round(start, 1),
+                              "dur": round(dur, 1), "src": s.get("src", "llm"),
+                              "hook_type": s.get("hook_type", ""),
+                              "reason": s.get("reason", "")}]
+            if not cands:
+                cands = self._keyword_cands(raw, ep_dur)
             if cands:
-                cands.sort(key=lambda c: -c[0])
-                out.append({
-                    "episode": self._get_episode_num(ep_file),
-                    "path": ep_file,
-                    "dur": ep_dur,
-                    "cands": cands,
-                })
+                out.append({"episode": ep_num, "path": ep_file,
+                            "dur": ep_dur, "cands": cands})
         return out
 
-    def _generate_reverse_segments(self, edl_eps, v_idx):
-        """倒叙结构：开头上全局最高能点，随后按集号逆序铺开每集的最高能窗口。
+    def _generate_reverse_segments(self, edl_eps, v_idx, drama_name=None):
+        """倒叙结构：开头上钩子，随后按集号逆序铺开每集的高能窗口。
 
-        高能点由逐集 ASR 转写按冲突/悬念词命中打分定位。此前的实现是
-        random.shuffle 后取 eps[-1] 当「最后一集」、再 reversed(eps[:-1]) 铺中间——
-        打乱之后再取尾、再反转，两者都不成立，所以「开头直接上最炸画面」从来没
-        真正实现过，开头片段其实是随机一集在随机偏移处。
+        高能点主路径是 LLM 逐集打分（带理由，落日志可审计），关键词兜底。
+        开头的选型取业界标准与倒叙结构折中：业界（DramaClip 片头解说、字节
+        WithOpeningHook）是「最炸场面前置」；但结局那集本身够炸时，锁最后一集
+        倒叙感更强。所以：结局集分数 >= 全局最高的 70% 就锁结局集，否则用最炸。
         """
-        eps_hl = self._load_episode_highlights(edl_eps)
+        eps_hl = self._load_episode_highlights(edl_eps, drama_name=drama_name)
         if not eps_hl:
             # 没有 ASR 转写（未跑通或素材缺转写）：退回随机逻辑，保证版本开得出
             return self._generate_random_segments(edl_eps, v_idx)
@@ -1849,23 +2005,36 @@ class PipelineProcessor:
             })
             return True
 
-        # 1. 开头炸点：锁最后一集（结局/反转），取该集分数最高的窗口
-        top = max(eps_hl, key=lambda x: x["episode"])
-        open_cand = top["cands"][0]
-        add(top["episode"], open_cand[1], open_cand[2])
+        # 1. 开头钩子。只在同一打分体系内比较（LLM 0-10 分与关键词 2-14 分不同量纲）
+        pool = [e for e in eps_hl if e["cands"][0].get("src") == "llm"] or eps_hl
+        best = max(pool, key=lambda e: e["cands"][0]["score"])
+        last_ep = max(e["episode"] for e in eps_hl)
+        last = next((e for e in eps_hl if e["episode"] == last_ep), None)
+        opening, ratio = best, 0.0
+        if (last is not None and last["cands"][0].get("src") == "llm"
+                and best["cands"][0]["score"] > 0):
+            ratio = last["cands"][0]["score"] / best["cands"][0]["score"]
+            if ratio >= 0.7:
+                opening = last
+        oc = opening["cands"][0]
+        self.logger.log(
+            'system', 'INFO',
+            f'开头钩子：第{opening["episode"]}集 {oc["score"]}分 '
+            f'[{oc.get("hook_type", "")}] {oc.get("reason", "")}'
+            f'（结局集/全局最高 = {ratio:.0%}，{"锁结局" if opening is last else "用最炸"}）')
+        add(opening["episode"], oc["start"], oc["dur"])
 
         # 2. 按集号逆序铺开，每集取该集未被占用的高能窗口
-        used = set()
-        used.add((top["episode"], open_cand[1]))
+        used = {(opening["episode"], oc["start"])}
         for e in sorted(eps_hl, key=lambda x: -x["episode"]):
             if self._seg_budget_left(segments) <= self.MIN_SEG_DUR:
                 break
             for c in e["cands"]:
-                key = (e["episode"], c[1])
+                key = (e["episode"], c["start"])
                 if key in used:
                     continue
                 used.add(key)
-                if add(e["episode"], c[1], c[2]):
+                if add(e["episode"], c["start"], c["dur"]):
                     break
 
         return segments
