@@ -253,6 +253,7 @@ return (() => ({
         last_log = 0
         last_draft_check = 60  # 至少等待60秒才检查保存草稿按钮
         debug_count = 0
+        last_debug_dump = 0
         
         while time.time() - started < timeout:
             # 1. 优先检查发布按钮（最可靠的判断）
@@ -280,8 +281,25 @@ return (() => ({
                 logger.info(f'等待发布操作区加载... ({int(elapsed)}s)')
                 last_log = time.time()
             
-            # 4. 每60秒保存一次调试截图
-            if time.time() - last_log >= 60 and debug_count < 3:
+            # 4. 每120秒dump一次按钮文本（调试用）
+            if elapsed >= 120 and time.time() - last_debug_dump >= 120:
+                try:
+                    buttons = self.page.eles('css:button')
+                    texts = []
+                    for b in buttons:
+                        try:
+                            t = (b.text or '').strip()
+                            if t and len(texts) < 30:
+                                texts.append(t)
+                        except:
+                            pass
+                    logger.info(f'页面按钮文本采样: {texts[:20]}')
+                    last_debug_dump = time.time()
+                except Exception as e:
+                    logger.debug(f'按钮文本dump失败: {e}')
+            
+            # 5. 每60秒保存一次调试截图
+            if time.time() - last_log >= 60 and debug_count < 5:
                 try:
                     screenshot_path = os.path.join(self.user_data_path, f'debug_waiting_{debug_count}.png')
                     self.page.get_screenshot(path=screenshot_path)
@@ -473,6 +491,10 @@ return (() => ({
             '保存到草稿箱',
             '保存并退出',
             '存草稿',
+            '保存草稿箱',
+            '保存至草稿箱',
+            '存入草稿箱',
+            '草稿',
         )
         
         # 方法1：使用 CSS 选择器遍历所有按钮
@@ -534,6 +556,22 @@ return (() => ({
                 return button
         except Exception as e:
             logger.debug(f'JavaScript查找保存草稿按钮失败: {e}')
+
+        # 方法4：dump 页面全部按钮文本（调试用，仅当找不到时）
+        try:
+            buttons = self.page.eles('css:button')
+            texts = []
+            for b in buttons:
+                try:
+                    t = (b.text or '').strip()
+                    if t and len(texts) < 30:
+                        texts.append(t)
+                except:
+                    pass
+            if texts:
+                logger.info(f'未找到保存草稿按钮，当前页面按钮文本: {texts}')
+        except Exception:
+            pass
 
         return None
 
@@ -1085,9 +1123,13 @@ return (() => ({
                 editor.input(Keys.ENTER)
                 time.sleep(0.5)
             
-            # 4. 等待视频上传完成
+            # 4. 等待视频上传完成（超时基于文件大小动态计算）
+            file_size_mb = os.path.getsize(abs_file_path) / (1024 * 1024)
+            # 预估：每秒 0.5MB 上传速度，加 120 秒余量，最小 300 秒，最大 900 秒
+            upload_timeout = max(300, min(900, int(file_size_mb * 2) + 120))
+            logger.info(f'视频 {file_size_mb:.0f}MB，等待超时 {upload_timeout} 秒')
             logger.info('等待视频上传完成...')
-            video_uploaded = self._wait_for_video_upload()
+            video_uploaded = self._wait_for_video_upload(timeout=upload_timeout)
             if not video_uploaded:
                 logger.error('等待视频上传完成超时，终止上传')
                 # 截图调试
