@@ -583,29 +583,30 @@ return (() => ({
 
         return None
 
-    def _wait_for_draft_saved(self, previous_url, title, timeout=15):
-        # 只保留跟"保存草稿"动作绑定的确认短语：
-        # - 不放裸 '成功'——发布页在点保存草稿之前往往已显示"上传成功"
-        #  （视频上传完成），会被误判成草稿保存成功
-        # - 不放 '已保存'——草稿页常驻"自动保存中/已保存"这类自动保存指示，
-        #   同样是保存草稿动作之前就存在的文本
-        # URL 跳转和保存按钮消失两个信号各自带额外条件（正文含本条标题、
-        # 按钮确实不再出现），比文案匹配更可靠。
-        success_texts = (
-            '保存成功',
-            '草稿已保存',
-            '已保存到草稿',
-            '已保存至草稿',
-            '已存为草稿',
-            '已存入草稿',
-            '保存草稿成功',
-            '草稿保存成功',
-            '操作成功',
-        )
+    def _wait_for_draft_saved(self, previous_url, title, timeout=20):
+        """点击保存草稿后，导航到草稿箱检查标题是否存在——最可靠的验证。
+
+        此前用「成功提示文案 / URL 跳转 / 保存按钮消失」三个信号判成功，
+        但视频号是 wujie 微前端 SPA：保存草稿后发布页不跳转、无固定提示、
+        按钮也未必消失，导致真实保存成功却被误判为失败（实际草稿已入箱）。
+        现在改为到草稿箱 /platform/post/draftListManager 读取列表，确认标题
+        真的出现才算保存成功。
+        """
+        draft_url = 'https://channels.weixin.qq.com/platform/post/draftListManager'
         started = time.time()
+        # 给平台一点时间落库
+        time.sleep(2)
+        last_nav = 0
         while time.time() - started < timeout:
             try:
-                current_url = self.page.url
+                # 若发布页已自己跳到草稿箱（SPA 路由），无需重复导航
+                current_url = self.page.url or ''
+                if 'draftlist' not in current_url.lower() and 'draft' not in current_url.lower():
+                    if time.time() - last_nav >= 4:
+                        self.page.get(draft_url)
+                        last_nav = time.time()
+                        time.sleep(4)
+                # 递归读取草稿列表文本（含 iframe）
                 body_text = self.page.run_js(r'''
                     return (() => {
                         const getText = (doc) => {
@@ -620,28 +621,15 @@ return (() => ({
                         return getText(document);
                     })()
                 ''') or ''
-                # 检查成功提示文本
-                if any(text in body_text for text in success_texts):
-                    logger.info(f'检测到成功提示: {body_text[:200]}')
+                if title in body_text:
+                    logger.info(f'草稿箱已找到标题: {title}')
                     return True
-                # 检查URL变化：必须是合理的保存后跳转，且正文能看到本条标题。
-                # 光凭"URL 变了"或"按钮不见了"都不行——被踢回登录页时两者同时成立，
-                # 但草稿根本没存上。
-                if current_url != previous_url:
-                    url = current_url.lower()
-                    if ('draft' in url or '/post/list' in url) and title in body_text:
-                        logger.info(f'检测到跳转到草稿列表且正文含标题：{current_url}')
-                        return True
-                    logger.debug(f'URL 变化但不像保存成功：{current_url}')
-                    time.sleep(0.5)
-                    continue
-                # 仍在发布页但保存草稿按钮消失 → 平台就地切到了成功态
-                if not self._find_draft_button():
-                    logger.info('仍在发布页但保存草稿按钮已消失，说明保存成功')
-                    return True
-            except Exception:
-                pass
-            time.sleep(0.5)
+                # 没找到：草稿可能还在处理，等一会重新导航刷新列表
+                time.sleep(3)
+            except Exception as e:
+                logger.debug(f'检查草稿箱失败: {e}')
+                time.sleep(2)
+        logger.warning(f'草稿箱未找到标题（timeout={timeout}s）: {title}')
         return False
 
     def _save_draft(self, title):
@@ -765,17 +753,21 @@ return (() => ({
         只看 '/platform' in url 会把重定向链里的瞬态当成登录成功，二维码窗口
         几秒就被关掉——用户根本来不及扫码。
         两个权威信号：URL 含 'login'，或页面里挂着微信扫码 iframe（qrconnect）。
+
+        注意：qrconnect iframe 检查必须放在 URL 判断之后——已登录后页面可能
+        残留隐藏的 qrconnect iframe（被误判为未登录，如 15:40 那次）。URL 已
+        在 /platform 内且不含 login 时直接判 logged_in，不再看 iframe。
         """
         try:
             url = (self.page.url or '').lower()
             if 'login' in url:
                 return 'logged_out'
+            if '/platform' in url:
+                return 'logged_in'
             n = self.page.run_js(
                 "return document.querySelectorAll('iframe[src*=qrconnect]').length")
             if n and int(n) > 0:
                 return 'logged_out'
-            if '/platform' in url:
-                return 'logged_in'
         except Exception as e:
             logger.warning(f"读取登录态失败: {e}")
         return 'unknown'

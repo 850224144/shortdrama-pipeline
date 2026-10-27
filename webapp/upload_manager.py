@@ -440,7 +440,7 @@ class UploadManager:
             co.set_argument('--disable-blink-features=AutomationControlled')
             
             page = ChromiumPage(co)
-            page.get('https://channels.weixin.qq.com/platform/post/draft')
+            page.get('https://channels.weixin.qq.com/platform/post/draftListManager')
             
             self.draft_pages[account] = page
             self._log('info', f'{account} 草稿箱已打开')
