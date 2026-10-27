@@ -2251,7 +2251,7 @@ class PipelineProcessor:
         return "小桃追剧中"
     
     def _generate_cover(self, input_path, video_path, drama_name=None, src_dir=None, version_idx=1):
-        """生成封面图 - 优先用官方封面，否则从视频截取
+        """生成封面图 - 优先用官方封面，无则跳过（用户规则：不生成封面）
         封面保存到 covers/ 子目录，文件名：{剧名}_{版本}_封面.jpg
         """
         try:
@@ -2283,23 +2283,6 @@ class PipelineProcessor:
             # 3. 无官方封面：跳过封面生成（用户规则：不生成封面，需程序判断）
             self.logger.log("system", 'INFO', f'无官方封面，跳过封面生成：{os.path.basename(cover_path)}')
             return
-            # 兜底：从视频第5秒截取（默认关闭，仅在需要时启用）
-            cmd = [
-                CONFIG['ffmpeg_path'], "-y",
-                "-i", input_path,
-                "-ss", "5",
-                "-vframes", "1",
-                "-q:v", "2",
-                cover_path
-            ]
-            result = subprocess.run(cmd, capture_output=True, timeout=30)
-            if result.returncode != 0:
-                self.logger.log("system", 'WARN', f'封面截取失败：{result.stderr.decode("utf-8", errors="ignore")[:200]}')
-                return
-            self.logger.log("system", 'INFO', f'封面已生成（视频截取）：{os.path.basename(cover_path)}')
-            
-            # 所有版本加角标
-            self._add_cover_badge(cover_path, version_idx)
             
         except Exception as e:
             self.logger.log("system", 'WARN', f'封面生成失败：{str(e)}')

@@ -1571,17 +1571,20 @@ return (() => {
             current_url = self.page.url
             logger.info(f'视频上传后URL: {current_url}')
 
-            # 5. 上传封面（可选）- 暂时跳过，专注于保存草稿
+            # 5. 上传封面（可选）- 有封面文件才上传，失败不阻断保存草稿
+            time.sleep(1)  # 等封面预览卡片渲染
             cover_uploaded = False
-            # 暂时跳过封面上传，专注于保存草稿
-            # if cover_path:
-            #     abs_cover_path = os.path.abspath(cover_path)
-            #     if os.path.isfile(abs_cover_path):
-            #         logger.info(f'上传封面: {abs_cover_path}')
-            #         cover_uploaded = self._upload_cover(abs_cover_path)
-            #     else:
-            #         logger.warning(f'找不到封面文件: {abs_cover_path}')
-            logger.info('暂时跳过封面上传，专注于保存草稿')
+            if cover_path:
+                abs_cover_path = os.path.abspath(cover_path)
+                if os.path.isfile(abs_cover_path):
+                    logger.info(f'上传封面: {abs_cover_path}')
+                    cover_uploaded = self._upload_cover(abs_cover_path)
+                    if not cover_uploaded:
+                        logger.warning('封面上传未成功，继续保存草稿（不阻断）')
+                else:
+                    logger.warning(f'找不到封面文件: {abs_cover_path}')
+            else:
+                logger.info('无封面，跳过封面上传')
 
             # 6. 保存草稿（重试：视频可能仍在上传，保存被拒则等待重试）
             logger.info('保存草稿...')
