@@ -316,14 +316,18 @@ class UploadManager:
                     self.failed.append(task)
                     self._log('error', f'上传失败：{task["drama_name"]} V{task["version"]} - {task.get("error_message")}')
             
-            # 更新数据库（不持锁）
+            # 更新数据库（不持锁）—— 同步实际使用的文案，留审计痕迹
+            _topics_db = json.dumps(task.get('topics', []), ensure_ascii=False) if task.get('topics') else None
             with sqlite3.connect(self.db_path) as conn:
                 cursor = conn.cursor()
                 cursor.execute('''
                     UPDATE upload_records 
-                    SET status=?, completed_at=?, error_message=?
+                    SET status=?, completed_at=?, error_message=?,
+                        title=?, description=?, topics=?, cover_path=?
                     WHERE id=?
-                ''', (task['status'], task['completed_at'], task.get('error_message'), task['id']))
+                ''', (task['status'], task['completed_at'], task.get('error_message'),
+                      task.get('title'), task.get('description'), _topics_db,
+                      task.get('cover_path'), task['id']))
             
             # 检查账号切换（短暂持锁）
             with self.lock:
@@ -403,12 +407,45 @@ class UploadManager:
             self.prechecking = False
 
     def _execute_upload(self, task: Dict) -> bool:
-        """执行单个上传任务"""
+        """执行单个上传任务 - 从 edl_config_v{version}.json 读取 AI 生成的文案"""
         try:
             # 检查视频文件
             if not os.path.exists(task['video_path']):
                 task['error_message'] = f'视频文件不存在：{task["video_path"]}'
                 return False
+            
+            # ── 从 edl_config_v{version}.json 读取文案（切片时 AI 生成，存同目录）──
+            video_dir = os.path.dirname(task['video_path'])
+            config_path = os.path.join(video_dir, f"edl_config_v{task['version']}.json")
+            
+            title = task.get('title')
+            description = task.get('description')
+            topics = task.get('topics')
+            cover_path = task.get('cover_path')
+            
+            if os.path.exists(config_path):
+                try:
+                    with open(config_path, 'r', encoding='utf-8') as f:
+                        config = json.load(f)
+                    video_info = config.get('videos', [{}])[0]
+                    title = title or video_info.get('title')
+                    description = description or video_info.get('description')
+                    topics = topics or video_info.get('hashtags', [])
+                    # 同步更新 task（供调用方和日志使用）
+                    task['title'] = title
+                    task['description'] = description
+                    task['topics'] = topics
+                    self._log('info', f'V{task["version"]} 文案：{title}')
+                except Exception as e:
+                    self._log('warn', f'V{task["version"]} 读取edl_config失败：{e}')
+            
+            # ── 推断封面路径（covers/{剧名}_{版本}_封面.jpg）──
+            if not cover_path:
+                import re as _re
+                drama_safe = _re.sub(r'[^\w\u4e00-\u9fff]', '_', task['drama_name'])
+                cover_path = os.path.join(video_dir, 'covers', f'{drama_safe}_{task["version"]}_封面.jpg')
+                if not os.path.exists(cover_path):
+                    cover_path = None  # 不存在就不传，让上传器用默认封面
             
             # 初始化上传器
             uploader = WeChatChannelsUploader(task['account'])
@@ -419,18 +456,19 @@ class UploadManager:
                 return False
 
             # 执行上传（传递位置参数）
-            result = uploader.upload_to_draft(
+            # upload_to_draft 返回 bool（True=成功，False=失败）
+            success = uploader.upload_to_draft(
                 video_path=task['video_path'],
-                title=task.get('title', '短剧精彩片段') or '短剧精彩片段',
-                tags=task.get('topics', []) or [],
-                description=task.get('description', '') or '',
-                cover_path=task.get('cover_path')
+                title=title or '短剧精彩片段',
+                tags=topics or [],
+                description=description or '',
+                cover_path=cover_path
             )
 
-            if result.get('status') == 'success':
+            if success:
                 return True
             else:
-                task['error_message'] = result.get('error', '上传失败')
+                task['error_message'] = '上传失败（upload_to_draft 返回 False）'
                 return False
                 
         except Exception as e:
