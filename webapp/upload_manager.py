@@ -207,7 +207,7 @@ class UploadManager:
         """清除队列"""
         with self.lock:
             if status == 'all':
-                cleared = len(self.queue)
+                cleared = len(self.queue) + len(self.failed) + len(self.completed)
                 self.queue.clear()
                 self.completed.clear()
                 self.failed.clear()
@@ -219,8 +219,17 @@ class UploadManager:
                 conn.commit()
                 conn.close()
             else:
-                cleared = len([t for t in self.queue if t['status'] == status])
-                self.queue = [t for t in self.queue if t['status'] != status]
+                # 从对应的内存列表中清除
+                if status == 'failed':
+                    cleared = len(self.failed)
+                    self.failed.clear()
+                elif status == 'completed':
+                    cleared = len(self.completed)
+                    self.completed.clear()
+                else:
+                    # pending / uploading 等状态从队列清除
+                    cleared = len([t for t in self.queue if t.get('status') == status])
+                    self.queue = [t for t in self.queue if t.get('status') != status]
                 
                 # 更新数据库
                 conn = sqlite3.connect(self.db_path)
@@ -229,7 +238,7 @@ class UploadManager:
                 conn.commit()
                 conn.close()
             
-            self._log('info', f'清除队列：{cleared}个任务')
+            self._log('info', f'清除{status}任务：{cleared}个')
             return {'status': 'success', 'cleared': cleared}
     
     def get_status(self) -> Dict:
