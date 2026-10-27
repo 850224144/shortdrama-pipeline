@@ -615,12 +615,12 @@ return (() => {
                 if now >= effective_deadline - 60 and now < hard_deadline:
                     effective_deadline = min(hard_deadline, now + 120)
 
-            # 无进度UI兜底：60s 内未观察到上传活跃信号（cancel/progress），
+            # 无进度UI兜底：30s 内未观察到上传活跃信号（cancel/progress），
             # 说明走的是无进度条的上传路径（实测V2重传、小视频），
             # 提前交给保存重试验证（视频就绪则保存成功，未就绪则重试）。
-            if now >= 60 and not saw_upload_active:
+            if now >= 30 and not saw_upload_active:
                 logger.warning(
-                    f'60s 内未观察到上传进度UI（cancel/progress），'
+                    f'30s 内未观察到上传进度UI（cancel/progress），'
                     f'可能无进度信号上传路径，提前交给保存重试验证'
                 )
                 return None
@@ -1422,10 +1422,15 @@ return (() => {
             logger.error(f"找不到视频文件: {abs_file_path}")
             return False
         
-        # 检查登录
-        if not self.check_login():
+        # 检查登录（复用：10分钟内已验证则跳过重复校验，避免每版重复验证）
+        _now = time.time()
+        if getattr(self, '_login_verified_at', 0) and _now - self._login_verified_at < 600:
+            pass
+        elif not self.check_login():
             logger.error("登录失效，请先登录")
             return False
+        else:
+            self._login_verified_at = time.time()
         
         # 启动浏览器
         co = self._get_browser_options(headless=False)
@@ -1454,24 +1459,24 @@ return (() => {
             file_input = None
             
             # 直接查找文件上传控件，不点击"发表视频"按钮
-            # 等待文件上传控件出现
-            for attempt in range(10):
+            # CSS 选择器实测可靠（xpath 每版失败 30s 才回退），改为主选择器
+            for attempt in range(3):
                 try:
-                    file_input = self.page.ele('xpath://input[@type="file"]', timeout=3)
+                    file_input = self.page.ele('css:input[type="file"]', timeout=3)
                     if file_input:
-                        logger.info(f"第 {attempt+1} 次尝试找到文件上传控件")
+                        logger.info(f"第 {attempt+1} 次尝试找到文件上传控件（CSS）")
                         break
                 except Exception:
                     time.sleep(1)
             
             if not file_input:
-                logger.error("未找到文件上传控件，尝试CSS选择器...")
+                logger.error("未找到文件上传控件（CSS），尝试XPath选择器...")
                 try:
-                    file_input = self.page.ele('css:input[type="file"]', timeout=10)
+                    file_input = self.page.ele('xpath://input[@type="file"]', timeout=5)
                     if file_input:
-                        logger.info("通过CSS选择器找到文件上传控件")
+                        logger.info("通过XPath选择器找到文件上传控件")
                 except Exception as e:
-                    logger.error(f"CSS选择器也失败: {e}")
+                    logger.error(f"XPath选择器也失败: {e}")
             
             if not file_input:
                 # 尝试查找所有input元素

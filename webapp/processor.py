@@ -1638,6 +1638,33 @@ class PipelineProcessor:
                     drama_genre='',
                     quotes=long_titles[:5]
                 )
+                # 标题去重：同剧已用标题则换 hook 重新生成（最多3次），兜底模板
+                if ai_result['title'] in titles:
+                    self.logger.log(drama_name, 'WARN',
+                                    f'V{v_idx+1} 标题与已有版本重复: {ai_result["title"]}，换 hook 重试')
+                    dedup_hook = hook
+                    dedup_ok = False
+                    for dedup_attempt in range(3):
+                        dedup_hook = keywords[(keywords.index(dedup_hook) + 1) % len(keywords)]
+                        try:
+                            retry = ai_copy.generate_copy(
+                                drama_name=drama_name,
+                                version_idx=v_idx + 1,
+                                version_hook=dedup_hook,
+                                plot_summary=f'本剧高光台词参考：{quote}' if quote else '',
+                                drama_genre='',
+                                quotes=long_titles[:5]
+                            )
+                            if retry and retry['title'] not in titles:
+                                ai_result = retry
+                                hook = dedup_hook
+                                dedup_ok = True
+                                break
+                        except Exception:
+                            continue
+                    if not dedup_ok:
+                        ai_result['title'] = f'{drama_name}{hook}瞬间'
+                        self.logger.log(drama_name, 'WARN', f'V{v_idx+1} 标题去重兜底为模板')
                 titles.append(ai_result['title'])
                 descriptions.append(ai_result['description'])
                 hashtags_list.append(ai_result['hashtags'])
