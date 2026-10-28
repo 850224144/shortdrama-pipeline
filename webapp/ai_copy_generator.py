@@ -183,11 +183,16 @@ class AICopyGenerator:
         quotes = quotes or []
         quotes_block = ''
         if quotes:
-            quotes_block = '\n'.join(f'  - {q}' for q in quotes[:5])
+            # 剥离时间码前缀，避免模型把 [5.8-7.4]她突然晕倒 整段回显成标题
+            clean_quotes = [self._strip_quote_timecode(q) for q in quotes[:5]]
+            clean_quotes = [q for q in clean_quotes if q]
+            quotes_block = '\n'.join(f'  - {q}' for q in clean_quotes)
             quotes_block = f'''
 【本剧真实高光台词（ASR提取，请基于这些台词写，不要编造剧情）】
 {quotes_block}
 '''
+        # 同样剥离 plot_summary 里可能带的时间码
+        plot_summary = self._strip_quote_timecode(plot_summary) if plot_summary else plot_summary
 
         prompt = f"""你是一个专业的短剧文案策划师。请为以下短剧生成吸引人的文案。
 
@@ -287,6 +292,20 @@ class AICopyGenerator:
     def _clean_title(cls, title):
         """去掉标题里的标点并去首尾空白。"""
         return ''.join(ch for ch in (title or '') if ch not in cls._TITLE_PUNCT).strip()
+
+    @classmethod
+    def _looks_like_fragment(cls, title):
+        """标题疑似 ASR 台词碎片：含数字（时间码残渣）即判非法。"""
+        import re
+        return bool(re.search(r'\d', title or ''))
+
+    @classmethod
+    def _strip_quote_timecode(cls, quote):
+        """剥离台词时间码：'[5.8-7.4]她突然晕倒' -> '她突然晕倒'；
+        '本剧高光台词参考：[5.8-7.4]她突然晕倒' -> '本剧高光台词参考：她突然晕倒'。"""
+        import re
+        return re.sub(r'[\[【]\d+\.?\d*\s*[-—~]\s*\d+\.?\d*[\]】]',
+                      '', (quote or '')).strip()
 
     @classmethod
     def _title_ok(cls, title):
@@ -429,9 +448,11 @@ class AICopyGenerator:
     def _validate_result(self, result, drama_name, version_hook):
         """验证 AI 生成结果"""
         
-        # 验证标题：先去掉标点（发布平台标题不接受标点），长度不合规再走模板
+        # 验证标题：先去掉标点（发布平台标题不接受标点），长度不合规或疑似
+        # ASR 台词碎片（含数字时间码残渣）再走模板
         title = self._clean_title(result.get('title'))
-        if not title or not 6 <= len(title) <= 16:
+        if (not title or not 6 <= len(title) <= 16
+                or self._looks_like_fragment(title)):
             title = self._generate_title(drama_name, version_hook)
         
         # 验证描述
