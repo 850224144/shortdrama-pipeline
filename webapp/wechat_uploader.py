@@ -774,41 +774,73 @@ return (() => {
                 return False
 
             cover_input.input(os.path.abspath(cover_path))
-            time.sleep(2)
-            
-            # 查找并点击"确认"或"完成"按钮关闭对话框
-            confirm_button = self._find_visible_text_element(('确认', '完成', '确定'))
-            if confirm_button:
-                confirm_button.click()
-                time.sleep(2)
-                logger.info('已点击确认按钮关闭封面编辑对话框')
-            else:
-                # 尝试使用 JavaScript 关闭对话框
+            time.sleep(2.5)  # 等封面图加载进编辑器
+
+            # 诊断：截图 + 枚举对话框内所有可见按钮文本。
+            # 视频号封面编辑器的应用按钮文本并非"确认/完成/确定"，
+            # 需先看清真实 UI 再精确点击（self.page.eles 能穿透 wujie iframe）。
+            self._save_debug_state('cover_editor_confirm')
+            try:
+                _btns = self.page.eles('css:button, [role="button"], .weui-btn, span.btn')
+                _texts = []
+                for _b in _btns:
+                    try:
+                        if _b.states.is_displayed:
+                            _t = (_b.text or '').strip()
+                            if _t:
+                                _texts.append(_t)
+                    except Exception:
+                        continue
+                logger.info(f'封面编辑器可见按钮: {_texts}')
+            except Exception as _e:
+                logger.debug(f'枚举按钮失败: {_e}')
+
+            # 查找并点击应用按钮（宽候选文本，匹配第一个可见且未禁用的，跳过取消/关闭类）
+            apply_labels = ('完成', '确定', '确认', '保存', '使用', '应用',
+                            '下一步', '使用封面', '完成裁剪', '确认裁剪', '裁剪', 'OK')
+            clicked_text = None
+            for _label in apply_labels:
                 try:
-                    self.page.run_js('''
+                    _cands = self.page.eles(f'text:{_label}')
+                except Exception:
+                    _cands = []
+                for _c in _cands:
+                    try:
+                        if _c and _c.states.is_displayed and not self._element_is_disabled(_c):
+                            _t = (_c.text or '').strip()
+                            if any(_x in _t for _x in ('取消', '关闭', '返回', '不保存')):
+                                continue
+                            _c.click()
+                            clicked_text = _t
+                            break
+                    except Exception:
+                        continue
+                if clicked_text:
+                    break
+            if clicked_text:
+                time.sleep(2)
+                logger.info(f'已点击封面应用按钮: {clicked_text}')
+            else:
+                logger.warning('未匹配到封面应用按钮（候选文本均不命中），JS 兜底')
+                try:
+                    _res = self.page.run_js('''
                         (() => {
-                            const buttons = [...document.querySelectorAll('button')];
-                            for (const button of buttons) {
-                                const text = button.textContent.trim();
-                                if (text === '确认' || text === '完成' || text === '确定') {
-                                    button.click();
-                                    return {clicked: true, text: text};
-                                }
+                            const want = ['完成','确定','确认','保存','使用','应用','下一步','使用封面','完成裁剪','确认裁剪','OK'];
+                            const all = [...document.querySelectorAll('button,[role="button"]')];
+                            for (const w of want) {
+                                const b = all.find(el => (el.innerText||'').trim()===w && !el.disabled);
+                                if (b) { b.click(); return {action:'apply', text:w}; }
                             }
-                            // 尝试关闭对话框
-                            const closeButtons = [...document.querySelectorAll('[class*="close"], [class*="Close"], .close')];
-                            if (closeButtons.length > 0) {
-                                closeButtons[0].click();
-                                return {clicked: true, type: 'close'};
-                            }
-                            return {clicked: false};
+                            const close = all.find(el => /取消|关闭/.test((el.innerText||'').trim()));
+                            if (close) { close.click(); return {action:'cancel', text:close.innerText.trim()}; }
+                            return {action:'none'};
                         })()
                     ''')
                     time.sleep(1)
-                    logger.info('已使用JavaScript关闭封面编辑对话框')
-                except Exception as e:
-                    logger.warning(f'关闭对话框失败: {e}')
-            
+                    logger.warning(f'封面对话框 JS 兜底结果: {_res}')
+                except Exception as _e:
+                    logger.warning(f'JS 兜底失败: {_e}')
+
             logger.info('封面图片已提交到预览')
             return True
         except Exception as e:
