@@ -19,6 +19,9 @@ from processor import PipelineProcessor, Logger, StateManager, CONFIG
 # 导入上传管理器
 from upload_manager import UploadManager
 
+# 导入成品清理服务
+from artifact_cleanup import ArtifactCleanup, STRATEGY_NONE, STRATEGY_RECYCLE
+
 app = Flask(__name__, template_folder='templates', static_folder='static')
 socketio = SocketIO(app, cors_allowed_origins="*")
 
@@ -50,6 +53,9 @@ def unsupported_media_type(error):
 
 # 初始化上传管理器
 upload_manager = UploadManager(CONFIG['data_dir'])
+
+# 初始化成品清理服务
+artifact_cleanup = ArtifactCleanup(CONFIG['data_dir'])
 
 # ===== 批量切片管理器 =====
 class BatchCutManager:
@@ -522,8 +528,21 @@ def add_upload_task():
             description=data.get('description'),
             topics=data.get('topics'),
             account=data.get('account'),
-            version=data['version']
+            version=data['version'],
+            batch_id=data.get('batch_id'),
+            source_dir=data.get('source_dir'),
+            output_dir=data.get('output_dir')
         )
+        
+        # 登记批次（幂等），供清理计划器按 batch_id 聚合
+        if result.get('status') == 'success' and data.get('batch_id'):
+            artifact_cleanup._record_batch(
+                batch_id=data['batch_id'],
+                drama_name=data['drama_name'],
+                account=data.get('account'),
+                source_dir=data.get('source_dir'),
+                output_dir=data.get('output_dir'),
+            )
         
         # 直接返回结果，使用Response对象避免jsonify问题
         from flask import Response
@@ -614,6 +633,69 @@ def clear_upload_queue():
         return Response(json.dumps(result, ensure_ascii=False), mimetype='application/json')
     except Exception as e:
         return Response(json.dumps({'status': 'failed', 'error': str(e)}, ensure_ascii=False), mimetype='application/json', status=500)
+
+# ===== 成品清理 API =====
+@app.route('/api/cleanup/plan', methods=['POST'])
+def cleanup_plan():
+    """生成清理计划（默认 dry-run，不移动任何文件）。
+    body: {batch_id, strategy?}  strategy 默认 recycle_on_full_batch；
+    API 直调若不带 auto_cleanup=true 视为 none（避免误删）。
+    """
+    from flask import Response
+    import json
+    try:
+        data = request.get_json(force=True) or {}
+        batch_id = data.get('batch_id')
+        if not batch_id:
+            return Response(json.dumps({'status': 'failed', 'error': '缺少 batch_id'},
+                                       ensure_ascii=False), mimetype='application/json', status=400)
+        # 仅当前端明确勾选自动清理才启用；API 直调默认 none
+        strategy = data.get('strategy', STRATEGY_RECYCLE)
+        if not data.get('auto_cleanup'):
+            strategy = STRATEGY_NONE
+        plan = artifact_cleanup.plan_cleanup(batch_id, strategy=strategy, dry_run=True)
+        return Response(json.dumps(plan, ensure_ascii=False), mimetype='application/json')
+    except Exception as e:
+        return Response(json.dumps({'status': 'failed', 'error': str(e)},
+                                   ensure_ascii=False), mimetype='application/json', status=500)
+
+@app.route('/api/cleanup/execute', methods=['POST'])
+def cleanup_execute():
+    """执行清理（写 manifest → 移动回收站 → 更新 DB）。
+    body: {batch_id, strategy?, auto_cleanup?}  仅 auto_cleanup=true 才实际移动。
+    """
+    from flask import Response
+    import json
+    try:
+        data = request.get_json(force=True) or {}
+        batch_id = data.get('batch_id')
+        if not batch_id:
+            return Response(json.dumps({'status': 'failed', 'error': '缺少 batch_id'},
+                                       ensure_ascii=False), mimetype='application/json', status=400)
+        if not data.get('auto_cleanup'):
+            return Response(json.dumps({'status': 'failed', 'error': '自动清理未启用（auto_cleanup=false）',
+                                        'strategy': STRATEGY_NONE},
+                                       ensure_ascii=False), mimetype='application/json')
+        strategy = data.get('strategy', STRATEGY_RECYCLE)
+        result = artifact_cleanup.execute_cleanup(batch_id, strategy=strategy)
+        return Response(json.dumps(result, ensure_ascii=False), mimetype='application/json')
+    except Exception as e:
+        return Response(json.dumps({'status': 'failed', 'error': str(e)},
+                                   ensure_ascii=False), mimetype='application/json', status=500)
+
+@app.route('/api/cleanup/jobs')
+def cleanup_jobs():
+    """查询清理任务（可按 batch_id 过滤）。"""
+    from flask import Response
+    import json
+    try:
+        batch_id = request.args.get('batch_id')
+        jobs = artifact_cleanup.list_jobs(batch_id)
+        return Response(json.dumps({'status': 'success', 'jobs': jobs},
+                                   ensure_ascii=False), mimetype='application/json')
+    except Exception as e:
+        return Response(json.dumps({'status': 'failed', 'error': str(e)},
+                                   ensure_ascii=False), mimetype='application/json', status=500)
 
 @app.route('/api/upload/dramas')
 def get_uploadable_dramas():

@@ -1708,11 +1708,24 @@ class PipelineProcessor:
             else:
                 source_pattern = "{ep}.mp4"
             
+            # 交付文件名的安全剧名（与 render_generic 一致：全角/半角逗号、空格 → _）
+            drama_safe = drama_name.replace('，', '_').replace(',', '_').replace(' ', '_')
+            # 钩子关键词（与 config videos[0].hook_keyword 一致）
+            kw = keywords[v_idx % len(keywords)]
+            artifacts = {
+                "video_path": os.path.join(out_dir, f'{drama_safe}_{v_idx+1}_{kw}_去重版.mp4'),
+                # _generate_cover 用原始剧名写 covers/{剧名}_{版本}_封面.jpg
+                "cover_path": os.path.join(out_dir, 'covers', f'{drama_name}_{v_idx+1}_封面.jpg'),
+                "source_dir": src_dir,
+                "output_dir": out_dir,
+            }
+
             edl_config = {
                 "drama_name": drama_name,
                 "source_dir": src_dir,
                 "source_pattern": source_pattern,
                 "output_dir": out_dir,
+                "artifacts": artifacts,
                 "videos": [
                     {
                         "id": v_idx + 1,
@@ -1755,6 +1768,10 @@ class PipelineProcessor:
                             'filename': output_file,
                             'type': 'edl'
                         })
+                        # 回写实际 video_path 到 artifacts（钩子可能与预判不同）
+                        self._update_config_artifacts(
+                            out_dir, v_idx + 1, 'video_path',
+                            os.path.join(out_dir, output_file))
                 else:
                     self.logger.log(drama_name, 'ERROR', f'V{v_idx+1} EDL渲染失败：{result.stderr[:200]}')
                     
@@ -2110,7 +2127,27 @@ class PipelineProcessor:
         fname = os.path.basename(filepath)
         ep = self.parse_episode_number(fname)
         return ep if ep is not None else 1
-    
+
+    def _update_config_artifacts(self, out_dir, version, key, value):
+        """回写 edl_config_v{version}.json 的 artifacts[key]=value（幂等）。
+
+        用于渲染/封面生成后，把实际落盘的路径写进配置，供上传与清理读取，
+        不再靠上传端猜测文件名。
+        """
+        try:
+            config_path = os.path.join(out_dir, f'edl_config_v{version}.json')
+            if not os.path.exists(config_path):
+                return
+            with open(config_path, 'r', encoding='utf-8') as f:
+                config = json.load(f)
+            artifacts = config.get('artifacts') or {}
+            artifacts[key] = value
+            config['artifacts'] = artifacts
+            with open(config_path, 'w', encoding='utf-8') as f:
+                json.dump(config, f, ensure_ascii=False, indent=2)
+        except Exception as e:
+            self.logger.log('system', 'WARN', f'回写 artifacts.{key} 失败: {e}')
+
     def _select_best_videos(self, all_videos):
         """筛选最佳版本"""
         videos = [v for v in all_videos if "测试" not in v.get("filename", "") and "_test" not in v.get("filename", "")]
@@ -2277,6 +2314,10 @@ class PipelineProcessor:
                     
                     # 2. 所有版本加角标
                     self._add_cover_badge(cover_path, version_idx)
+                    
+                    # 2b. 回写实际 cover_path 到 artifacts，供上传/清理读取
+                    if os.path.exists(cover_path):
+                        self._update_config_artifacts(out_dir, version_idx, 'cover_path', cover_path)
                     
                     return
             

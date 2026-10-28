@@ -759,6 +759,10 @@
                         <button class="btn btn-danger" id="stopUploadBtn" onclick="stopUpload()" disabled>⏹️ 停止</button>
                         <button class="btn btn-secondary" onclick="clearUploadQueue()">🧹 清除队列</button>
                         <button class="btn btn-success" id="openDraftBtn" onclick="openDraftBox()">📋 打开草稿箱</button>
+                        <label style="margin-left: 8px; font-size: 13px; display: inline-flex; align-items: center;">
+                            <input type="checkbox" id="autoCleanup" style="margin-right: 4px;">
+                            上传成功后自动清理（移入回收站）
+                        </label>
                     </div>
                     
                     <div class="drama-selector">
@@ -1344,6 +1348,10 @@
                 return;
             }
             
+            // 生成批次 ID（时间戳），供清理计划器按批次聚合
+            const batchId = 'batch_' + Date.now() + '_' + Math.floor(Math.random() * 1000);
+            window.currentBatchId = batchId;
+            
             // 添加所有选中的剧到队列
             let addedCount = 0;
             for (const [dramaName, versions] of Object.entries(selectedDramas)) {
@@ -1392,7 +1400,9 @@
                                 drama_name: dramaName,
                                 video_path: videoPath,
                                 account: account,
-                                version: version
+                                version: version,
+                                batch_id: batchId,
+                                output_dir: dramaDir
                             })
                         });
                         
@@ -1429,12 +1439,16 @@
                 }
             }
             
-            console.log(`总计添加: ${addedCount}个任务`);
+            console.log('总计添加: ' + addedCount + '个任务');
             
             if (addedCount === 0) {
                 showNotification('没有找到可上传的视频文件', 'error');
                 return;
             }
+            
+            // 记录批次 ID 与自动清理开关（供上传完成后触发清理）
+            window.currentBatchId = batchId;
+            window.autoCleanupEnabled = document.getElementById('autoCleanup')?.checked || false;
             
             // 开始上传
             try {
@@ -1551,6 +1565,17 @@
                 const response = await fetch('/api/upload/status');
                 const status = await response.json();
                 
+                // 检测上传完成（uploading 从 true → false），触发自动清理
+                if (window.wasUploading === true && !status.uploading && window.currentBatchId) {
+                    if (window.autoCleanupEnabled) {
+                        triggerCleanup(window.currentBatchId);
+                    } else {
+                        console.log('自动清理未勾选，跳过 batch=' + window.currentBatchId);
+                    }
+                    window.currentBatchId = null;
+                }
+                window.wasUploading = status.uploading;
+                
                 // 更新统计
                 document.getElementById('uploadQueueCount').textContent = status.queue_length;
                 document.getElementById('uploadCurrentCount').textContent = status.current_task ? 1 : 0;
@@ -1641,6 +1666,30 @@
             if (uploadPollTimer) clearInterval(uploadPollTimer);
             updateUploadUI();
             uploadPollTimer = setInterval(updateUploadUI, 2000);
+        }
+        
+        // 触发成品清理（上传完成后调用）
+        async function triggerCleanup(batchId) {
+            if (!batchId) return;
+            try {
+                showNotification('上传完成，正在清理成品（移入回收站）...', 'info');
+                const resp = await fetch('/api/cleanup/execute', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ batch_id: batchId, auto_cleanup: true })
+                });
+                const result = await resp.json();
+                if (result.status === 'success') {
+                    const moved = (result.results || []).filter(r => r.status === 'moved').length;
+                    const skipped = (result.skipped || []).length;
+                    showNotification(`清理完成：移动 ${moved} 项，跳过 ${skipped} 项`, 'success');
+                } else {
+                    showNotification('清理未执行: ' + (result.error || result.reason || '未知'), 'warning');
+                }
+            } catch (error) {
+                console.error('触发清理失败:', error);
+                showNotification('清理请求失败: ' + error.message, 'error');
+            }
         }
         
         // 停止上传轮询

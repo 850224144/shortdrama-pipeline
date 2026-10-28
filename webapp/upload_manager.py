@@ -79,6 +79,67 @@ class UploadManager:
             )
         ''')
         
+        # 迁移：为既有表补充封面/清理相关列（幂等，列已存在则跳过）
+        new_columns = {
+            'batch_id': 'TEXT',
+            'source_dir': 'TEXT',
+            'output_dir': 'TEXT',
+            'cover_status': "TEXT DEFAULT 'not_requested'",
+            'draft_saved': 'INTEGER DEFAULT 0',
+            'draft_verified_at': 'TIMESTAMP',
+            'cleanup_status': "TEXT DEFAULT 'none'",
+            'cleanup_error': 'TEXT',
+        }
+        existing_cols = {row[1] for row in cursor.execute('PRAGMA table_info(upload_records)').fetchall()}
+        for col, ddl in new_columns.items():
+            if col not in existing_cols:
+                try:
+                    cursor.execute(f'ALTER TABLE upload_records ADD COLUMN {col} {ddl}')
+                except sqlite3.OperationalError as e:
+                    # 列已存在（并发）——忽略
+                    if 'duplicate column' not in str(e).lower():
+                        raise
+        
+        # 创建上传批次表（一次批量上传一个 batch_id，聚合多账号/多版本）
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS upload_batches (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                batch_id TEXT NOT NULL UNIQUE,
+                account TEXT,
+                drama_name TEXT NOT NULL,
+                source_dir TEXT,
+                output_dir TEXT,
+                version_count INTEGER DEFAULT 0,
+                success_count INTEGER DEFAULT 0,
+                failed_count INTEGER DEFAULT 0,
+                cover_applied_count INTEGER DEFAULT 0,
+                cover_failed_count INTEGER DEFAULT 0,
+                status TEXT DEFAULT 'running',
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                completed_at TIMESTAMP
+            )
+        ''')
+        
+        # 创建清理任务表（持久化，服务重启后仍能续跑）
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS artifact_cleanup_jobs (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                batch_id TEXT NOT NULL,
+                account TEXT,
+                drama_name TEXT NOT NULL,
+                job_type TEXT NOT NULL,       -- version | drama
+                version INTEGER,
+                target_path TEXT NOT NULL,    -- 要清理的路径（文件或目录）
+                recycle_path TEXT,            -- 移动目标（回收站内）
+                manifest_path TEXT,           -- 清理前写的 manifest
+                status TEXT DEFAULT 'pending',  -- pending | moved | failed | skipped
+                strategy TEXT DEFAULT 'recycle_on_full_batch',
+                error TEXT,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                completed_at TIMESTAMP
+            )
+        ''')
+        
         # 创建索引
         cursor.execute('''
             CREATE INDEX IF NOT EXISTS idx_drama_version 
@@ -88,13 +149,24 @@ class UploadManager:
             CREATE INDEX IF NOT EXISTS idx_status 
             ON upload_records(status)
         ''')
+        cursor.execute('''
+            CREATE INDEX IF NOT EXISTS idx_batch_id 
+            ON upload_records(batch_id)
+        ''')
+        cursor.execute('''
+            CREATE INDEX IF NOT EXISTS idx_cleanup_batch 
+            ON artifact_cleanup_jobs(batch_id)
+        ''')
         
         conn.commit()
         conn.close()
+
         
     def add_to_queue(self, drama_name: str, video_path: str, cover_path: str = None,
                      title: str = None, description: str = None, topics: str = None,
-                     account: str = None, version: int = 1) -> Dict:
+                     account: str = None, version: int = 1,
+                     batch_id: str = None, source_dir: str = None,
+                     output_dir: str = None) -> Dict:
         """添加到上传队列"""
         with self.lock:
             # 检查是否已存在（按 account 去重，两个号可以发同一部剧）
@@ -124,9 +196,11 @@ class UploadManager:
                 cursor = conn.cursor()
                 cursor.execute('''
                     INSERT INTO upload_records 
-                    (drama_name, version, video_path, cover_path, title, description, topics, account, status)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'pending')
-                ''', (drama_name, version, video_path, cover_path, title, description, topics_db, _account))
+                    (drama_name, version, video_path, cover_path, title, description, topics, account, status,
+                     batch_id, source_dir, output_dir)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?, ?, ?)
+                ''', (drama_name, version, video_path, cover_path, title, description, topics_db, _account,
+                      batch_id, source_dir, output_dir))
                 record_id = cursor.lastrowid
             
             # 添加到内存队列
@@ -141,7 +215,12 @@ class UploadManager:
                 'topics': topics_list,
                 'account': _account,
                 'status': 'pending',
-                'retry_count': 0
+                'retry_count': 0,
+                'batch_id': batch_id,
+                'source_dir': source_dir,
+                'output_dir': output_dir,
+                'cover_status': 'not_requested',
+                'draft_saved': 0,
             }
             self.queue.append(task)
             
@@ -328,18 +407,25 @@ class UploadManager:
                     self.failed.append(task)
                     self._log('error', f'上传失败：{task["drama_name"]} V{task["version"]} - {task.get("error_message")}')
             
-            # 更新数据库（不持锁）—— 同步实际使用的文案，留审计痕迹
+            # 更新数据库（不持锁）—— 同步实际使用的文案与封面状态，留审计痕迹
             _topics_db = json.dumps(task.get('topics', []), ensure_ascii=False) if task.get('topics') else None
+            _cover_status = task.get('cover_status', 'not_requested')
+            _draft_saved = 1 if task.get('draft_saved') else 0
+            _draft_verified_at = datetime.now().strftime('%Y-%m-%d %H:%M:%S') if _draft_saved else None
             with sqlite3.connect(self.db_path) as conn:
                 cursor = conn.cursor()
                 cursor.execute('''
                     UPDATE upload_records 
                     SET status=?, completed_at=?, error_message=?,
-                        title=?, description=?, topics=?, cover_path=?
+                        title=?, description=?, topics=?, cover_path=?,
+                        cover_status=?, draft_saved=?, draft_verified_at=?,
+                        source_dir=?, output_dir=?
                     WHERE id=?
                 ''', (task['status'], task['completed_at'], task.get('error_message'),
                       task.get('title'), task.get('description'), _topics_db,
-                      task.get('cover_path'), task['id']))
+                      task.get('cover_path'), _cover_status, _draft_saved,
+                      _draft_verified_at, task.get('source_dir'), task.get('output_dir'),
+                      task['id']))
             
             # 检查账号切换（短暂持锁）
             with self.lock:
@@ -484,6 +570,8 @@ class UploadManager:
             topics = task.get('topics')
             cover_path = task.get('cover_path')
             
+            # ── 优先从 edl_config 的 artifacts 读取明确路径（不再靠猜）──
+            config = None
             if os.path.exists(config_path):
                 try:
                     with open(config_path, 'r', encoding='utf-8') as f:
@@ -499,14 +587,47 @@ class UploadManager:
                     self._log('info', f'V{task["version"]} 文案：{title}')
                 except Exception as e:
                     self._log('warn', f'V{task["version"]} 读取edl_config失败：{e}')
-            
-            # ── 推断封面路径（covers/{剧名}_{版本}_封面.jpg）──
+
+            # 从 artifacts/根级补齐 source_dir、output_dir（供清理计划器聚合）
+            if isinstance(config, dict):
+                artifacts = config.get('artifacts') or {}
+                if not task.get('source_dir'):
+                    task['source_dir'] = artifacts.get('source_dir') or config.get('source_dir')
+                if not task.get('output_dir'):
+                    task['output_dir'] = artifacts.get('output_dir') or config.get('output_dir') or video_dir
+                if task.get('source_dir'):
+                    self._log('info', f'V{task["version"]} 素材目录：{task["source_dir"]}')
+                if task.get('output_dir'):
+                    self._log('info', f'V{task["version"]} 成品目录：{task["output_dir"]}')
+
+            # ── 推断封面路径：先看 artifacts，再回退到 covers/{剧名}_{版本}_封面.jpg ──
+            if not cover_path and isinstance(config, dict):
+                artifacts = config.get('artifacts') or {}
+                if artifacts.get('cover_path') and os.path.exists(artifacts['cover_path']):
+                    cover_path = artifacts['cover_path']
+                    task['cover_path'] = cover_path
+                    self._log('info', f'V{task["version"]} 从 artifacts 读取封面：{cover_path}')
+
             if not cover_path:
+                # 回退：_generate_cover 用原始剧名写 covers/{剧名}_{版本}_封面.jpg。
+                # 上传管理器此前用 [^\w\u4e00-\u9fff]→_ 的宽清洗，含逗号/全角标点的
+                # 剧名会猜错。现在按实际写入规则生成候选，逐一探测。
                 import re as _re
-                drama_safe = _re.sub(r'[^\w\u4e00-\u9fff]', '_', task['drama_name'])
-                cover_path = os.path.join(video_dir, 'covers', f'{drama_safe}_{task["version"]}_封面.jpg')
-                if not os.path.exists(cover_path):
+                candidates = []
+                raw = task['drama_name']
+                candidates.append(raw)
+                candidates.append(raw.replace('，', '_').replace(',', '_').replace(' ', '_'))
+                candidates.append(_re.sub(r'[^\w\u4e00-\u9fff]', '_', raw))
+                for cand in candidates:
+                    guess = os.path.join(video_dir, 'covers', f'{cand}_{task["version"]}_封面.jpg')
+                    if os.path.exists(guess):
+                        cover_path = guess
+                        task['cover_path'] = guess
+                        self._log('info', f'V{task["version"]} 封面（回退探测）：{guess}')
+                        break
+                if not cover_path:
                     cover_path = None  # 不存在就不传，让上传器用默认封面
+
             
             # 初始化上传器
             uploader = WeChatChannelsUploader(task['account'])
@@ -517,8 +638,11 @@ class UploadManager:
                 return False
 
             # 执行上传（传递位置参数）
-            # upload_to_draft 返回 bool（True=成功，False=失败）
-            success = uploader.upload_to_draft(
+            # upload_to_draft 现在返回结构化 dict，不再返回 bool：
+            #   {'status': 'success'|'failed', 'draft_saved': bool,
+            #    'cover': {'status': ..., 'error': ..., 'cover_path': ...},
+            #    'error': str|None}
+            outcome = uploader.upload_to_draft(
                 video_path=task['video_path'],
                 title=title or '短剧精彩片段',
                 tags=topics or [],
@@ -526,11 +650,24 @@ class UploadManager:
                 cover_path=cover_path
             )
 
-            if success:
-                return True
+            if isinstance(outcome, dict):
+                cover_info = outcome.get('cover') or {}
+                task['cover_status'] = cover_info.get('status', 'not_requested')
+                task['cover_path'] = cover_info.get('cover_path') or task.get('cover_path')
+                task['draft_saved'] = bool(outcome.get('draft_saved'))
+                if outcome.get('status') == 'success':
+                    return True
+                else:
+                    task['error_message'] = outcome.get('error') or '上传失败'
+                    return False
             else:
-                task['error_message'] = '上传失败（upload_to_draft 返回 False）'
-                return False
+                # 兼容旧返回 bool（不应再出现）
+                task['cover_status'] = 'not_requested'
+                if outcome:
+                    return True
+                else:
+                    task['error_message'] = '上传失败（upload_to_draft 返回 False）'
+                    return False
                 
         except Exception as e:
             task['error_message'] = str(e)

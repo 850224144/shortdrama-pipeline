@@ -25,6 +25,202 @@ logging.basicConfig(
 )
 logger = logging.getLogger('WeChatUploader')
 
+COVER_EDITOR_OPEN_JS = r'''
+(() => {
+    const normalize = v => (v || '').replace(/\s+/g, ' ').trim();
+    const seen = new WeakSet();
+    const walk = root => {
+        if (!root || seen.has(root)) return [];
+        seen.add(root);
+        let out = [];
+        let nodes = [];
+        try { nodes = [...root.querySelectorAll('*')]; } catch (e) {}
+        out = out.concat(nodes);
+        for (const n of nodes) { if (n.shadowRoot) out = out.concat(walk(n.shadowRoot)); }
+        for (const f of root.querySelectorAll('iframe,frame')) {
+            try { if (f.contentDocument) out = out.concat(walk(f.contentDocument)); } catch (e) {}
+        }
+        return out;
+    };
+    const all = walk(document);
+    const visible = n => {
+        if (!n || !n.getBoundingClientRect) return false;
+        const r = n.getBoundingClientRect();
+        const st = n.ownerDocument ? n.ownerDocument.defaultView.getComputedStyle(n) : null;
+        return r.width > 0 && r.height > 0 && st && st.display !== 'none' &&
+            st.visibility !== 'hidden' && Number(st.opacity || 1) > 0;
+    };
+    const labels = ['编辑封面', '更换封面', '选择封面', '设置封面'];
+    // 1) 文本精确命中且可见的打开按钮
+    for (const n of all) {
+        const t = normalize(n.innerText || n.textContent);
+        if (labels.includes(t) && visible(n)) {
+            const btn = n.closest('button,[role="button"],a,[tabindex]') || n;
+            btn.click();
+            return {found: true, text: t};
+        }
+    }
+    // 2) 回退：纯“编辑”文本且靠近封面预览卡片的元素
+    for (const n of all) {
+        const t = normalize(n.innerText || n.textContent);
+        if (t === '编辑' && visible(n)) {
+            let p = n, ok = false;
+            for (let d = 0; p && d <= 6; d++, p = p.parentElement) {
+                if (p.querySelector && p.querySelector('img,video,canvas') &&
+                    /封面|分享卡片/.test(normalize(p.innerText || ''))) { ok = true; break; }
+            }
+            if (ok) {
+                const btn = n.closest('button,[role="button"],a,[tabindex]') || n;
+                btn.click();
+                return {found: true, text: '编辑'};
+            }
+        }
+    }
+    return {found: false};
+})()
+'''
+
+COVER_EDITOR_STATE_JS = r'''
+(() => {
+    const normalize = v => (v || '').replace(/\s+/g, ' ').trim();
+    const seen = new WeakSet();
+    const walk = root => {
+        if (!root || seen.has(root)) return [];
+        seen.add(root);
+        let out = [];
+        let nodes = [];
+        try { nodes = [...root.querySelectorAll('*')]; } catch (e) {}
+        out = out.concat(nodes);
+        for (const n of nodes) { if (n.shadowRoot) out = out.concat(walk(n.shadowRoot)); }
+        for (const f of root.querySelectorAll('iframe,frame')) {
+            try { if (f.contentDocument) out = out.concat(walk(f.contentDocument)); } catch (e) {}
+        }
+        return out;
+    };
+    const all = walk(document);
+    const images = all
+        .filter(n => n.tagName === 'IMG')
+        .map(n => ({src: n.src || '', cls: String(n.className || ''), natural: n.naturalWidth || 0}));
+    const dialogs = all.filter(n => {
+        const t = normalize(n.innerText || n.textContent);
+        if (!t || t.length > 400) return false;
+        const role = (n.getAttribute && n.getAttribute('role')) || '';
+        const cls = String(n.className || '');
+        const looksDialog = role === 'dialog' || /dialog|modal|popup|popover/i.test(cls);
+        return looksDialog && /编辑封面|更换封面|上传封面|选择封面|设置封面/.test(t);
+    });
+    dialogs.sort((a, b) => (a.innerText || '').length - (b.innerText || '').length);
+    const dialog = dialogs[0];
+    const dialogText = dialog ? normalize(dialog.innerText || '') : '';
+    const dialogImgs = dialog
+        ? [...dialog.querySelectorAll('img')].map(n => ({src: n.src || '', natural: n.naturalWidth || 0}))
+        : [];
+    let confirm = null;
+    if (dialog) {
+        const nodes = [...dialog.querySelectorAll('button,[role="button"],a,span,div')];
+        confirm = nodes.find(b => normalize(b.innerText || b.textContent) === '确认') || null;
+    }
+    const rect = confirm ? confirm.getBoundingClientRect() : null;
+    return {
+        dialog_open: !!dialog,
+        dialog_text: dialogText.slice(0, 160),
+        dialog_image_count: dialogImgs.length,
+        dialog_images: dialogImgs.slice(0, 4),
+        image_count: images.length,
+        images: images.slice(0, 8),
+        confirm_visible: !!(rect && rect.width > 0 && rect.height > 0),
+        confirm_disabled: !!(confirm && (confirm.disabled ||
+            (confirm.getAttribute && confirm.getAttribute('aria-disabled') === 'true'))),
+        has_error: /失败|错误|请选择|重新上传/.test(dialogText),
+    };
+})()
+'''
+
+COVER_EDITOR_APPLY_JS = r'''
+(() => {
+    const normalize = v => (v || '').replace(/\s+/g, ' ').trim();
+    const seen = new WeakSet();
+    const walk = root => {
+        if (!root || seen.has(root)) return [];
+        seen.add(root);
+        let out = [];
+        let nodes = [];
+        try { nodes = [...root.querySelectorAll('*')]; } catch (e) {}
+        out = out.concat(nodes);
+        for (const n of nodes) { if (n.shadowRoot) out = out.concat(walk(n.shadowRoot)); }
+        for (const f of root.querySelectorAll('iframe,frame')) {
+            try { if (f.contentDocument) out = out.concat(walk(f.contentDocument)); } catch (e) {}
+        }
+        return out;
+    };
+    const all = walk(document);
+    const dialogs = all.filter(n => {
+        const t = normalize(n.innerText || n.textContent);
+        if (!t || t.length > 400) return false;
+        const role = (n.getAttribute && n.getAttribute('role')) || '';
+        const cls = String(n.className || '');
+        const looksDialog = role === 'dialog' || /dialog|modal|popup|popover/i.test(cls);
+        return looksDialog && /编辑封面|更换封面|上传封面|选择封面|设置封面/.test(t);
+    });
+    dialogs.sort((a, b) => (a.innerText || '').length - (b.innerText || '').length);
+    const dialog = dialogs[0];
+    if (!dialog) return {applied: false, reason: 'dialog_not_found'};
+    const applyLabels = ['确认', '完成', '确定', '保存', '使用封面', '应用'];
+    const buttons = [...dialog.querySelectorAll('button,[role="button"],a,span,div')];
+    for (const label of applyLabels) {
+        const btn = buttons.find(b => normalize(b.innerText || b.textContent) === label && !b.disabled);
+        if (btn) {
+            btn.click();
+            return {applied: true, text: label};
+        }
+    }
+    return {applied: false, reason: 'apply_not_found',
+            dialog_text: normalize(dialog.innerText || '').slice(0, 160)};
+})()
+'''
+
+COVER_EDITOR_IMAGE_CHANGED_JS = r'''
+(() => {
+    const normalize = v => (v || '').replace(/\s+/g, ' ').trim();
+    const seen = new WeakSet();
+    const walk = root => {
+        if (!root || seen.has(root)) return [];
+        seen.add(root);
+        let out = [];
+        let nodes = [];
+        try { nodes = [...root.querySelectorAll('*')]; } catch (e) {}
+        out = out.concat(nodes);
+        for (const n of nodes) { if (n.shadowRoot) out = out.concat(walk(n.shadowRoot)); }
+        for (const f of root.querySelectorAll('iframe,frame')) {
+            try { if (f.contentDocument) out = out.concat(walk(f.contentDocument)); } catch (e) {}
+        }
+        return out;
+    };
+    const all = walk(document);
+    const dialogs = all.filter(n => {
+        const t = normalize(n.innerText || n.textContent);
+        if (!t || t.length > 400) return false;
+        const role = (n.getAttribute && n.getAttribute('role')) || '';
+        const cls = String(n.className || '');
+        const looksDialog = role === 'dialog' || /dialog|modal|popup|popover/i.test(cls);
+        return looksDialog && /编辑封面|更换封面|上传封面|选择封面|设置封面/.test(t);
+    });
+    dialogs.sort((a, b) => (a.innerText || '').length - (b.innerText || '').length);
+    const dialog = dialogs[0];
+    // 封面预览主图：弹窗内自然尺寸最大的 img，或全局第一个尺寸合理的 img
+    let best = null, bestArea = 0;
+    for (const img of all) {
+        if (img.tagName !== 'IMG') continue;
+        const r = img.getBoundingClientRect();
+        const area = r.width * r.height;
+        if (area > bestArea && r.width > 0) { best = img; bestArea = area; }
+    }
+    const main = best ? {src: best.src || '', w: best.naturalWidth || 0, cls: String(best.className || '')} : null;
+    return {dialog_open: !!dialog, main: main, dialog_image_count: dialog ? [...dialog.querySelectorAll('img')].length : 0};
+})()
+'''
+
+    
 
 class WeChatChannelsUploader:
     """视频号自动上传器"""
@@ -72,7 +268,6 @@ class WeChatChannelsUploader:
     return {found: true, text: candidate.text, cardRank: candidate.cardRank};
 })()
 """
-    
     def __init__(self, account_name='default'):
         """
         初始化上传器
@@ -648,72 +843,195 @@ return (() => {
         logger.error(f'等待视频上传完成超时（{timeout}秒）: {last_state}')
         return None
 
-    def _find_cover_edit_button(self):
-        logger.info('开始查找封面编辑按钮...')
-        
-        # 方法1：直接查找所有按钮，查找文本为"编辑"的按钮
-        logger.info('尝试直接查找"编辑"按钮...')
+        """校验封面文件。通过返回 None，否则返回错误字符串。"""
+        if not cover_path:
+            return '未提供封面路径'
+        abs_path = os.path.abspath(cover_path)
+        if not os.path.isfile(abs_path):
+            return f'封面文件不存在: {abs_path}'
+        ext = os.path.splitext(abs_path)[1].lower()
+        if ext not in ('.jpg', '.jpeg', '.png', '.webp', '.bmp'):
+            return f'封面扩展名不支持: {ext}'
         try:
-            buttons = self.page.eles('tag:button')
-            logger.info(f'找到 {len(buttons)} 个按钮')
-            for button in buttons:
-                try:
-                    text = (button.text or '').strip()
-                    logger.debug(f'检查按钮: {text}')
-                    if text == '编辑':
-                        logger.info(f'直接找到编辑按钮: {text}')
-                        return button
-                except Exception:
-                    continue
-        except Exception as e:
-            logger.debug(f'直接查找编辑按钮失败: {e}')
-
-        # 方法2：使用 CSS 选择器查找
-        logger.info('尝试使用CSS选择器查找...')
+            size = os.path.getsize(abs_path)
+            if size < 1024:
+                return f'封面文件过小 ({size} bytes)'
+            if size > 50 * 1024 * 1024:
+                return f'封面文件过大 ({size // (1024 * 1024)}MB)'
+        except OSError as e:
+            return f'读取封面大小失败: {e}'
         try:
-            # 尝试查找包含"编辑"文本的元素
-            elements = self.page.eles('css:span, div, button')
-            for element in elements:
-                try:
-                    text = (element.text or '').strip()
-                    if text == '编辑':
-                        logger.info(f'通过CSS找到编辑元素: {text}')
-                        return element
-                except Exception:
-                    continue
+            from PIL import Image
+            with Image.open(abs_path) as img:
+                w, h = img.size
+                if w <= 0 or h <= 0:
+                    return f'封面尺寸异常: {w}x{h}'
         except Exception as e:
-            logger.debug(f'CSS查找失败: {e}')
+            return f'封面解码失败: {e}'
+        return None
 
-        # 方法3：使用 JavaScript 简化脚本
-        logger.info('尝试使用简化JavaScript脚本...')
+    def _open_cover_editor(self):
+        """打开封面编辑器（弹窗）。成功返回 True。"""
         try:
-            result = self.page.run_js('''
-                (() => {
-                    const buttons = [...document.querySelectorAll('button')];
-                    const editButton = buttons.find(b => b.textContent.trim() === '编辑');
-                    if (editButton) {
-                        editButton.setAttribute('data-codex-cover-editor', 'true');
-                        return {found: true, text: editButton.textContent.trim()};
-                    }
-                    return {found: false};
-                })()
-            ''')
-            logger.info(f'简化JavaScript脚本结果: {result}')
-            if isinstance(result, dict) and result.get('found'):
-                button = self.page.ele('css:[data-codex-cover-editor="true"]', timeout=2)
-                if button:
-                    logger.info(f'通过JavaScript找到编辑按钮: {button.text}')
-                    return button
+            result = self.page.run_js(COVER_EDITOR_OPEN_JS)
+            logger.info(f'打开封面编辑器结果: {result}')
+            return bool(isinstance(result, dict) and result.get('found'))
         except Exception as e:
-            logger.debug(f'简化JavaScript脚本失败: {e}')
+            logger.warning(f'打开封面编辑器失败: {e}')
+            return False
 
-        logger.info('尝试使用文本查找...')
-        result = self._find_visible_text_element(
-            ('更换封面', '编辑封面', '选择封面', '设置封面', '编辑')
-        )
-        if result:
-            logger.info(f'通过文本查找找到按钮: {result.text}')
-        return result
+    def _set_cover_file(self, cover_path):
+        """用 DrissionPage input() 设置封面文件控件（浏览器安全策略禁止 JS 设值）。"""
+        cover_input = self._find_cover_file_input()
+        if not cover_input:
+            logger.warning('封面编辑界面中未找到图片文件控件')
+            return False
+        try:
+            cover_input.input(os.path.abspath(cover_path))
+            return True
+        except Exception as e:
+            logger.warning(f'设置封面文件失败: {e}')
+            return False
+
+    def _cover_state(self):
+        """读取封面编辑器当前状态（弹窗、确认按钮、图片）。"""
+        try:
+            return self.page.run_js(COVER_EDITOR_STATE_JS) or {}
+        except Exception as e:
+            logger.debug(f'读取封面编辑器状态失败: {e}')
+            return {}
+
+    def _wait_cover_preview(self, timeout=20):
+        """轮询：弹窗内图片已加载、确认按钮可见且未禁用。成功返回状态 dict。"""
+        started = time.time()
+        last = {}
+        while time.time() - started < timeout:
+            last = self._cover_state()
+            if last.get('dialog_open') and last.get('dialog_image_count', 0) > 0 \
+                    and last.get('confirm_visible') and not last.get('confirm_disabled'):
+                logger.info(
+                    f'封面编辑器就绪: 弹窗={last.get("dialog_open")}, '
+                    f'图片={last.get("dialog_image_count")}, '
+                    f'确认可见={last.get("confirm_visible")}, '
+                    f'禁用={last.get("confirm_disabled")}'
+                )
+                return last
+            if last.get('has_error'):
+                logger.warning(f'封面编辑器出现错误提示: {last.get("dialog_text")}')
+            time.sleep(0.5)
+        logger.warning(f'等待封面编辑器就绪超时: {last}')
+        return last
+
+    def _apply_cover_confirm(self):
+        """在封面编辑器弹窗内点击“确认”。返回 (applied, detail)。"""
+        try:
+            result = self.page.run_js(COVER_EDITOR_APPLY_JS) or {}
+            applied = bool(result.get('applied'))
+            logger.info(f'点击封面确认: {result}')
+            return applied, result
+        except Exception as e:
+            logger.warning(f'点击封面确认失败: {e}')
+            return False, {'reason': 'js_error', 'error': str(e)}
+
+    def _capture_cover_fingerprint(self):
+        """捕获封面预览指纹（主图 src + 尺寸），用于验证应用前后变化。"""
+        try:
+            state = self.page.run_js(COVER_EDITOR_IMAGE_CHANGED_JS) or {}
+            main = state.get('main') or {}
+            return {
+                'src': main.get('src', ''),
+                'w': main.get('w', 0),
+                'dialog_open': state.get('dialog_open'),
+            }
+        except Exception:
+            return {}
+
+    def _verify_cover_applied(self, before_fp):
+        """点击确认后必须同时看到：弹窗关闭 + 封面预览变化 + 无错误。"""
+        started = time.time()
+        last_state = {}
+        while time.time() - started < 15:
+            last_state = self._cover_state()
+            after_fp = self._capture_cover_fingerprint()
+            dialog_closed = not last_state.get('dialog_open')
+            if last_state.get('has_error'):
+                logger.warning(f'封面应用出现错误: {last_state.get("dialog_text")}')
+                return False, last_state
+            # 弹窗关闭 + （src 变化 或 预览图自然尺寸变化 或 图片数量变化）
+            src_changed = before_fp.get('src') and after_fp.get('src') and \
+                before_fp.get('src') != after_fp.get('src')
+            size_changed = before_fp.get('w') and after_fp.get('w') and \
+                before_fp.get('w') != after_fp.get('w')
+            if dialog_closed and (src_changed or size_changed):
+                logger.info(
+                    f'封面应用已确认: 弹窗关闭, src变化={src_changed}, '
+                    f'尺寸变化={size_changed}'
+                )
+                return True, last_state
+            time.sleep(0.5)
+        logger.warning(f'封面应用验证超时: {last_state}')
+        return False, last_state
+
+    def _upload_cover(self, cover_path):
+        """上传封面（状态机），返回结构化结果：
+        {'status': 'not_requested'|'uploading'|'applied'|'failed',
+         'error': str|None, 'cover_path': str}
+        """
+        result = {'status': 'uploading', 'error': None, 'cover_path': cover_path}
+        if not cover_path:
+            result['status'] = 'not_requested'
+            return result
+        err = self._validate_cover_file(cover_path)
+        if err:
+            result['status'] = 'failed'
+            result['error'] = err
+            logger.warning(f'封面上传校验失败: {err}')
+            return result
+        try:
+            if not self._open_cover_editor():
+                result['status'] = 'failed'
+                result['error'] = '未找到封面编辑入口'
+                self._save_debug_state('cover_editor_missing')
+                return result
+            time.sleep(1)
+            if not self._set_cover_file(cover_path):
+                result['status'] = 'failed'
+                result['error'] = '未找到封面图片文件控件'
+                self._save_debug_state('cover_input_missing')
+                return result
+            ready = self._wait_cover_preview()
+            if not ready.get('dialog_open'):
+                result['status'] = 'failed'
+                result['error'] = '封面编辑器未打开'
+                self._save_debug_state('cover_editor_not_open')
+                return result
+            if ready.get('has_error'):
+                result['status'] = 'failed'
+                result['error'] = f"封面编辑器报错: {ready.get('dialog_text')}"
+                self._save_debug_state('cover_editor_error')
+                return result
+            before_fp = self._capture_cover_fingerprint()
+            applied, detail = self._apply_cover_confirm()
+            if not applied:
+                result['status'] = 'failed'
+                result['error'] = f"未找到封面确认按钮: {detail}"
+                self._save_debug_state('cover_apply_not_found')
+                return result
+            verified, state = self._verify_cover_applied(before_fp)
+            if verified:
+                result['status'] = 'applied'
+                logger.info(f'封面应用成功: {os.path.abspath(cover_path)}')
+            else:
+                result['status'] = 'failed'
+                result['error'] = '点击确认后封面预览未变化或弹窗未关闭'
+                self._save_debug_state('cover_apply_unverified')
+            return result
+        except Exception as e:
+            logger.warning(f'封面上传失败: {e}')
+            self._save_debug_state('cover_upload_failed')
+            result['status'] = 'failed'
+            result['error'] = str(e)
+            return result
 
     def _find_cover_file_input(self):
         for _ in range(16):
@@ -748,105 +1066,6 @@ return (() => {
                     pass
             time.sleep(0.5)
         return None
-
-    def _upload_cover(self, cover_path):
-        cover_edit_button = self._find_cover_edit_button()
-        if not cover_edit_button:
-            logger.warning('封面预览卡片中未找到“编辑”入口')
-            self._save_debug_state('cover_editor_missing')
-            return False
-
-        try:
-            cover_edit_button.click()
-            time.sleep(1)
-            cover_input = self._find_cover_file_input()
-            if not cover_input:
-                upload_trigger = self._find_visible_text_element(
-                    ('上传封面', '上传图片', '本地上传', '更换封面')
-                )
-                if upload_trigger:
-                    upload_trigger.click()
-                    time.sleep(0.5)
-                    cover_input = self._find_cover_file_input()
-            if not cover_input:
-                logger.warning('封面编辑界面中未找到图片文件控件')
-                self._save_debug_state('cover_input_missing')
-                return False
-
-            cover_input.input(os.path.abspath(cover_path))
-            time.sleep(2.5)  # 等封面图加载进编辑器
-
-            # 诊断：截图 + 枚举对话框内所有可见按钮文本。
-            # 视频号封面编辑器的应用按钮文本并非"确认/完成/确定"，
-            # 需先看清真实 UI 再精确点击（self.page.eles 能穿透 wujie iframe）。
-            self._save_debug_state('cover_editor_confirm')
-            try:
-                _btns = self.page.eles('css:button, [role="button"], .weui-btn, span.btn')
-                _texts = []
-                for _b in _btns:
-                    try:
-                        if _b.states.is_displayed:
-                            _t = (_b.text or '').strip()
-                            if _t:
-                                _texts.append(_t)
-                    except Exception:
-                        continue
-                logger.info(f'封面编辑器可见按钮: {_texts}')
-            except Exception as _e:
-                logger.debug(f'枚举按钮失败: {_e}')
-
-            # 查找并点击应用按钮（宽候选文本，匹配第一个可见且未禁用的，跳过取消/关闭类）
-            apply_labels = ('完成', '确定', '确认', '保存', '使用', '应用',
-                            '下一步', '使用封面', '完成裁剪', '确认裁剪', '裁剪', 'OK')
-            clicked_text = None
-            for _label in apply_labels:
-                try:
-                    _cands = self.page.eles(f'text:{_label}')
-                except Exception:
-                    _cands = []
-                for _c in _cands:
-                    try:
-                        if _c and _c.states.is_displayed and not self._element_is_disabled(_c):
-                            _t = (_c.text or '').strip()
-                            if any(_x in _t for _x in ('取消', '关闭', '返回', '不保存')):
-                                continue
-                            _c.click()
-                            clicked_text = _t
-                            break
-                    except Exception:
-                        continue
-                if clicked_text:
-                    break
-            if clicked_text:
-                time.sleep(2)
-                logger.info(f'已点击封面应用按钮: {clicked_text}')
-            else:
-                logger.warning('未匹配到封面应用按钮（候选文本均不命中），JS 兜底')
-                try:
-                    _res = self.page.run_js('''
-                        (() => {
-                            const want = ['完成','确定','确认','保存','使用','应用','下一步','使用封面','完成裁剪','确认裁剪','OK'];
-                            const all = [...document.querySelectorAll('button,[role="button"]')];
-                            for (const w of want) {
-                                const b = all.find(el => (el.innerText||'').trim()===w && !el.disabled);
-                                if (b) { b.click(); return {action:'apply', text:w}; }
-                            }
-                            const close = all.find(el => /取消|关闭/.test((el.innerText||'').trim()));
-                            if (close) { close.click(); return {action:'cancel', text:close.innerText.trim()}; }
-                            return {action:'none'};
-                        })()
-                    ''')
-                    time.sleep(1)
-                    logger.warning(f'封面对话框 JS 兜底结果: {_res}')
-                except Exception as _e:
-                    logger.warning(f'JS 兜底失败: {_e}')
-
-            logger.info('封面图片已提交到预览')
-            return True
-        except Exception as e:
-            logger.warning(f'封面上传失败: {e}')
-            self._save_debug_state('cover_upload_failed')
-            return False
 
     def _find_draft_button(self):
         """查找可见且可用的草稿按钮，不要点到隐藏模板节点。"""
@@ -1432,6 +1651,16 @@ return (() => {
         except Exception as e:
             logger.debug(f'处理弹窗时出错: {e}')
     
+    @staticmethod
+    def _upload_failure(error=None):
+        """构造 upload_to_draft 的结构化失败结果。"""
+        return {
+            'status': 'failed',
+            'draft_saved': False,
+            'cover': {'status': 'not_requested', 'error': None, 'cover_path': None},
+            'error': error or '上传失败',
+        }
+
     def upload_to_draft(self, video_path, title, tags, description, cover_path=None):
         """
         上传视频到草稿箱
@@ -1444,7 +1673,11 @@ return (() => {
             cover_path: 封面图路径（可选）
         
         Returns:
-            True/False
+            dict: {'status': 'success'|'failed',
+                   'draft_saved': bool,
+                   'cover': {'status': 'not_requested'|'uploading'|'applied'|'failed',
+                             'error': str|None, 'cover_path': str|None},
+                   'error': str|None}
         """
         logger.info(f"[{self.account_name}] 开始上传到草稿箱...")
         
@@ -1452,7 +1685,7 @@ return (() => {
         abs_file_path = os.path.abspath(video_path)
         if not os.path.exists(abs_file_path):
             logger.error(f"找不到视频文件: {abs_file_path}")
-            return False
+            return self._upload_failure("找不到视频文件: {abs_file_path}")
         
         # 检查登录（复用：10分钟内已验证则跳过重复校验，避免每版重复验证）
         _now = time.time()
@@ -1460,7 +1693,7 @@ return (() => {
             pass
         elif not self.check_login():
             logger.error("登录失效，请先登录")
-            return False
+            return self._upload_failure("登录失效，请先登录")
         else:
             self._login_verified_at = time.time()
         
@@ -1470,7 +1703,7 @@ return (() => {
             self.page = self._new_page(co)
         except Exception as e:
             logger.error(f"浏览器启动失败: {e}")
-            return False
+            return self._upload_failure("浏览器启动失败: {e}")
         
         try:
             # 打开发布页面
@@ -1484,7 +1717,7 @@ return (() => {
             current_url = self.page.url
             if "login" in current_url or "/platform" not in current_url:
                 logger.error("登录状态已失效")
-                return False
+                return self._upload_failure("登录状态已失效")
             
             # 1. 上传视频
             logger.info("定位文件上传控件...")
@@ -1537,7 +1770,7 @@ return (() => {
                     logger.info(f"调试截图已保存: {screenshot_path}")
                 except Exception:
                     pass
-                return False
+                return self._upload_failure("未找到文件上传控件")
             
             logger.info(f"上传视频: {abs_file_path}")
             file_input.input(abs_file_path)
@@ -1549,7 +1782,7 @@ return (() => {
                 editor = self.page.ele('css:div.input-editor', timeout=30)
             except Exception:
                 logger.error("未找到富文本输入框")
-                return False
+                return self._upload_failure("未找到富文本输入框")
             
             # 聚焦并清空
             editor.click()
@@ -1603,18 +1836,14 @@ return (() => {
             current_url = self.page.url
             logger.info(f'视频上传后URL: {current_url}')
 
-            # 5. 上传封面（可选）- 有封面文件才上传，失败不阻断保存草稿
+            # 5. 上传封面（状态机）- 失败不阻断保存草稿，但状态回传给调用方
             time.sleep(1)  # 等封面预览卡片渲染
-            cover_uploaded = False
+            abs_cover_path = os.path.abspath(cover_path) if cover_path else None
+            cover_result = {'status': 'not_requested', 'error': None, 'cover_path': abs_cover_path}
             if cover_path:
-                abs_cover_path = os.path.abspath(cover_path)
-                if os.path.isfile(abs_cover_path):
-                    logger.info(f'上传封面: {abs_cover_path}')
-                    cover_uploaded = self._upload_cover(abs_cover_path)
-                    if not cover_uploaded:
-                        logger.warning('封面上传未成功，继续保存草稿（不阻断）')
-                else:
-                    logger.warning(f'找不到封面文件: {abs_cover_path}')
+                cover_result = self._upload_cover(abs_cover_path)
+                if cover_result.get('status') == 'failed':
+                    logger.warning(f"封面上传未成功（不阻断）: {cover_result.get('error')}")
             else:
                 logger.info('无封面，跳过封面上传')
 
@@ -1631,22 +1860,38 @@ return (() => {
                     f'视频可能仍在上传，等待30s后重试'
                 )
                 time.sleep(30)
-                # 回发布页重试（_save_draft 失败时可能已导航到草稿箱）
+                # 回发布页重试（_save_draft 失败时可能已导航到草稿箱）。
+                # 已应用的封面会随导航丢失，必须重新应用，否则草稿保存成功后封面仍是默认的。
                 try:
-                    self.page.get(publish_url)
-                    time.sleep(5)
+                    current_url_after = self.page.url or ''
+                    if 'create' not in current_url_after:
+                        self.page.get(publish_url)
+                        time.sleep(5)
+                    if cover_result.get('status') == 'applied' and abs_cover_path:
+                        logger.info('草稿重试前重新应用封面（上次应用随导航丢失）')
+                        cover_result = self._upload_cover(abs_cover_path)
                 except Exception as e:
                     logger.debug(f'返回发布页失败: {e}')
 
             if saved:
                 logger.info(f'[{self.account_name}] ✅ 草稿保存成功')
-                return True
+                return {
+                    'status': 'success',
+                    'draft_saved': True,
+                    'cover': cover_result,
+                    'error': None,
+                }
             else:
                 logger.error(f'[{self.account_name}] ❌ 草稿保存失败')
                 # 保存失败时不关闭页面，方便调试
                 logger.warning('页面保持打开，方便检查问题')
                 self._save_debug_state('draft_save_failed')
-                return False
+                return {
+                    'status': 'failed',
+                    'draft_saved': False,
+                    'cover': cover_result,
+                    'error': '草稿保存失败',
+                }
         finally:
             # 确保浏览器实例被正确清理
             if self.page:
