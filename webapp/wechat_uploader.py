@@ -101,16 +101,33 @@ COVER_EDITOR_STATE_JS = r'''
     const images = all
         .filter(n => n.tagName === 'IMG')
         .map(n => ({src: n.src || '', cls: String(n.className || ''), natural: n.naturalWidth || 0}));
+    const isVisible = n => {
+        try {
+            const r = n.getBoundingClientRect();
+            if (r.width <= 0 || r.height <= 0) return false;
+            const st = n.ownerDocument ? n.ownerDocument.defaultView.getComputedStyle(n) : null;
+            return !!st && st.display !== 'none' && st.visibility !== 'hidden' &&
+                Number(st.opacity || 1) > 0;
+        } catch (e) { return false; }
+    };
     const dialogs = all.filter(n => {
         const t = normalize(n.innerText || n.textContent);
         if (!t || t.length > 400) return false;
         const role = (n.getAttribute && n.getAttribute('role')) || '';
         const cls = String(n.className || '');
         const looksDialog = role === 'dialog' || /dialog|modal|popup|popover/i.test(cls);
-        return looksDialog && /编辑封面|更换封面|上传封面|选择封面|设置封面/.test(t);
+        return looksDialog && isVisible(n) && /编辑封面|更换封面|上传封面|选择封面|设置封面/.test(t);
     });
     dialogs.sort((a, b) => (a.innerText || '').length - (b.innerText || '').length);
-    const dialog = dialogs[0];
+    // 弹窗容器优先：role=dialog 或 class=weui-desktop-dialog（排除 __hd/__bd 子元素）
+    const dlgPool = dialogs.filter(n => {
+        const role = (n.getAttribute && n.getAttribute('role')) || '';
+        const cls = String(n.className || '');
+        return role === 'dialog' || cls.split(' ').indexOf('weui-desktop-dialog') >= 0;
+    });
+    const pool = dlgPool.length ? dlgPool : dialogs;
+    pool.sort((a, b) => (a.innerText || '').length - (b.innerText || '').length);
+    const dialog = pool[0];
     const dialogText = dialog ? normalize(dialog.innerText || '') : '';
     const dialogImgs = dialog
         ? [...dialog.querySelectorAll('img')].map(n => ({src: n.src || '', natural: n.naturalWidth || 0}))
@@ -118,7 +135,10 @@ COVER_EDITOR_STATE_JS = r'''
     let confirm = null;
     if (dialog) {
         const nodes = [...dialog.querySelectorAll('button,[role="button"],a,span,div')];
-        confirm = nodes.find(b => normalize(b.innerText || b.textContent) === '确认') || null;
+        confirm = nodes.find(b => {
+            const t = normalize(b.innerText || b.textContent);
+            return (t === '确认' || t === '确定') && !b.disabled && isVisible(b);
+        }) || null;
     }
     const rect = confirm ? confirm.getBoundingClientRect() : null;
     return {
@@ -154,24 +174,47 @@ COVER_EDITOR_APPLY_JS = r'''
         return out;
     };
     const all = walk(document);
+    const isVisible = n => {
+        try {
+            const r = n.getBoundingClientRect();
+            if (r.width <= 0 || r.height <= 0) return false;
+            const st = n.ownerDocument ? n.ownerDocument.defaultView.getComputedStyle(n) : null;
+            return !!st && st.display !== 'none' && st.visibility !== 'hidden' &&
+                Number(st.opacity || 1) > 0;
+        } catch (e) { return false; }
+    };
     const dialogs = all.filter(n => {
         const t = normalize(n.innerText || n.textContent);
         if (!t || t.length > 400) return false;
         const role = (n.getAttribute && n.getAttribute('role')) || '';
         const cls = String(n.className || '');
         const looksDialog = role === 'dialog' || /dialog|modal|popup|popover/i.test(cls);
-        return looksDialog && /编辑封面|更换封面|上传封面|选择封面|设置封面/.test(t);
+        return looksDialog && isVisible(n) && /编辑封面|更换封面|上传封面|选择封面|设置封面/.test(t);
     });
     dialogs.sort((a, b) => (a.innerText || '').length - (b.innerText || '').length);
-    const dialog = dialogs[0];
+    // 弹窗容器优先：role=dialog 或 class=weui-desktop-dialog（排除 __hd/__bd 等子元素）。
+    // 否则会选中最短文本的弹窗头（无按钮/图片），导致 apply_not_found。
+    const dlgPool = dialogs.filter(n => {
+        const role = (n.getAttribute && n.getAttribute('role')) || '';
+        const cls = String(n.className || '');
+        return role === 'dialog' || cls.split(' ').indexOf('weui-desktop-dialog') >= 0;
+    });
+    const pool = dlgPool.length ? dlgPool : dialogs;
+    pool.sort((a, b) => (a.innerText || '').length - (b.innerText || '').length);
+    const dialog = pool[0];
     if (!dialog) return {applied: false, reason: 'dialog_not_found'};
     const applyLabels = ['确认', '完成', '确定', '保存', '使用封面', '应用'];
     const buttons = [...dialog.querySelectorAll('button,[role="button"],a,span,div')];
     for (const label of applyLabels) {
-        const btn = buttons.find(b => normalize(b.innerText || b.textContent) === label && !b.disabled);
+        const btn = buttons.find(b => normalize(b.innerText || b.textContent) === label && !b.disabled && isVisible(b));
         if (btn) {
-            btn.click();
-            return {applied: true, text: label};
+            // 不在此 JS 点击（untrusted 事件会被组件忽略），打标记返回坐标，
+            // 由 Python 用 DrissionPage 受信点击。先清旧标记再打新标记。
+            for (const old of dialog.querySelectorAll('[data-cover-confirm]')) old.removeAttribute('data-cover-confirm');
+            btn.setAttribute('data-cover-confirm', '1');
+            const r = btn.getBoundingClientRect();
+            return {applied: true, text: label, x: Math.round(r.x + r.width / 2),
+                    y: Math.round(r.y + r.height / 2), w: Math.round(r.width), h: Math.round(r.height)};
         }
     }
     return {applied: false, reason: 'apply_not_found',
@@ -197,16 +240,33 @@ COVER_EDITOR_IMAGE_CHANGED_JS = r'''
         return out;
     };
     const all = walk(document);
+    const isVisible = n => {
+        try {
+            const r = n.getBoundingClientRect();
+            if (r.width <= 0 || r.height <= 0) return false;
+            const st = n.ownerDocument ? n.ownerDocument.defaultView.getComputedStyle(n) : null;
+            return !!st && st.display !== 'none' && st.visibility !== 'hidden' &&
+                Number(st.opacity || 1) > 0;
+        } catch (e) { return false; }
+    };
     const dialogs = all.filter(n => {
         const t = normalize(n.innerText || n.textContent);
         if (!t || t.length > 400) return false;
         const role = (n.getAttribute && n.getAttribute('role')) || '';
         const cls = String(n.className || '');
         const looksDialog = role === 'dialog' || /dialog|modal|popup|popover/i.test(cls);
-        return looksDialog && /编辑封面|更换封面|上传封面|选择封面|设置封面/.test(t);
+        return looksDialog && isVisible(n) && /编辑封面|更换封面|上传封面|选择封面|设置封面/.test(t);
     });
     dialogs.sort((a, b) => (a.innerText || '').length - (b.innerText || '').length);
-    const dialog = dialogs[0];
+    // 弹窗容器优先：role=dialog 或 class=weui-desktop-dialog（排除 __hd/__bd 子元素）
+    const dlgPool = dialogs.filter(n => {
+        const role = (n.getAttribute && n.getAttribute('role')) || '';
+        const cls = String(n.className || '');
+        return role === 'dialog' || cls.split(' ').indexOf('weui-desktop-dialog') >= 0;
+    });
+    const pool = dlgPool.length ? dlgPool : dialogs;
+    pool.sort((a, b) => (a.innerText || '').length - (b.innerText || '').length);
+    const dialog = pool[0];
     // 封面预览主图：弹窗内自然尺寸最大的 img，或全局第一个尺寸合理的 img
     let best = null, bestArea = 0;
     for (const img of all) {
@@ -935,15 +995,34 @@ return (() => {
             return f'封面解码失败: {e}'
         return None
 
-    def _open_cover_editor(self):
-        """打开封面编辑器（弹窗）。成功返回 True。"""
-        try:
-            result = self.page.run_js(COVER_EDITOR_OPEN_JS)
-            logger.info(f'打开封面编辑器结果: {result}')
-            return bool(isinstance(result, dict) and result.get('found'))
-        except Exception as e:
-            logger.warning(f'打开封面编辑器失败: {e}')
-            return False
+    def _open_cover_editor(self, attempts=8, delay=1.5):
+        """打开封面编辑器（弹窗）。成功返回 True。
+
+        封面预览卡片在上传稳定后仍可能延迟 1~8s 才渲染出「编辑」按钮，
+        单次 JS 会扑空；故重试直到出现，再用 DrissionPage 元素点击兜底
+        （.click() 自带滚动+悬停，可命中 hover 才显示的按钮）。
+        """
+        for i in range(attempts):
+            try:
+                result = self.page.run_js(COVER_EDITOR_OPEN_JS, as_expr=True)
+                if isinstance(result, dict) and result.get('found'):
+                    logger.info(f'打开封面编辑器成功（尝试 {i+1}）: {result}')
+                    return True
+                logger.info(f'打开封面编辑器未命中（尝试 {i+1}）: {result}')
+            except Exception as e:
+                logger.debug(f'打开封面编辑器尝试 {i+1} 异常: {e}')
+            # 兜底：直接定位 .edit-btn 元素并点击（DrissionPage click 悬停+点击）
+            try:
+                btn = self.page.ele('css:.edit-btn', timeout=2)
+                if btn:
+                    btn.click()
+                    logger.info(f'打开封面编辑器成功（.edit-btn 兜底，尝试 {i+1}）')
+                    return True
+            except Exception as e:
+                logger.debug(f'.edit-btn 兜底尝试 {i+1} 失败: {e}')
+            time.sleep(delay)
+        logger.warning('打开封面编辑器超时：未找到封面编辑入口')
+        return False
 
     def _set_cover_file(self, cover_path):
         """用 DrissionPage input() 设置封面文件控件（浏览器安全策略禁止 JS 设值）。"""
@@ -961,7 +1040,7 @@ return (() => {
     def _cover_state(self):
         """读取封面编辑器当前状态（弹窗、确认按钮、图片）。"""
         try:
-            return self.page.run_js(COVER_EDITOR_STATE_JS) or {}
+            return self.page.run_js(COVER_EDITOR_STATE_JS, as_expr=True) or {}
         except Exception as e:
             logger.debug(f'读取封面编辑器状态失败: {e}')
             return {}
@@ -988,12 +1067,35 @@ return (() => {
         return last
 
     def _apply_cover_confirm(self):
-        """在封面编辑器弹窗内点击“确认”。返回 (applied, detail)。"""
+        """在封面编辑器弹窗内点击“确认”。返回 (applied, detail)。
+
+        用 DrissionPage 受信点击（JS .click() 是不受信事件，会被组件忽略，
+        导致弹窗不关闭）。APPLY_JS 只定位可见「确认」并打 data-cover-confirm 标记，
+        这里再以 CSS 找到该元素做真实鼠标点击。
+        """
         try:
-            result = self.page.run_js(COVER_EDITOR_APPLY_JS) or {}
-            applied = bool(result.get('applied'))
-            logger.info(f'点击封面确认: {result}')
-            return applied, result
+            result = self.page.run_js(COVER_EDITOR_APPLY_JS, as_expr=True) or {}
+            if not result.get('applied'):
+                logger.info(f'点击封面确认: {result}')
+                return False, result
+            # 受信点击：DrissionPage 元素 click 是真实鼠标事件
+            try:
+                btn = self.page.ele('css:[data-cover-confirm="1"]', timeout=3)
+                if btn:
+                    btn.click()
+                    logger.info(f'点击封面确认（受信点击）: {result}')
+                    return True, result
+            except Exception as e:
+                logger.debug(f'受信点击 data-cover-confirm 失败: {e}')
+            # 兜底：按坐标点击（仍为真实鼠标事件）
+            try:
+                self.page.click(result.get('x', 0), result.get('y', 0))
+                logger.info(f'点击封面确认（坐标点击）: {result}')
+                return True, result
+            except Exception as e:
+                logger.debug(f'坐标点击失败: {e}')
+            logger.warning(f'点击封面确认失败: 未找到可点击元素 {result}')
+            return False, result
         except Exception as e:
             logger.warning(f'点击封面确认失败: {e}')
             return False, {'reason': 'js_error', 'error': str(e)}
@@ -1001,7 +1103,7 @@ return (() => {
     def _capture_cover_fingerprint(self):
         """（调试用）捕获全页面最大图指纹。已不用于应用验证——改用 _capture_cover_card。"""
         try:
-            state = self.page.run_js(COVER_EDITOR_IMAGE_CHANGED_JS) or {}
+            state = self.page.run_js(COVER_EDITOR_IMAGE_CHANGED_JS, as_expr=True) or {}
             main = state.get('main') or {}
             return {
                 'src': main.get('src', ''),
@@ -1014,7 +1116,7 @@ return (() => {
     def _capture_cover_card(self):
         """捕获封面预览卡片指纹（锁定“封面预览/分享卡片”容器内主图）。"""
         try:
-            return self.page.run_js(COVER_CARD_FP_JS) or {}
+            return self.page.run_js(COVER_CARD_FP_JS, as_expr=True) or {}
         except Exception as e:
             logger.debug(f'捕获封面卡片指纹失败: {e}')
             return {}

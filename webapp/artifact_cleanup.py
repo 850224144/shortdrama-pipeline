@@ -127,7 +127,11 @@ class ArtifactCleanup:
             return False, '路径为空'
         p_abs = os.path.abspath(path)
         r_abs = os.path.abspath(root)
-        rel = os.path.relpath(p_abs, r_abs)
+        try:
+            rel = os.path.relpath(p_abs, r_abs)
+        except ValueError:
+            # 跨盘（如 path 在 C:、root 在 D:/E:）——不在该根下，不是逃逸
+            return False, f'路径不在允许根目录内: {path}'
         if rel == '.':
             return False, '不能删除根目录'
         if rel.startswith('..' + os.sep) or rel == '..':
