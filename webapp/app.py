@@ -56,6 +56,12 @@ upload_manager = UploadManager(CONFIG['data_dir'])
 
 # 初始化成品清理服务
 artifact_cleanup = ArtifactCleanup(CONFIG['data_dir'])
+# 批次自然结束时由后端 worker 触发自动清理（前端只展示结果）。
+# 回调运行在 upload worker 线程的自然结束路径，仅当 start 时启用了
+# auto_cleanup 才被 upload_manager 调用（见 _finalize_batches）。
+upload_manager.set_cleanup_callback(
+    lambda batch_id: artifact_cleanup.execute_cleanup(batch_id, strategy=STRATEGY_RECYCLE)
+)
 
 # ===== 批量切片管理器 =====
 class BatchCutManager:
@@ -542,6 +548,7 @@ def add_upload_task():
                 account=data.get('account'),
                 source_dir=data.get('source_dir'),
                 output_dir=data.get('output_dir'),
+                expected_versions=data.get('expected_versions'),
             )
         
         # 直接返回结果，使用Response对象避免jsonify问题
@@ -599,7 +606,9 @@ def get_draft_status():
 def start_upload():
     """开始上传"""
     try:
-        return jsonify(upload_manager.start_upload())
+        data = request.get_json(force=True) or {}
+        auto_cleanup = bool(data.get('auto_cleanup', False))
+        return jsonify(upload_manager.start_upload(auto_cleanup=auto_cleanup))
     except Exception as e:
         return jsonify({'status': 'failed', 'error': str(e)}), 500
 
@@ -887,6 +896,36 @@ def cleanup_logs_background():
 # 启动后台任务
 cleanup_thread = threading.Thread(target=cleanup_logs_background, daemon=True)
 cleanup_thread.start()
+
+
+def startup_cleanup_sweep():
+    """服务启动补扫：上次进程结束前已标记完成且启用自动清理、但清理未落地的批次。
+
+    处理「服务重启后自动清理不会执行」的缺口（#4）：后端 worker 在批次自然结束时
+    同步执行清理，正常不会遗留；仅当进程在「标记完成」与「清理执行」之间崩溃时，
+    此补扫在下一次启动时补跑。execute_cleanup 幂等（已回收的路径不会重复移动）。
+    """
+    import sqlite3 as _sq
+    _db = os.path.join(CONFIG.get('data_dir', 'data'), 'upload.db')
+    if not os.path.exists(_db):
+        return
+    try:
+        with _sq.connect(_db) as conn:
+            rows = conn.execute(
+                "SELECT batch_id FROM upload_batches "
+                "WHERE status='completed' AND auto_cleanup=1").fetchall()
+        for (batch_id,) in rows:
+            try:
+                logger.log('system', 'INFO', f'启动补扫：批次 {batch_id} 补跑自动清理')
+                artifact_cleanup.execute_cleanup(batch_id, strategy=STRATEGY_RECYCLE)
+            except Exception as e:
+                logger.log('system', 'ERROR', f'启动补扫：批次 {batch_id} 清理失败: {e}')
+    except Exception as e:
+        logger.log('system', 'ERROR', f'启动补扫失败: {e}')
+
+
+_sweep_thread = threading.Thread(target=startup_cleanup_sweep, daemon=True)
+_sweep_thread.start()
 
 if __name__ == '__main__':
     print(f'短剧工坊 Web服务启动在 http://localhost:8765')

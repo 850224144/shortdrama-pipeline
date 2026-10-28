@@ -220,6 +220,56 @@ COVER_EDITOR_IMAGE_CHANGED_JS = r'''
 })()
 '''
 
+# 封面预览卡片指纹（不依赖弹窗）：锁定“封面预览/分享卡片”容器内的主图。
+# 应用成功后该卡片主图的 src 会变化；用它做 before/after 比较，
+# 避免之前“取全页面最大图”在弹窗开关时产生假阳性 applied。
+COVER_CARD_FP_JS = r'''
+(() => {
+    const normalize = v => (v || '').replace(/\s+/g, ' ').trim();
+    const seen = new WeakSet();
+    const walk = root => {
+        if (!root || seen.has(root)) return [];
+        seen.add(root);
+        let out = [];
+        let nodes = [];
+        try { nodes = [...root.querySelectorAll('*')]; } catch (e) {}
+        out = out.concat(nodes);
+        for (const n of nodes) { if (n.shadowRoot) out = out.concat(walk(n.shadowRoot)); }
+        for (const f of root.querySelectorAll('iframe,frame')) {
+            try { if (f.contentDocument) out = out.concat(walk(f.contentDocument)); } catch (e) {}
+        }
+        return out;
+    };
+    const all = walk(document);
+    const cards = all.filter(n => {
+        const t = normalize(n.innerText || n.textContent);
+        if (!t || t.length > 400) return false;
+        if (!/封面预览|个人主页和分享卡片|分享卡片/.test(t)) return false;
+        return !!(n.querySelector && n.querySelector('img'));
+    });
+    // 取最具体的卡片（文本最短）
+    cards.sort((a, b) => (a.innerText || '').length - (b.innerText || '').length);
+    const card = cards[0];
+    if (!card) return {found: false};
+    const imgs = [...card.querySelectorAll('img')].filter(i => {
+        const r = i.getBoundingClientRect();
+        return r.width > 0 && r.height > 0;
+    });
+    let best = null, bestArea = 0;
+    for (const img of imgs) {
+        const r = img.getBoundingClientRect();
+        const area = r.width * r.height;
+        if (area > bestArea) { best = img; bestArea = area; }
+    }
+    return {
+        found: true,
+        img_count: imgs.length,
+        main: best ? {src: best.src || '', w: best.naturalWidth || 0,
+                      h: best.naturalHeight || 0} : null,
+    };
+})()
+'''
+
     
 
 class WeChatChannelsUploader:
@@ -717,10 +767,13 @@ return (() => {
         # 保存草稿按钮可用（enabled）= 视频上传完成（实测：发布页初始/上传中
         # 按钮带 weui-desktop-btn_disabled，视频就绪后才 enabled）——可靠完成信号。
         draft_ready = bool(draft_button.get('found') and not draft_button.get('disabled'))
-        positive_ready = publish_ready or preview_ready or remote_media_ready or draft_ready
+        # 上传活跃（cancel/progress 可见）期间绝不判定 ready：草稿按钮在上传中也可能
+        # enabled，不能作为完成信号。完成门槛（not upload_active）折叠进 positive_ready，
+        # 与 _wait_for_video_upload 的「活跃信号消失才算完成」一致。
+        upload_active = bool(state.get('cancel_upload_visible')) or bool(state.get('progress_visible'))
+        positive_ready = (publish_ready or preview_ready or remote_media_ready or draft_ready) and not upload_active
         cancel_visible = bool(state.get('cancel_upload_visible'))
         progress_visible = bool(state.get('progress_visible'))
-        upload_active = cancel_visible or progress_visible
 
         evidence = []
         if publish_ready:
@@ -843,6 +896,7 @@ return (() => {
         logger.error(f'等待视频上传完成超时（{timeout}秒）: {last_state}')
         return None
 
+    def _validate_cover_file(self, cover_path):
         """校验封面文件。通过返回 None，否则返回错误字符串。"""
         if not cover_path:
             return '未提供封面路径'
@@ -934,7 +988,7 @@ return (() => {
             return False, {'reason': 'js_error', 'error': str(e)}
 
     def _capture_cover_fingerprint(self):
-        """捕获封面预览指纹（主图 src + 尺寸），用于验证应用前后变化。"""
+        """（调试用）捕获全页面最大图指纹。已不用于应用验证——改用 _capture_cover_card。"""
         try:
             state = self.page.run_js(COVER_EDITOR_IMAGE_CHANGED_JS) or {}
             main = state.get('main') or {}
@@ -946,27 +1000,45 @@ return (() => {
         except Exception:
             return {}
 
-    def _verify_cover_applied(self, before_fp):
-        """点击确认后必须同时看到：弹窗关闭 + 封面预览变化 + 无错误。"""
+    def _capture_cover_card(self):
+        """捕获封面预览卡片指纹（锁定“封面预览/分享卡片”容器内主图）。"""
+        try:
+            return self.page.run_js(COVER_CARD_FP_JS) or {}
+        except Exception as e:
+            logger.debug(f'捕获封面卡片指纹失败: {e}')
+            return {}
+
+    @staticmethod
+    def _cover_card_changed(before, after):
+        """封面卡片指纹是否变化（应用成功信号）。
+
+        规则：应用后卡片出现主图（before 无图 → after 有图）或主图 src 变化。
+        二者都不满足 → 未变化（保守判失败，绝不假阳性）。
+        """
+        if not after or not after.get('found'):
+            return False
+        bm = (before or {}).get('main')
+        am = after.get('main')
+        if bm is None and am is not None:
+            return True
+        if bm and am:
+            return bm.get('src') != am.get('src')
+        return False
+
+    def _verify_cover_applied(self, before_card):
+        """点击确认后必须同时看到：弹窗关闭 + 封面预览卡片变化 + 无错误。"""
         started = time.time()
         last_state = {}
         while time.time() - started < 15:
             last_state = self._cover_state()
-            after_fp = self._capture_cover_fingerprint()
+            after_card = self._capture_cover_card()
             dialog_closed = not last_state.get('dialog_open')
             if last_state.get('has_error'):
                 logger.warning(f'封面应用出现错误: {last_state.get("dialog_text")}')
                 return False, last_state
-            # 弹窗关闭 + （src 变化 或 预览图自然尺寸变化 或 图片数量变化）
-            src_changed = before_fp.get('src') and after_fp.get('src') and \
-                before_fp.get('src') != after_fp.get('src')
-            size_changed = before_fp.get('w') and after_fp.get('w') and \
-                before_fp.get('w') != after_fp.get('w')
-            if dialog_closed and (src_changed or size_changed):
-                logger.info(
-                    f'封面应用已确认: 弹窗关闭, src变化={src_changed}, '
-                    f'尺寸变化={size_changed}'
-                )
+            changed = self._cover_card_changed(before_card, after_card)
+            if dialog_closed and changed:
+                logger.info(f'封面应用已确认: 弹窗关闭, 卡片指纹变化={changed}')
                 return True, last_state
             time.sleep(0.5)
         logger.warning(f'封面应用验证超时: {last_state}')
@@ -988,6 +1060,9 @@ return (() => {
             logger.warning(f'封面上传校验失败: {err}')
             return result
         try:
+            # 打开编辑器前锁定封面预览卡片指纹（不能等弹窗打开再捕获——
+            # 弹窗本身会改变全页面最大图，导致假阳性 applied）
+            card_before = self._capture_cover_card()
             if not self._open_cover_editor():
                 result['status'] = 'failed'
                 result['error'] = '未找到封面编辑入口'
@@ -1010,14 +1085,13 @@ return (() => {
                 result['error'] = f"封面编辑器报错: {ready.get('dialog_text')}"
                 self._save_debug_state('cover_editor_error')
                 return result
-            before_fp = self._capture_cover_fingerprint()
             applied, detail = self._apply_cover_confirm()
             if not applied:
                 result['status'] = 'failed'
                 result['error'] = f"未找到封面确认按钮: {detail}"
                 self._save_debug_state('cover_apply_not_found')
                 return result
-            verified, state = self._verify_cover_applied(before_fp)
+            verified, state = self._verify_cover_applied(card_before)
             if verified:
                 result['status'] = 'applied'
                 logger.info(f'封面应用成功: {os.path.abspath(cover_path)}')
@@ -1243,7 +1317,72 @@ return (() => {
 })()
 ''')
 
-    def _wait_for_draft_saved(self, previous_url, title, timeout=90):
+    def _read_draft_list_text(self):
+        """递归读取草稿列表正文（含 iframe/shadow root），返回原始文本。"""
+        try:
+            return self.page.run_js(r'''
+                return (() => {
+                    const seen = new WeakSet();
+                    const getText = root => {
+                        if (!root || seen.has(root)) return '';
+                        seen.add(root);
+                        let text = root.body ? root.body.innerText : '';
+                        for (const element of root.querySelectorAll('*')) {
+                            if (element.shadowRoot) {
+                                text += '\n' + getText(element.shadowRoot);
+                            }
+                        }
+                        for (const frame of root.querySelectorAll('iframe,frame')) {
+                            try {
+                                if (frame.contentDocument) {
+                                    text += '\n' + getText(frame.contentDocument);
+                                }
+                            } catch(e){}
+                        }
+                        return text;
+                    };
+                    return getText(document);
+                })()
+            ''') or ''
+        except Exception as e:
+            logger.debug(f'读取草稿列表失败: {e}')
+            return ''
+
+    @staticmethod
+    def _compact(s):
+        """去空白，用于标题/正文的容错比较。"""
+        return ''.join((s or '').split())
+
+    def _count_title_in_draft_box(self, title):
+        """当前草稿列表里标题出现次数（调用前须已在草稿箱页面）。
+
+        用于“本次新增草稿”判定：保存后计数必须大于保存前基线。
+        """
+        t = self._compact(title)
+        if not t:
+            return 0
+        return self._compact(self._read_draft_list_text()).count(t)
+
+    def _capture_draft_baseline(self, title, publish_url):
+        """保存前统计草稿箱里该标题的出现次数（基线），随后返回发布页。
+
+        返回基线计数；捕获失败返回 None（调用方不得把它当 0，否则重复标题
+        的旧草稿会构成假阳性）。「本次新增草稿」判定依赖 count_after > 基线。
+        """
+        draft_url = 'https://channels.weixin.qq.com/platform/post/draftListManager'
+        try:
+            self.page.get(draft_url)
+            time.sleep(4)
+            base = self._count_title_in_draft_box(title)
+            logger.info(f'草稿箱基线（标题出现次数）: {base}')
+            self.page.get(publish_url)
+            time.sleep(5)
+            return base
+        except Exception as e:
+            logger.warning(f'捕获草稿基线失败，退回子串校验（可能误判）: {e}')
+            return None
+
+    def _wait_for_draft_saved(self, previous_url, title, timeout=90, baseline_count=None):
         """点击保存草稿后，导航到草稿箱检查标题是否存在——最可靠的验证。
 
         此前用「成功提示文案 / URL 跳转 / 保存按钮消失」三个信号判成功，
@@ -1270,33 +1409,19 @@ return (() => {
                         last_nav = time.time()
                         time.sleep(4)
                 # 递归读取草稿列表文本（含 iframe）
-                body_text = self.page.run_js(r'''
-                    return (() => {
-                        const seen = new WeakSet();
-                        const getText = root => {
-                            if (!root || seen.has(root)) return '';
-                            seen.add(root);
-                            let text = root.body ? root.body.innerText : '';
-                            for (const element of root.querySelectorAll('*')) {
-                                if (element.shadowRoot) {
-                                    text += '\n' + getText(element.shadowRoot);
-                                }
-                            }
-                            for (const frame of root.querySelectorAll('iframe,frame')) {
-                                try {
-                                    if (frame.contentDocument) {
-                                        text += '\n' + getText(frame.contentDocument);
-                                    }
-                                } catch(e){}
-                            }
-                            return text;
-                        };
-                        return getText(document);
-                    })()
-                ''') or ''
+                body_text = self._read_draft_list_text()
                 expected_title = ''.join(title.split())
                 compact_body = ''.join(body_text.split())
-                if expected_title and expected_title in compact_body:
+                # 本次新增草稿判定：提供基线时要求计数严格大于基线（重复标题不误判）；
+                # 未提供基线（向后兼容/测试）退回标题子串匹配。
+                if baseline_count is not None:
+                    count_now = compact_body.count(expected_title)
+                    if count_now > baseline_count:
+                        logger.info(
+                            f'草稿箱已确认本次新增: 标题出现次数 {baseline_count}→{count_now}'
+                        )
+                        return True
+                elif expected_title and expected_title in compact_body:
                     logger.info(f'草稿箱已找到标题: {title}')
                     return True
                 # 没找到：草稿可能还在处理，等一会重新导航刷新列表
@@ -1307,7 +1432,7 @@ return (() => {
         logger.warning(f'草稿箱未找到标题（timeout={timeout}s）: {title}')
         return False
 
-    def _save_draft(self, title):
+    def _save_draft(self, title, baseline_count=None):
         logger.info('开始保存草稿...')
         
         # 步骤1: 关闭可能的通知弹窗
@@ -1365,7 +1490,7 @@ return (() => {
         # 捕获了却从未使用。校验函数 _wait_for_draft_saved 此前零调用（只被测试
         # 引用），等于一直空转。现改为调用它：等成功提示文案、URL 跳转（draft/
         # 草稿列表且正文含本条标题）、或保存按钮消失，都没有才判失败。
-        if not self._wait_for_draft_saved(previous_url, title):
+        if not self._wait_for_draft_saved(previous_url, title, baseline_count=baseline_count):
             logger.error('草稿保存未确认：平台无成功提示/URL 未跳转/按钮未消失')
             self._save_debug_state('draft_save_unverified')
             return False
@@ -1718,7 +1843,11 @@ return (() => {
             if "login" in current_url or "/platform" not in current_url:
                 logger.error("登录状态已失效")
                 return self._upload_failure("登录状态已失效")
-            
+
+            # 保存前捕获草稿箱基线（该标题当前出现次数）——「本次新增草稿」判定依据。
+            # 必须在视频上传前导航，避免离开发布页丢已上传视频。
+            draft_baseline = self._capture_draft_baseline(title, publish_url)
+
             # 1. 上传视频
             logger.info("定位文件上传控件...")
             file_input = None
@@ -1852,7 +1981,7 @@ return (() => {
             saved = False
             for attempt in range(5):
                 logger.info(f'保存草稿（第{attempt+1}次尝试）...')
-                saved = self._save_draft(title)
+                saved = self._save_draft(title, baseline_count=draft_baseline)
                 if saved:
                     break
                 logger.warning(

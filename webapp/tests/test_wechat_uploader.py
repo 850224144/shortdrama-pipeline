@@ -97,11 +97,16 @@ class WeChatUploaderTests(unittest.TestCase):
         self.assertIn('--start-maximized', options.arguments)
         self.assertNotIn('--headless=new', options.arguments)
 
-    def test_headless_login_check_does_not_request_window_maximize(self):
+    def test_headless_login_check_falls_back_to_headed(self):
+        """Chrome 155 与 DrissionPage 4.1.1.4 的 headless 不兼容，回退有头模式。
+
+        headless=True 也不再设置 --headless=new（实测启动后 CDP 404），
+        改为 --start-maximized（短暂弹窗可接受）。
+        """
         uploader = self.make_uploader()
         options = uploader._get_browser_options(headless=True)
-        self.assertIn('--headless=new', options.arguments)
-        self.assertNotIn('--start-maximized', options.arguments)
+        self.assertNotIn('--headless=new', options.arguments)
+        self.assertIn('--start-maximized', options.arguments)
 
     def test_visible_text_lookup_skips_hidden_matches_and_prefers_exact(self):
         hidden = FakeElement('保存草稿', visible=False)
@@ -112,6 +117,58 @@ class WeChatUploaderTests(unittest.TestCase):
         uploader.page = page
 
         self.assertIs(uploader._find_visible_text_element(('保存草稿',)), exact)
+
+    def test_validate_cover_file_rejects_bad_inputs_and_accepts_valid(self):
+        """回归：_validate_cover_file 必须是类方法（曾误缩进成死代码导致 AttributeError）。"""
+        import os
+        import tempfile
+        import shutil
+        from PIL import Image
+        uploader = self.make_uploader()
+        tmp = tempfile.mkdtemp(prefix='cover_val_')
+        try:
+            # 不存在
+            self.assertIsNotNone(uploader._validate_cover_file(
+                os.path.join(tmp, 'nope.jpg')))
+            # 非法扩展名
+            bad = os.path.join(tmp, 'c.txt')
+            open(bad, 'w').write('x' * 2000)
+            err = uploader._validate_cover_file(bad)
+            self.assertIsNotNone(err)
+            self.assertIn('扩展名不支持', err)
+            # 过小（<1KB）
+            tiny = os.path.join(tmp, 'tiny.jpg')
+            Image.new('RGB', (10, 10)).save(tiny)
+            err = uploader._validate_cover_file(tiny)
+            self.assertIsNotNone(err)
+            self.assertIn('过小', err)
+            # 合法（>1KB 且可解码）
+            ok = os.path.join(tmp, 'ok.jpg')
+            Image.new('RGB', (200, 200)).save(ok)
+            self.assertIsNone(uploader._validate_cover_file(ok))
+        finally:
+            shutil.rmtree(tmp, ignore_errors=True)
+
+    def test_cover_card_changed_semantics(self):
+        """#2：封面卡片指纹变化判定——before 无图→after 有图 或 src 变化 才算成功。"""
+        U = WeChatChannelsUploader
+        # after 未找到卡片 → 不变（保守）
+        self.assertFalse(U._cover_card_changed({}, {'found': False}))
+        # before 无图 → after 有图 → 变化（首次上传封面）
+        self.assertTrue(U._cover_card_changed(
+            {'found': True, 'main': None},
+            {'found': True, 'main': {'src': 'http://x/1.jpg', 'w': 100, 'h': 100}}))
+        # src 变化 → 变化（更换封面）
+        self.assertTrue(U._cover_card_changed(
+            {'found': True, 'main': {'src': 'http://x/old.jpg', 'w': 100}},
+            {'found': True, 'main': {'src': 'http://x/new.jpg', 'w': 100}}))
+        # src 相同 → 未变化（假阳性防护：弹窗开关不影响卡片）
+        self.assertFalse(U._cover_card_changed(
+            {'found': True, 'main': {'src': 'http://x/same.jpg', 'w': 100}},
+            {'found': True, 'main': {'src': 'http://x/same.jpg', 'w': 100}}))
+        # 前后都无图 → 未变化
+        self.assertFalse(U._cover_card_changed(
+            {'found': True, 'main': None}, {'found': True, 'main': None}))
 
     def test_upload_readiness_rejects_active_upload_with_enabled_draft_button(self):
         state = {
@@ -234,7 +291,7 @@ class WeChatUploaderTests(unittest.TestCase):
             'found': False, 'clicked': False, 'text': ''
         }
         uploader._scroll_page_to_bottom = lambda: None
-        uploader._wait_for_draft_saved = lambda previous_url, title: False
+        uploader._wait_for_draft_saved = lambda previous_url, title, baseline_count=None: False
         uploader._save_debug_state = lambda stage: None
 
         self.assertFalse(uploader._save_draft('示例标题'))
@@ -249,7 +306,7 @@ class WeChatUploaderTests(unittest.TestCase):
             'found': False, 'clicked': False, 'text': ''
         }
         uploader._scroll_page_to_bottom = lambda: None
-        uploader._wait_for_draft_saved = lambda previous_url, title: True
+        uploader._wait_for_draft_saved = lambda previous_url, title, baseline_count=None: True
 
         self.assertTrue(uploader._save_draft('示例标题'))
         self.assertEqual(button.click_count, 1)
@@ -262,7 +319,7 @@ class WeChatUploaderTests(unittest.TestCase):
             'found': True, 'clicked': True, 'text': '保存草稿'
         }
         uploader._scroll_page_to_bottom = lambda: None
-        uploader._wait_for_draft_saved = lambda previous_url, title: True
+        uploader._wait_for_draft_saved = lambda previous_url, title, baseline_count=None: True
 
         self.assertTrue(uploader._save_draft('示例标题'))
 

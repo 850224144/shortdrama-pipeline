@@ -1402,7 +1402,8 @@
                                 account: account,
                                 version: version,
                                 batch_id: batchId,
-                                output_dir: dramaDir
+                                output_dir: dramaDir,
+                                expected_versions: versions
                             })
                         });
                         
@@ -1446,13 +1447,17 @@
                 return;
             }
             
-            // 记录批次 ID 与自动清理开关（供上传完成后触发清理）
+            // 记录批次 ID（供日志/展示）与自动清理开关（传给后端，由后端在批次自然结束时触发）
             window.currentBatchId = batchId;
-            window.autoCleanupEnabled = document.getElementById('autoCleanup')?.checked || false;
+            const autoCleanupEnabled = document.getElementById('autoCleanup')?.checked || false;
             
-            // 开始上传
+            // 开始上传（auto_cleanup 由后端 worker 在批次自然结束时执行清理）
             try {
-                const startResponse = await fetch('/api/upload/start', { method: 'POST' });
+                const startResponse = await fetch('/api/upload/start', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ auto_cleanup: autoCleanupEnabled })
+                });
                 const startResult = await startResponse.json();
                 
                 if (startResult.status === 'success') {
@@ -1565,15 +1570,9 @@
                 const response = await fetch('/api/upload/status');
                 const status = await response.json();
                 
-                // 检测上传完成（uploading 从 true → false），触发自动清理
-                if (window.wasUploading === true && !status.uploading && window.currentBatchId) {
-                    if (window.autoCleanupEnabled) {
-                        triggerCleanup(window.currentBatchId);
-                    } else {
-                        console.log('自动清理未勾选，跳过 batch=' + window.currentBatchId);
-                    }
-                    window.currentBatchId = null;
-                }
+                // 自动清理现由后端 worker 在批次自然结束时触发（见 upload_manager._finalize_batches），
+                // 前端只负责展示结果，不再依赖页面内存的 currentBatchId/wasUploading 判断。
+                // 刷新页面、关闭浏览器或服务重启不再影响清理执行（服务重启场景见启动清扫）。
                 window.wasUploading = status.uploading;
                 
                 // 更新统计

@@ -53,6 +53,16 @@ class UploadManager:
         # 草稿箱浏览器实例（account → ChromiumPage）
         self.draft_pages = {}
         
+        # 后端触发的自动清理：本次运行是否启用、本批次是否人工停止、
+        # 以及批次完成回调（由 app.py 注入 artifact_cleanup.execute_cleanup）
+        self._run_auto_cleanup = False
+        self._stopped = False
+        self._cleanup_callback = None
+
+    def set_cleanup_callback(self, cb):
+        """注入批次完成回调（batch_id → None）。app.py 绑定 artifact_cleanup。"""
+        self._cleanup_callback = cb
+        
     def _init_database(self):
         """初始化数据库"""
         conn = sqlite3.connect(self.db_path)
@@ -115,11 +125,21 @@ class UploadManager:
                 cover_applied_count INTEGER DEFAULT 0,
                 cover_failed_count INTEGER DEFAULT 0,
                 status TEXT DEFAULT 'running',
+                auto_cleanup INTEGER DEFAULT 0,   -- 批次自然结束后是否由后端触发自动清理
                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                 completed_at TIMESTAMP
             )
         ''')
         
+        # 迁移：为既有批次表补充 auto_cleanup 列（幂等）
+        batch_cols = {row[1] for row in cursor.execute('PRAGMA table_info(upload_batches)').fetchall()}
+        if 'auto_cleanup' not in batch_cols:
+            try:
+                cursor.execute('ALTER TABLE upload_batches ADD COLUMN auto_cleanup INTEGER DEFAULT 0')
+            except sqlite3.OperationalError as e:
+                if 'duplicate column' not in str(e).lower():
+                    raise
+
         # 创建清理任务表（持久化，服务重启后仍能续跑）
         cursor.execute('''
             CREATE TABLE IF NOT EXISTS artifact_cleanup_jobs (
@@ -137,6 +157,22 @@ class UploadManager:
                 error TEXT,
                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                 completed_at TIMESTAMP
+            )
+        ''')
+
+        # 批次应上传版本清单（按 批次/账号/剧名/目录 分组记录提交意图）。
+        # 目录级清理前必须确认该组全部目标版本都成功，缺版本则禁止清理。
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS upload_batch_expected (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                batch_id TEXT NOT NULL,
+                account TEXT,
+                drama_name TEXT NOT NULL,
+                source_dir TEXT,
+                output_dir TEXT,
+                expected_versions TEXT,       -- JSON 数组：该组应上传的全部版本
+                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                UNIQUE (batch_id, account, drama_name, source_dir, output_dir)
             )
         ''')
         
@@ -228,8 +264,11 @@ class UploadManager:
             
             return {'status': 'success', 'id': record_id}
     
-    def start_upload(self):
-        """开始上传（先预检登录，全部有效才真正开传）"""
+    def start_upload(self, auto_cleanup: bool = False):
+        """开始上传（先预检登录，全部有效才真正开传）。
+
+        auto_cleanup: 本次运行是否启用后端自动清理（批次自然结束后触发）。
+        """
         with self.lock:
             if self.uploading or self.prechecking:
                 return {'status': 'failed', 'error': '正在上传或预检中'}
@@ -240,6 +279,8 @@ class UploadManager:
             self.uploading = True
             self.prechecking = True
             self.paused = False
+            self._stopped = False
+            self._run_auto_cleanup = bool(auto_cleanup)
             self.current_account = self.queue[0].get('account')
 
             # 启动上传线程（线程内第一步是登录预检）
@@ -278,6 +319,7 @@ class UploadManager:
             
             self.paused = True
             self.uploading = False  # 重置uploading状态
+            self._stopped = True   # 标记人工停止：自然结束路径不得触发清理
             self.current_task = None  # 清除当前任务
             self._log('info', '上传已停止')
             return {'status': 'success'}
@@ -365,6 +407,7 @@ class UploadManager:
                 self.current_task = None
             return
 
+        seen_batches = set()
         while True:
             # 获取任务（短暂持锁）
             with self.lock:
@@ -379,6 +422,8 @@ class UploadManager:
                 self.current_task = task
                 task['status'] = 'uploading'
                 task['started_at'] = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+                if task.get('batch_id'):
+                    seen_batches.add(task['batch_id'])
             
             # 更新数据库（不持锁）
             with sqlite3.connect(self.db_path) as conn:
@@ -442,6 +487,39 @@ class UploadManager:
             self.uploading = False
             self.current_task = None
             self._log('info', '上传完成')
+        # 自然结束（非人工停止）：标记批次完成并触发后端自动清理
+        if not self._stopped:
+            self._finalize_batches(seen_batches)
+
+    def _finalize_batches(self, batch_ids):
+        """批次自然结束：标记 upload_batches 完成；启用自动清理则触发回调。
+
+        每个批次只有当其所有记录都不再是 pending/uploading 时才标记完成，
+        避免中途有任务被搁置时误标完成。
+        """
+        for batch_id in batch_ids:
+            try:
+                with sqlite3.connect(self.db_path) as conn:
+                    pending = conn.execute(
+                        "SELECT COUNT(*) FROM upload_records "
+                        "WHERE batch_id=? AND status IN ('pending','uploading')",
+                        (batch_id,)).fetchone()[0]
+                    if pending == 0:
+                        conn.execute(
+                            "UPDATE upload_batches SET status='completed', "
+                            "auto_cleanup=?, completed_at=? WHERE batch_id=?",
+                            (1 if self._run_auto_cleanup else 0,
+                             datetime.now().strftime('%Y-%m-%d %H:%M:%S'), batch_id))
+                        conn.commit()
+                        self._log('info', f'批次 {batch_id} 已标记完成')
+                        if self._run_auto_cleanup and self._cleanup_callback:
+                            try:
+                                self._cleanup_callback(batch_id)
+                                self._log('info', f'批次 {batch_id} 触发自动清理')
+                            except Exception as e:
+                                self._log('error', f'批次 {batch_id} 自动清理失败: {e}')
+            except Exception as e:
+                self._log('error', f'批次 {batch_id} 完成标记失败: {e}')
     
     def _precheck_logins(self) -> bool:
         """上传前校验队列里每个账号的登录态。全通过返回 True；

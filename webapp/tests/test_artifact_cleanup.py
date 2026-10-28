@@ -8,6 +8,7 @@ import shutil
 import tempfile
 import unittest
 import sqlite3
+from unittest.mock import patch
 
 from artifact_cleanup import ArtifactCleanup, STRATEGY_NONE, STRATEGY_RECYCLE
 
@@ -68,6 +69,13 @@ class CleanupTestCase(unittest.TestCase):
             error TEXT, created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
             completed_at TIMESTAMP
         )''')
+        conn.execute('''CREATE TABLE IF NOT EXISTS upload_batch_expected (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            batch_id TEXT NOT NULL, account TEXT, drama_name TEXT NOT NULL,
+            source_dir TEXT, output_dir TEXT, expected_versions TEXT,
+            updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            UNIQUE (batch_id, account, drama_name, source_dir, output_dir)
+        )''')
         conn.commit()
         conn.close()
 
@@ -86,6 +94,10 @@ class CleanupTestCase(unittest.TestCase):
             cp = os.path.join(out_dir, 'covers', f'{drama}_{v}_封面.jpg')
             open(vp, 'w').write(f'video{v}')
             open(cp, 'w').write(f'cover{v}')
+            # 每个版本切片都会写 edl_config_vN.json（目录级“全量”基准）
+            with open(os.path.join(out_dir, f'edl_config_v{v}.json'), 'w',
+                      encoding='utf-8') as f:
+                json.dump({'drama_name': drama, 'version': v}, f, ensure_ascii=False)
             rows.append((drama, v, vp, cp, account, record_status[i],
                          cover_status[i], draft[i], batch_id, src_dir, out_dir))
         conn = sqlite3.connect(self.cleanup.db_path)
@@ -159,10 +171,33 @@ class CleanupTestCase(unittest.TestCase):
         # 素材目录不在素材根下 → 拒绝
         ok, err = self.cleanup._validate_material_dir(os.path.join(self.tmp, 'x', '剧'))
         self.assertFalse(ok)
-        # 深度 2 → 拒绝
+        # 深度 2（根/分类/剧名 布局）→ 允许（部分剧目素材目录嵌套两级）
         deep = os.path.join(self.material_root, '剧', 'sub')
         os.makedirs(deep, exist_ok=True)
         ok, err = self.cleanup._validate_material_dir(deep)
+        self.assertTrue(ok, err)
+        # 深度 3 → 拒绝（过深，不是剧目目录）
+        deep3 = os.path.join(self.material_root, '剧', 'sub', 'x')
+        os.makedirs(deep3, exist_ok=True)
+        ok, err = self.cleanup._validate_material_dir(deep3)
+        self.assertFalse(ok)
+
+    def test_path_safety_material_multiple_roots(self):
+        """多个合法素材根：任一根下的一级/二级子目录都合法。"""
+        root2 = os.path.join(self.tmp, 'material_legacy')
+        os.makedirs(root2, exist_ok=True)
+        cleanup = ArtifactCleanup(
+            data_dir=self.data_dir,
+            material_root=[self.material_root, root2],
+            output_root=self.output_root, recycle_root=self.recycle_root)
+        # 第二个根下的一级子目录 → 合法
+        ok, err = cleanup._validate_material_dir(os.path.join(root2, '旧剧'))
+        self.assertTrue(ok, err)
+        # 第二个根下的二级子目录 → 合法
+        ok, err = cleanup._validate_material_dir(os.path.join(root2, '分类', '旧剧'))
+        self.assertTrue(ok, err)
+        # 不在任何根下 → 拒绝
+        ok, err = cleanup._validate_material_dir(os.path.join(self.tmp, 'elsewhere', '剧'))
         self.assertFalse(ok)
 
     def test_execute_moves_to_recycle_with_manifest(self):
@@ -214,6 +249,53 @@ class CleanupTestCase(unittest.TestCase):
             output_root=self.output_root, recycle_root=self.recycle_root)
         jobs2 = cleanup2.list_jobs('batch_rs')
         self.assertEqual(len(jobs2), len(jobs))
+
+
+    def test_partial_version_submission_no_drama_cleanup(self):
+        """#6：只提交部分版本（缺 V2）→ 禁止目录级清理，版本级 V1 仍可清理。"""
+        # 构造全量版本 {1,2}（两个 edl_config），但只插入 V1 记录
+        out_dir = os.path.join(self.output_root, '福桃说剧', '部分剧')
+        src_dir = os.path.join(self.material_root, '部分剧')
+        os.makedirs(out_dir, exist_ok=True)
+        os.makedirs(src_dir, exist_ok=True)
+        for v in (1, 2):
+            with open(os.path.join(out_dir, f'edl_config_v{v}.json'), 'w',
+                      encoding='utf-8') as f:
+                json.dump({'drama_name': '部分剧', 'version': v}, f, ensure_ascii=False)
+        vp = os.path.join(out_dir, '部分剧_1_逆袭_去重版.mp4')
+        open(vp, 'w').write('video1')
+        conn = sqlite3.connect(self.cleanup.db_path)
+        conn.execute(
+            '''INSERT INTO upload_records
+               (drama_name, version, video_path, cover_path, account, status,
+                cover_status, draft_saved, batch_id, source_dir, output_dir)
+               VALUES (?,?,?,?,?,?,?,?,?,?,?)''',
+            ('部分剧', 1, vp, None, '福桃说剧', 'completed', 'not_requested', 1,
+             'batch_partial', src_dir, out_dir))
+        conn.commit()
+        conn.close()
+        plan = self.cleanup.plan_cleanup('batch_partial', strategy=STRATEGY_RECYCLE,
+                                         dry_run=True)
+        dir_jobs = [j for j in plan['jobs']
+                    if j['job_type'] in ('drama_output', 'drama_source')]
+        self.assertEqual(dir_jobs, [], '缺 V2 时禁止目录级清理')
+        # 版本级 V1 仍可清理
+        version_jobs = [j for j in plan['jobs'] if j['job_type'] == 'version']
+        self.assertEqual(len(version_jobs), 1)
+        # skipped 里有 expected_versions_incomplete 说明
+        reasons = [s.get('reason') for s in plan['skipped']]
+        self.assertIn('expected_versions_incomplete', reasons)
+
+    def test_execute_cleanup_reports_failed_when_all_moves_fail(self):
+        """#3：所有移动都失败 → execute_cleanup 返回 failed，绝不报 success。"""
+        d = self._make_drama('batch_movefail')
+        with patch('artifact_cleanup.shutil.move', side_effect=OSError('模拟移动失败')):
+            result = self.cleanup.execute_cleanup('batch_movefail', strategy=STRATEGY_RECYCLE)
+        self.assertEqual(result['status'], 'failed')
+        self.assertGreater(result['failed_count'], 0)
+        self.assertEqual(result['moved_count'], 0)
+        # 文件仍在原地（未被删除）
+        self.assertTrue(os.path.exists(os.path.join(d['out_dir'], '测试剧_1_逆袭_去重版.mp4')))
 
 
 if __name__ == '__main__':

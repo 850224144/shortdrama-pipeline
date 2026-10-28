@@ -50,22 +50,41 @@ CLEANABLE_COVER = ('applied', 'not_requested')
 class ArtifactCleanup:
     """成品清理服务。"""
 
-    def __init__(self, data_dir: str = None, material_root: str = None,
-                 output_root: str = None, recycle_root: str = None):
+    def __init__(self, data_dir: Optional[str] = None, material_root=None,
+                 output_root: Optional[str] = None, recycle_root: Optional[str] = None):
         if CONFIG is not None:
             data_dir = data_dir or CONFIG.get('data_dir', r'D:\短剧工坊\data')
-            material_root = material_root or CONFIG.get('download_base_dir', r'E:\短剧素材')
+            if material_root is None:
+                material_root = (CONFIG.get('material_roots') or
+                                 CONFIG.get('download_base_dir', r'E:\短剧素材'))
             output_root = output_root or CONFIG.get('output_dir', r'D:\短剧工作区\output')
             recycle_root = recycle_root or r'D:\短剧工坊\回收站'
         self.data_dir = data_dir
-        self.material_root = os.path.normpath(material_root or r'E:\短剧素材')
+        # 素材根：支持单个字符串或多个合法根（配置里可能存在多套素材目录）
+        if isinstance(material_root, (list, tuple)):
+            roots = list(material_root)
+        else:
+            roots = [material_root or r'E:\短剧素材']
+        self.material_roots = [os.path.normpath(r) for r in roots if r]
+        # 已知历史素材根 D:\短剧素材（若真实存在）也视为合法，避免旧 EDL 配置
+        # 里的 D:\短剧素材\... 被判为 source_dir_unsafe 而无法自动清理。
+        legacy = r'D:\短剧素材'
+        if legacy not in self.material_roots and os.path.isdir(legacy):
+            self.material_roots.append(legacy)
+        if not self.material_roots:
+            self.material_roots = [os.path.normpath(r'E:\短剧素材')]
+        # 兼容属性：第一个根（旧代码 / 测试仍引用 self.material_root）
+        self.material_root = self.material_roots[0]
         self.output_root = os.path.normpath(output_root or r'D:\短剧工作区\output')
         self.recycle_root = os.path.normpath(recycle_root or r'D:\短剧工坊\回收站')
-        self.db_path = os.path.join(self.data_dir, 'upload.db')
+        self.db_path = os.path.join(self.data_dir or r'D:\短剧工坊\data', 'upload.db')
 
     # ── 路径安全 ──────────────────────────────────────────────
     @staticmethod
     def _norm(path):
+        """归一化路径用于比较：大小写不敏感 + 绝对路径 + 斜杠统一。空值返回 ''。"""
+        if not path:
+            return ''
         return os.path.normcase(os.path.abspath(path))
 
     def _safe_component(self, s, field):
@@ -140,17 +159,25 @@ class ArtifactCleanup:
         return True, ''
 
     def _validate_material_dir(self, source_dir):
-        """素材目录必须是素材根目录的直接子目录。"""
+        """素材目录必须是某个合法素材根下的一级或二级子目录。
+
+        支持多个素材根（material_roots），并允许嵌套两级——部分剧目的素材
+        目录布局为 根/分类/剧名（二级），旧的“仅一级子目录”会把它们误判为
+        source_dir_unsafe，导致自动清理无法覆盖。
+        """
         if not source_dir:
             return False, '素材目录为空'
-        ok, err = self._safe_under(source_dir, self.material_root)
-        if not ok:
-            return False, err
-        rel = os.path.relpath(os.path.abspath(source_dir), os.path.abspath(self.material_root))
-        depth = len([p for p in rel.split(os.sep) if p])
-        if depth != 1:
-            return False, f'素材目录深度异常（应为直接子目录）: {rel}'
-        return True, ''
+        p_abs = os.path.abspath(source_dir)
+        for root in self.material_roots:
+            ok, err = self._safe_under(source_dir, root)
+            if not ok:
+                continue  # 不在该根下（或就是根本身），试下一个合法根
+            rel = os.path.relpath(p_abs, os.path.abspath(root))
+            depth = len([p for p in rel.split(os.sep) if p])
+            if depth in (1, 2):
+                return True, ''
+            return False, f'素材目录深度异常（应为根下1-2级）: {rel}'
+        return False, f'素材目录不在任何合法素材根内: {source_dir}'
 
     def _validate_file_under_output(self, file_path):
         """版本级目标文件必须位于 output 根内。"""
@@ -170,14 +197,75 @@ class ArtifactCleanup:
                 (batch_id,)).fetchall()
         return [dict(r) for r in rows]
 
-    def _record_batch(self, batch_id, drama_name, account, source_dir, output_dir):
-        """批量上传前登记批次（无则创建）。"""
+    def _record_batch(self, batch_id, drama_name, account, source_dir, output_dir,
+                      expected_versions=None):
+        """批量上传前登记批次（无则创建），并记录该组应上传的版本清单。
+
+        expected_versions: 该组（批次/账号/剧名/目录）本次应上传的全部版本号列表。
+        目录级清理前以此判定“全量是否成功”；缺版本则禁止清理整个目录。
+        """
         with self._connect() as conn:
             conn.execute(
                 '''INSERT OR IGNORE INTO upload_batches
                    (batch_id, account, drama_name, source_dir, output_dir, status)
                    VALUES (?, ?, ?, ?, ?, 'running')''',
                 (batch_id, account, drama_name, source_dir, output_dir))
+            if expected_versions:
+                import json as _json
+                conn.execute(
+                    '''INSERT INTO upload_batch_expected
+                       (batch_id, account, drama_name, source_dir, output_dir,
+                        expected_versions, updated_at)
+                       VALUES (?, ?, ?, ?, ?, ?, datetime('now'))
+                       ON CONFLICT(batch_id, account, drama_name, source_dir, output_dir)
+                       DO UPDATE SET expected_versions=excluded.expected_versions,
+                                     updated_at=datetime('now')''',
+                    (batch_id, account, drama_name, source_dir, output_dir,
+                     _json.dumps(sorted(int(v) for v in expected_versions),
+                                 ensure_ascii=False)))
+
+    def _recorded_expected_versions(self, batch_id, account, drama_name,
+                                    source_dir, output_dir):
+        """读取提交时记录的应上传版本清单（JSON 数组）；无记录返回空集。"""
+        import json as _json
+        with self._connect() as conn:
+            row = conn.execute(
+                '''SELECT expected_versions FROM upload_batch_expected
+                   WHERE batch_id=? AND account=? AND drama_name=? AND source_dir=?
+                     AND output_dir=?''',
+                (batch_id, account, drama_name, source_dir, output_dir)).fetchone()
+        if not row or not row['expected_versions']:
+            return set()
+        try:
+            return {int(v) for v in _json.loads(row['expected_versions'])}
+        except Exception:
+            return set()
+
+    def _drama_target_versions(self, out_dir, batch_id, account, drama_name, src_dir):
+        """该剧应具备的完整版本集（目录级清理的“全量”基准）。
+
+        优先级：
+          1) 成品目录内 edl_config_vN.json 的实际版本集（权威——每个版本切片都写配置）；
+          2) 成品目录内 *_V{N}_*_去重版.mp4 的实际版本集；
+          3) 提交时记录的 upload_batch_expected；
+        都取不到 → 返回空集（调用方应保守地禁止目录级清理）。
+        """
+        import re
+        versions = set()
+        if out_dir and os.path.isdir(out_dir):
+            for fn in os.listdir(out_dir):
+                m = re.match(r'^edl_config_v(\d+)\.json$', fn, re.I)
+                if m:
+                    versions.add(int(m.group(1)))
+            if not versions:
+                for fn in os.listdir(out_dir):
+                    m = re.search(r'_V(\d+)_', fn, re.I)
+                    if m and fn.lower().endswith('.mp4'):
+                        versions.add(int(m.group(1)))
+        if not versions:
+            versions = self._recorded_expected_versions(
+                batch_id, account, drama_name, src_dir, out_dir)
+        return versions
 
     # ── 计划器 ────────────────────────────────────────────────
     def plan_cleanup(self, batch_id: str, strategy: str = STRATEGY_RECYCLE,
@@ -286,6 +374,23 @@ class ArtifactCleanup:
                 skipped.append({'account': account, 'drama_name': drama_name,
                                 'reason': 'no_path'})
                 continue
+            # 全量版本门槛：只有该剧全部目标版本都成功才允许目录级清理。
+            # 只提交部分版本（如仅 V1）或某版本文件缺失 → 禁止清理整个目录。
+            target_versions = self._drama_target_versions(
+                out_dir, batch_id, account, drama_name, src_dir)
+            group_versions = {g['version'] for g in grp}
+            if target_versions:
+                missing = sorted(target_versions - group_versions)
+                if missing:
+                    skipped.append({'account': account, 'drama_name': drama_name,
+                                    'reason': 'expected_versions_incomplete',
+                                    'detail': f'目标版本 {sorted(target_versions)} 中缺失/未成功: {missing}'})
+                    continue
+            else:
+                skipped.append({'account': account, 'drama_name': drama_name,
+                                'reason': 'expected_versions_unknown',
+                                'detail': '无法确定该剧目标版本集（无 edl_config/无提交记录），保守禁止目录级清理'})
+                continue
             # 输出目录级：其他批次仍有待上传视频引用同一成品目录 → 禁止移动
             if out_dir:
                 ok, err = self._validate_output_dir(out_dir)
@@ -362,41 +467,54 @@ class ArtifactCleanup:
 
     # ── 引用检查 ──────────────────────────────────────────────
     def _other_references_source(self, source_dir, exclude_batch_id, exclude_output_dir=None):
-        """其他批次/其他组是否仍引用该素材目录。返回引用描述或 None。"""
+        """其他批次/其他组是否仍引用该素材目录。返回引用描述或 None。
+
+        路径比较用 _norm 归一化（大小写不敏感 + 绝对路径 + 斜杠统一），
+        否则 Windows 大小写/斜杠方向不同的历史记录会漏判，导致提前删目录。
+        """
+        target = self._norm(source_dir)
         with self._connect() as conn:
             rows = conn.execute(
-                '''SELECT batch_id, account, drama_name, output_dir FROM upload_records
-                   WHERE source_dir=? AND status IN ('pending','uploading')''',
-                (source_dir,)).fetchall()
+                '''SELECT batch_id, account, drama_name, output_dir, source_dir
+                   FROM upload_records WHERE status IN ('pending','uploading')''',
+                ).fetchall()
             for r in rows:
+                if self._norm(r['source_dir'] or '') != target:
+                    continue  # 只比较归一化后的素材目录
                 if r['batch_id'] == exclude_batch_id and \
-                        (exclude_output_dir is None or r['output_dir'] == exclude_output_dir):
+                        (exclude_output_dir is None or
+                         self._norm(r['output_dir'] or '') == self._norm(exclude_output_dir)):
                     continue  # 本组自己的待上传记录（正常不会有，保守跳过）
                 return f"batch={r['batch_id']} 账号={r['account']}"
             # 其他批次已完成但未清理——保守起见也视为引用
             rows2 = conn.execute(
-                '''SELECT DISTINCT batch_id, account, output_dir FROM upload_records
-                   WHERE source_dir=? AND batch_id != ?''',
-                (source_dir, exclude_batch_id)).fetchall()
-            if rows2:
-                return f"其他batch={rows2[0]['batch_id']}"
+                '''SELECT DISTINCT batch_id, account, source_dir FROM upload_records
+                   WHERE batch_id != ?''',
+                (exclude_batch_id,)).fetchall()
+            for r in rows2:
+                if self._norm(r['source_dir'] or '') == target:
+                    return f"其他batch={r['batch_id']}"
         return None
 
     def _other_references_output(self, output_dir, exclude_batch_id, exclude_output_dir):
         """其他批次是否仍有待上传/上传中视频位于该成品目录。返回引用描述或 None。
 
         关键闸门：整目录（剧集级）清理前，必须确认没有其他批次的待上传任务
-        仍引用同一成品目录，否则会过早移走目录。
+        仍引用同一成品目录，否则会过早移走目录。比较走 _norm 归一化。
         """
         if not output_dir:
             return None
+        target = self._norm(output_dir)
         with self._connect() as conn:
             rows = conn.execute(
-                '''SELECT batch_id, account, drama_name FROM upload_records
-                   WHERE output_dir=? AND status IN ('pending','uploading')''',
-                (output_dir,)).fetchall()
+                '''SELECT batch_id, account, drama_name, output_dir FROM upload_records
+                   WHERE status IN ('pending','uploading')''',
+                ).fetchall()
             for r in rows:
-                if r['batch_id'] == exclude_batch_id and output_dir == exclude_output_dir:
+                if self._norm(r['output_dir'] or '') != target:
+                    continue
+                if r['batch_id'] == exclude_batch_id and \
+                        self._norm(r['output_dir'] or '') == self._norm(exclude_output_dir):
                     continue  # 本组自身（正常不会）
                 return f"batch={r['batch_id']} 账号={r['account']}"
         return None
@@ -456,15 +574,30 @@ class ArtifactCleanup:
 
     # ── 执行 ──────────────────────────────────────────────────
     def execute_cleanup(self, batch_id: str, strategy: str = STRATEGY_RECYCLE) -> Dict:
-        """非 dry-run：先计划，再逐任务执行（写 manifest → 移动 → 更新 DB）。"""
+        """非 dry-run：先计划，再逐任务执行（写 manifest → 移动 → 更新 DB）。
+
+        总体状态由执行结果推导，绝不把有失败项的清理报告成 success：
+          - 有 failed 且有 moved → 'partial'
+          - 有 failed 且无 moved → 'failed'
+          - 无 failed → 'success'
+        """
         plan = self.plan_cleanup(batch_id, strategy=strategy, dry_run=False)
         if plan['status'] != 'success':
             return plan
         results = []
         for job in plan['jobs']:
             results.append(self._execute_job(job))
-        return {'status': 'success', 'strategy': strategy, 'dry_run': False,
+        moved = sum(1 for r in results if r['status'] == 'moved')
+        failed = sum(1 for r in results if r['status'] == 'failed')
+        if failed > 0 and moved > 0:
+            overall = 'partial'
+        elif failed > 0:
+            overall = 'failed'
+        else:
+            overall = 'success'
+        return {'status': overall, 'strategy': strategy, 'dry_run': False,
                 'jobs': plan['jobs'], 'results': results,
+                'moved_count': moved, 'failed_count': failed,
                 'skipped': plan['skipped'], 'reason': None}
 
     def _execute_job(self, job: Dict) -> Dict:
