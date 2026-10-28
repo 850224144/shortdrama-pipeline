@@ -78,6 +78,19 @@ class ArtifactCleanup:
         self.output_root = os.path.normpath(output_root or r'D:\短剧工作区\output')
         self.recycle_root = os.path.normpath(recycle_root or r'D:\短剧工坊\回收站')
         self.db_path = os.path.join(self.data_dir or r'D:\短剧工坊\data', 'upload.db')
+        # 清理任务唯一约束：同一批次同一作业类型同一目标路径只允许一条 job。
+        # 失败后重复执行清理计划不再插入重复 job（幂等 upsert）。
+        try:
+            with self._connect() as conn:
+                conn.execute(
+                    "DELETE FROM artifact_cleanup_jobs WHERE id NOT IN "
+                    "(SELECT MIN(id) FROM artifact_cleanup_jobs "
+                    " GROUP BY batch_id, job_type, target_path)")
+                conn.execute(
+                    "CREATE UNIQUE INDEX IF NOT EXISTS ux_cleanup_jobs "
+                    "ON artifact_cleanup_jobs(batch_id, job_type, target_path)")
+        except Exception:
+            pass
 
     # ── 路径安全 ──────────────────────────────────────────────
     @staticmethod
@@ -203,13 +216,32 @@ class ArtifactCleanup:
 
         expected_versions: 该组（批次/账号/剧名/目录）本次应上传的全部版本号列表。
         目录级清理前以此判定“全量是否成功”；缺版本则禁止清理整个目录。
+
+        source_dir/output_dir 统一存空字符串而非 NULL：dashboard 不上送 source_dir，
+        若存 NULL，SQLite 的 `=` 永不匹配 NULL（且 UNIQUE 约束对 NULL 列失效，
+        同组会插入多条重复记录）。空串在查询侧按通配处理（见 _recorded_expected_versions）。
         """
+        source_dir = source_dir or ''
+        output_dir = output_dir or ''
         with self._connect() as conn:
-            conn.execute(
-                '''INSERT OR IGNORE INTO upload_batches
-                   (batch_id, account, drama_name, source_dir, output_dir, status)
-                   VALUES (?, ?, ?, ?, ?, 'running')''',
-                (batch_id, account, drama_name, source_dir, output_dir))
+            # 批次行：同 batch_id 可能含多部剧——drama_name 存逗号合并去重列表，
+            # 使批次行的剧名/计数反映全批次（计数在清理写回时按 records 更新）。
+            row = conn.execute(
+                "SELECT drama_name FROM upload_batches WHERE batch_id=?", (batch_id,)).fetchone()
+            if row:
+                names = [n for n in (row['drama_name'] or '').split(',') if n]
+                if drama_name not in names:
+                    names.append(drama_name)
+                conn.execute(
+                    "UPDATE upload_batches SET account=?, drama_name=?, source_dir=?, output_dir=? "
+                    "WHERE batch_id=?",
+                    (account, ','.join(names), source_dir, output_dir, batch_id))
+            else:
+                conn.execute(
+                    '''INSERT INTO upload_batches
+                       (batch_id, account, drama_name, source_dir, output_dir, status)
+                       VALUES (?, ?, ?, ?, ?, 'running')''',
+                    (batch_id, account, drama_name, source_dir, output_dir))
             if expected_versions:
                 import json as _json
                 conn.execute(
@@ -226,14 +258,19 @@ class ArtifactCleanup:
 
     def _recorded_expected_versions(self, batch_id, account, drama_name,
                                     source_dir, output_dir):
-        """读取提交时记录的应上传版本清单（JSON 数组）；无记录返回空集。"""
+        """读取提交时记录的应上传版本清单（JSON 数组）；无记录返回空集。
+
+        存储侧空串（或 NULL）视作通配：dashboard 不上送 source_dir 时该列为空，
+        查询用真实素材路径也应能命中（edl_config 第一优先级缺失时的兜底）。
+        """
         import json as _json
         with self._connect() as conn:
             row = conn.execute(
                 '''SELECT expected_versions FROM upload_batch_expected
-                   WHERE batch_id=? AND account=? AND drama_name=? AND source_dir=?
-                     AND output_dir=?''',
-                (batch_id, account, drama_name, source_dir, output_dir)).fetchone()
+                   WHERE batch_id=? AND account=? AND drama_name=? AND output_dir=?
+                     AND (COALESCE(source_dir,'') = COALESCE(?,'')
+                          OR COALESCE(source_dir,'') = '')''',
+                (batch_id, account, drama_name, output_dir, source_dir)).fetchone()
         if not row or not row['expected_versions']:
             return set()
         try:
@@ -457,7 +494,7 @@ class ArtifactCleanup:
         with self._connect() as conn:
             for j in jobs:
                 conn.execute(
-                    '''INSERT INTO artifact_cleanup_jobs
+                    '''INSERT OR IGNORE INTO artifact_cleanup_jobs
                        (batch_id, account, drama_name, job_type, version,
                         target_path, recycle_path, strategy, status)
                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'pending')''',
@@ -585,7 +622,8 @@ class ArtifactCleanup:
         if plan['status'] != 'success':
             return plan
         results = []
-        for job in plan['jobs']:
+        jobs = plan['jobs']
+        for job in jobs:
             results.append(self._execute_job(job))
         moved = sum(1 for r in results if r['status'] == 'moved')
         failed = sum(1 for r in results if r['status'] == 'failed')
@@ -595,10 +633,53 @@ class ArtifactCleanup:
             overall = 'failed'
         else:
             overall = 'success'
+        self._write_back_cleanup_state(batch_id, overall, results, jobs)
         return {'status': overall, 'strategy': strategy, 'dry_run': False,
                 'jobs': plan['jobs'], 'results': results,
                 'moved_count': moved, 'failed_count': failed,
                 'skipped': plan['skipped'], 'reason': None}
+
+    def _write_back_cleanup_state(self, batch_id, overall, results, jobs=None):
+        """清理执行后写回：upload_records.cleanup_status/cleanup_error +
+        upload_batches 的 success/failed/count 与 cleanup_status。
+
+        results/jobs 按 index 对应；由 job 元数据映射记录：
+          - version / version_cover 任务 → 该版本记录；
+          - drama_output / drama_source 任务 → 该剧全部版本记录。
+        """
+        try:
+            with self._connect() as conn:
+                for i, r in enumerate(results):
+                    status = r['status']
+                    error = r.get('error')
+                    job = (jobs[i] if jobs and i < len(jobs) else {}) or {}
+                    batch = job.get('batch_id', batch_id)
+                    job_type = job.get('job_type')
+                    ver = job.get('version')
+                    drama = job.get('drama_name')
+                    if job_type in ('version', 'version_cover') and ver is not None:
+                        conn.execute(
+                            "UPDATE upload_records SET cleanup_status=?, cleanup_error=? "
+                            "WHERE batch_id=? AND version=?",
+                            (status, error, batch, ver))
+                    elif job_type in ('drama_output', 'drama_source'):
+                        conn.execute(
+                            "UPDATE upload_records SET cleanup_status=?, cleanup_error=? "
+                            "WHERE batch_id=? AND drama_name=?",
+                            (status, error, batch, drama))
+                # upload_batches 计数 + 整体状态
+                cnt = conn.execute(
+                    "SELECT COUNT(*), "
+                    "SUM(CASE WHEN status='completed' THEN 1 ELSE 0 END), "
+                    "SUM(CASE WHEN status='failed' THEN 1 ELSE 0 END) "
+                    "FROM upload_records WHERE batch_id=?",
+                    (batch_id,)).fetchone()
+                conn.execute(
+                    "UPDATE upload_batches SET version_count=?, success_count=?, "
+                    "failed_count=?, cleanup_status=? WHERE batch_id=?",
+                    (cnt[0] or 0, cnt[1] or 0, cnt[2] or 0, overall, batch_id))
+        except Exception as e:
+            logger.warning(f'清理状态写回失败: {e}')
 
     def _execute_job(self, job: Dict) -> Dict:
         """执行单个清理任务：写 manifest → 移动 → 更新 DB。"""

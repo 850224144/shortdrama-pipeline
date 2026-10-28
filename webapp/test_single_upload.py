@@ -52,7 +52,7 @@ def test_single_upload():
     print("-" * 60)
     
     start_time = time.time()
-    success = uploader.upload_to_draft(
+    result = uploader.upload_to_draft(
         video_path=video_path,
         title=title,
         tags=tags,
@@ -63,12 +63,14 @@ def test_single_upload():
     
     print("-" * 60)
     
-    if success:
+    if result.get('status') == 'success':
         print(f"✅ 上传成功! 耗时: {elapsed:.1f}秒")
+        ok = True
     else:
-        print(f"❌ 上传失败! 耗时: {elapsed:.1f}秒")
+        print(f"❌ 上传失败! 耗时: {elapsed:.1f}秒 - {result.get('error') or result}")
+        ok = False
     
-    return success
+    return ok
 
 if __name__ == '__main__':
     test_single_upload()

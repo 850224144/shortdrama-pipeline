@@ -247,8 +247,19 @@ COVER_CARD_FP_JS = r'''
         if (!/封面预览|个人主页和分享卡片|分享卡片/.test(t)) return false;
         return !!(n.querySelector && n.querySelector('img'));
     });
-    // 取最具体的卡片（文本最短）
-    cards.sort((a, b) => (a.innerText || '').length - (b.innerText || '').length);
+    // 优先「封面预览」卡片（真实封面所在），其次「分享卡片」；
+    // 同类中取文本最短（最具体）者。
+    const priority = n => {
+        const t = normalize(n.innerText || n.textContent);
+        if (/封面预览/.test(t)) return 0;
+        if (/分享卡片|个人主页和分享卡片/.test(t)) return 1;
+        return 2;
+    };
+    cards.sort((a, b) => {
+        const pa = priority(a), pb = priority(b);
+        if (pa !== pb) return pa - pb;
+        return (a.innerText || '').length - (b.innerText || '').length;
+    });
     const card = cards[0];
     if (!card) return {found: false};
     const imgs = [...card.querySelectorAll('img')].filter(i => {
@@ -1810,7 +1821,7 @@ return (() => {
         abs_file_path = os.path.abspath(video_path)
         if not os.path.exists(abs_file_path):
             logger.error(f"找不到视频文件: {abs_file_path}")
-            return self._upload_failure("找不到视频文件: {abs_file_path}")
+            return self._upload_failure(f"找不到视频文件: {abs_file_path}")
         
         # 检查登录（复用：10分钟内已验证则跳过重复校验，避免每版重复验证）
         _now = time.time()
@@ -1828,7 +1839,7 @@ return (() => {
             self.page = self._new_page(co)
         except Exception as e:
             logger.error(f"浏览器启动失败: {e}")
-            return self._upload_failure("浏览器启动失败: {e}")
+            return self._upload_failure(f"浏览器启动失败: {e}")
         
         try:
             # 打开发布页面

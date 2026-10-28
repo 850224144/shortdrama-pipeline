@@ -55,9 +55,14 @@ class UploadManager:
         
         # 后端触发的自动清理：本次运行是否启用、本批次是否人工停止、
         # 以及批次完成回调（由 app.py 注入 artifact_cleanup.execute_cleanup）
+        # _run_epoch: 每次 start_upload 自增，标识一次运行；_stopped/_stop_epoch
+        # 标记该次运行被人工停止。旧 worker 结束时用自己运行的 epoch 判定，
+        # 不会读到新运行的标志（并发窗口 P1 修复）。
         self._run_auto_cleanup = False
         self._stopped = False
         self._cleanup_callback = None
+        self._run_epoch = 0
+        self._stop_epoch = -1
 
     def set_cleanup_callback(self, cb):
         """注入批次完成回调（batch_id → None）。app.py 绑定 artifact_cleanup。"""
@@ -126,12 +131,14 @@ class UploadManager:
                 cover_failed_count INTEGER DEFAULT 0,
                 status TEXT DEFAULT 'running',
                 auto_cleanup INTEGER DEFAULT 0,   -- 批次自然结束后是否由后端触发自动清理
+                cleanup_status TEXT,              -- 清理整体状态：success/partial/failed
+                cleanup_error TEXT,
                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                 completed_at TIMESTAMP
             )
         ''')
         
-        # 迁移：为既有批次表补充 auto_cleanup 列（幂等）
+        # 迁移：为既有批次表补充 auto_cleanup / cleanup_status 列（幂等）
         batch_cols = {row[1] for row in cursor.execute('PRAGMA table_info(upload_batches)').fetchall()}
         if 'auto_cleanup' not in batch_cols:
             try:
@@ -139,6 +146,13 @@ class UploadManager:
             except sqlite3.OperationalError as e:
                 if 'duplicate column' not in str(e).lower():
                     raise
+        for _c, _ddl in (('cleanup_status', 'TEXT'), ('cleanup_error', 'TEXT')):
+            if _c not in batch_cols:
+                try:
+                    cursor.execute(f'ALTER TABLE upload_batches ADD COLUMN {_c} {_ddl}')
+                except sqlite3.OperationalError as e:
+                    if 'duplicate column' not in str(e).lower():
+                        raise
 
         # 创建清理任务表（持久化，服务重启后仍能续跑）
         cursor.execute('''
@@ -202,8 +216,13 @@ class UploadManager:
                      title: str = None, description: str = None, topics: str = None,
                      account: str = None, version: int = 1,
                      batch_id: str = None, source_dir: str = None,
-                     output_dir: str = None) -> Dict:
-        """添加到上传队列"""
+                     output_dir: str = None,
+                     expected_versions: Optional[list] = None) -> Dict:
+        """添加到上传队列
+
+        expected_versions: 该组本次应上传的全部版本（透传进任务字典，
+        供批次完成标记/清理门槛使用；默认 None 表示未提供）。
+        """
         with self.lock:
             # 检查是否已存在（按 account 去重，两个号可以发同一部剧）
             _account = account or '福桃说剧'
@@ -255,6 +274,7 @@ class UploadManager:
                 'batch_id': batch_id,
                 'source_dir': source_dir,
                 'output_dir': output_dir,
+                'expected_versions': expected_versions,
                 'cover_status': 'not_requested',
                 'draft_saved': 0,
             }
@@ -272,6 +292,9 @@ class UploadManager:
         with self.lock:
             if self.uploading or self.prechecking:
                 return {'status': 'failed', 'error': '正在上传或预检中'}
+            # 旧 worker 仍存活（暂停/停止后未退出）时拒绝启动，避免双 worker 并发操作队列
+            if self.upload_thread is not None and self.upload_thread.is_alive():
+                return {'status': 'failed', 'error': '上一轮上传 worker 仍在运行，请等待其退出或重启服务'}
 
             if not self.queue:
                 return {'status': 'failed', 'error': '队列为空'}
@@ -281,6 +304,7 @@ class UploadManager:
             self.paused = False
             self._stopped = False
             self._run_auto_cleanup = bool(auto_cleanup)
+            self._run_epoch += 1
             self.current_account = self.queue[0].get('account')
 
             # 启动上传线程（线程内第一步是登录预检）
@@ -320,6 +344,7 @@ class UploadManager:
             self.paused = True
             self.uploading = False  # 重置uploading状态
             self._stopped = True   # 标记人工停止：自然结束路径不得触发清理
+            self._stop_epoch = self._run_epoch  # 仅标记本次运行的停止
             self.current_task = None  # 清除当前任务
             self._log('info', '上传已停止')
             return {'status': 'success'}
@@ -408,6 +433,8 @@ class UploadManager:
             return
 
         seen_batches = set()
+        my_epoch = self._run_epoch
+        my_auto_cleanup = self._run_auto_cleanup
         while True:
             # 获取任务（短暂持锁）
             with self.lock:
@@ -415,6 +442,9 @@ class UploadManager:
                     break
                 
                 if self.paused:
+                    # 人工停止：退出循环让 worker 结束，释放线程供下次 start
+                    if self._stopped:
+                        break
                     time.sleep(1)
                     continue
                 
@@ -487,15 +517,16 @@ class UploadManager:
             self.uploading = False
             self.current_task = None
             self._log('info', '上传完成')
-        # 自然结束（非人工停止）：标记批次完成并触发后端自动清理
-        if not self._stopped:
-            self._finalize_batches(seen_batches)
+        # 自然结束（本次运行未被人工停止）：标记批次完成并触发后端自动清理。
+        # 用本运行的 epoch/auto_cleanup 快照，不读新运行的全局标志。
+        if self._stop_epoch != my_epoch:
+            self._finalize_batches(seen_batches, auto_cleanup=my_auto_cleanup)
 
-    def _finalize_batches(self, batch_ids):
+    def _finalize_batches(self, batch_ids, auto_cleanup=False):
         """批次自然结束：标记 upload_batches 完成；启用自动清理则触发回调。
 
         每个批次只有当其所有记录都不再是 pending/uploading 时才标记完成，
-        避免中途有任务被搁置时误标完成。
+        避免中途有任务被搁置时误标完成。auto_cleanup 为本次运行的快照值。
         """
         for batch_id in batch_ids:
             try:
@@ -508,11 +539,11 @@ class UploadManager:
                         conn.execute(
                             "UPDATE upload_batches SET status='completed', "
                             "auto_cleanup=?, completed_at=? WHERE batch_id=?",
-                            (1 if self._run_auto_cleanup else 0,
+                            (1 if auto_cleanup else 0,
                              datetime.now().strftime('%Y-%m-%d %H:%M:%S'), batch_id))
                         conn.commit()
                         self._log('info', f'批次 {batch_id} 已标记完成')
-                        if self._run_auto_cleanup and self._cleanup_callback:
+                        if auto_cleanup and self._cleanup_callback:
                             try:
                                 self._cleanup_callback(batch_id)
                                 self._log('info', f'批次 {batch_id} 触发自动清理')

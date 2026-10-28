@@ -49,8 +49,8 @@ if not uploader.check_login():
 print("✅ 登录有效，开始上传...")
 print()
 
-# 上传到草稿箱
-success = uploader.upload_to_draft(
+# 上传到草稿箱（返回结构化 dict，失败结果也是 truthy——必须按 status 判定）
+result = uploader.upload_to_draft(
     video_path=VIDEO_PATH,
     title=TITLE,
     tags=TAGS,
@@ -60,9 +60,9 @@ success = uploader.upload_to_draft(
 
 print()
 print("=" * 60)
-if success:
+if result.get('status') == 'success':
     print("✅ 上传成功！视频已保存到草稿箱")
     print("请登录视频号查看草稿箱")
 else:
-    print("❌ 上传失败，请检查日志")
+    print(f"❌ 上传失败: {result.get('error') or result}")
 print("=" * 60)
