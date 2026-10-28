@@ -17,6 +17,9 @@ from wechat_uploader import WeChatChannelsUploader
 # 导入配置
 from processor import CONFIG
 
+# DrissionPage 已随 wechat_uploader 加载；此处模块级导入便于 mock 与复用
+from DrissionPage import ChromiumPage, ChromiumOptions
+
 class UploadManager:
     """上传队列管理器"""
     
@@ -613,45 +616,93 @@ class UploadManager:
         finally:
             self.prechecking = False
 
+    @staticmethod
+    def _page_is_alive(page) -> bool:
+        """DrissionPage 页面存活探测：CDP Page.getLayoutMetrics 成功即存活。
+
+        用户手动关掉 Chrome 窗口（点 X）后，draft_pages 里残留的 page 对象
+        并不自动移除——它仍在字典里，但底层连接已断。用 states.is_alive
+        （捕获 PageDisconnectedError 返回 False）识别死页面。
+        """
+        if page is None:
+            return False
+        try:
+            return bool(page.states.is_alive)
+        except Exception:
+            return False
+
+    def _open_draft_box_browser(self, account: str) -> 'ChromiumPage':
+        """新建草稿箱浏览器（headed，复用上传登录态）。
+
+        手动关窗后旧 Chrome 进程可能还在释放 profile 锁，立即重开会撞锁；
+        短重试几次。返回的页面对象须由调用方管理。
+        """
+        from wechat_uploader import WeChatChannelsUploader
+
+        uploader = WeChatChannelsUploader(account)
+        user_data_path = uploader.user_data_path
+        os.makedirs(user_data_path, exist_ok=True)
+
+        co = ChromiumOptions()
+        co.set_paths(user_data_path=user_data_path)
+        co.set_argument('--disable-blink-features=AutomationControlled')
+
+        last_err = None
+        # DrissionPage 构造期存在 _dl_mgr 竞态（冷启动连接完成得比 __init__
+        # 赋 _dl_mgr 更快，访问到未赋值属性）；失败尝试留下的浏览器进程会被
+        # 后续 ChromiumPage(co) 复用（同一 debug 端口自动接管），一旦浏览器
+        # 完全就绪即成功。给足冷启动窗口：5 次 × 3s。
+        for attempt in range(5):
+            try:
+                page = ChromiumPage(co)
+                page.get('https://channels.weixin.qq.com/platform/post/draftListManager')
+                return page
+            except Exception as e:
+                last_err = e
+                self._log('warning',
+                          f'{account} 打开草稿箱第 {attempt + 1} 次失败：{e}，'
+                          f'等待浏览器就绪/释放 profile 锁...')
+                time.sleep(3)
+        raise last_err if last_err else RuntimeError('打开草稿箱失败')
+
     def open_draft_box(self, account: str) -> Dict:
-        """打开草稿箱浏览器窗口（复用上传时的登录态）"""
+        """打开草稿箱浏览器窗口（复用上传时的登录态）。
+
+        支持多次打开：若旧页面已死（用户手动关窗/崩溃），自动清理并重开，
+        而不是残留死页面导致后续点击返回「已打开」但实际无窗口。
+        """
         if account in self.draft_pages:
-            return {'status': 'success', 'message': f'{account} 草稿箱已打开'}
-        
+            page = self.draft_pages[account]
+            if self._page_is_alive(page):
+                return {'status': 'success', 'message': f'{account} 草稿箱已打开'}
+            # 旧页面已死，清理后重开
+            self.draft_pages.pop(account, None)
+            self._log('warning', f'{account} 草稿箱旧页面已失效，重新打开')
+
         # 检查是否正在上传（profile 锁互斥）
         if self.uploading and self.current_account == account:
             return {'status': 'failed', 'error': f'{account} 正在上传，请等上传完成后再打开草稿箱'}
-        
+
         try:
-            from DrissionPage import ChromiumPage, ChromiumOptions
-            from wechat_uploader import WeChatChannelsUploader
-            
-            uploader = WeChatChannelsUploader(account)
-            user_data_path = uploader.user_data_path
-            os.makedirs(user_data_path, exist_ok=True)
-            
-            co = ChromiumOptions()
-            co.set_paths(user_data_path=user_data_path)
-            co.set_argument('--disable-blink-features=AutomationControlled')
-            
-            page = ChromiumPage(co)
-            page.get('https://channels.weixin.qq.com/platform/post/draftListManager')
-            
+            page = self._open_draft_box_browser(account)
             self.draft_pages[account] = page
             self._log('info', f'{account} 草稿箱已打开')
             return {'status': 'success', 'message': f'{account} 草稿箱已打开，请在浏览器中编辑发布'}
         except Exception as e:
             self._log('error', f'打开草稿箱失败：{e}')
             return {'status': 'failed', 'error': str(e)}
-    
+
     def close_draft_box(self, account: str) -> Dict:
         """关闭草稿箱浏览器窗口"""
         if account not in self.draft_pages:
             return {'status': 'failed', 'error': f'{account} 草稿箱未打开'}
-        
+
         try:
             page = self.draft_pages.pop(account)
-            page.quit()
+            try:
+                page.quit()
+            except Exception as e:
+                self._log('warning', f'{account} 关闭草稿箱时页面已失效：{e}')
             self._log('info', f'{account} 草稿箱已关闭')
             return {'status': 'success', 'message': f'{account} 草稿箱已关闭'}
         except Exception as e:
@@ -659,8 +710,16 @@ class UploadManager:
             return {'status': 'failed', 'error': str(e)}
     
     def get_draft_status(self) -> Dict:
-        """获取草稿箱打开状态"""
-        return {'open_accounts': list(self.draft_pages.keys())}
+        """获取草稿箱打开状态（过滤已失效页面，反映真实窗口存在性）。"""
+        alive = []
+        for acct, page in list(self.draft_pages.items()):
+            if self._page_is_alive(page):
+                alive.append(acct)
+            else:
+                # 手动关窗/崩溃后残留的死页面：清理，让前端按钮回到「打开草稿箱」
+                self.draft_pages.pop(acct, None)
+                self._log('warning', f'{acct} 草稿箱页面已失效，从状态中移除')
+        return {'open_accounts': alive}
     
     def _execute_upload(self, task: Dict) -> bool:
         """执行单个上传任务 - 从 edl_config_v{version}.json 读取 AI 生成的文案"""
