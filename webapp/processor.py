@@ -2513,17 +2513,46 @@ class PipelineProcessor:
             self.logger.log('system', 'WARN', f'清理测试版本失败：{str(e)}')
     
     def _write_report(self, out_dir, drama_name, count, cut_method='未知'):
-        """写交付报告 - 从 edl_config_v{i}.json 读取实际文案"""
+        """写交付报告 - 从 edl_config_v{i}.json 读取实际文案
+
+        count 参数仅作参考；真实版本数以扫描 out_dir 里
+        edl_config_v*.json 的最大编号为准（与交付一致，可作 manifest）。
+        防止调用方传 0（如历史代码 best_videos 为空）导致报告空白，
+        而现场实际有成片/配置（千里远嫁有家难回、归乡检察官 10-25/26
+        曾出「共0条成片」空报告）。
+        """
         try:
+            # 真实版本数 = 现场 edl_config 最大编号（0 则回退 count 参数）
+            real_count = 0
+            try:
+                for f in os.listdir(out_dir):
+                    m = re.match(r'edl_config_v(\d+)\.json$', f)
+                    if m:
+                        real_count = max(real_count, int(m.group(1)))
+            except Exception:
+                pass
+            count = real_count if real_count > 0 else count
             # 扫描 out_dir 里实际存在的 mp4，建 V编号→文件名 映射，不再写死
+            # 新命名 {drama}_{n}_{主题}_去重版.mp4（_N_ 无大写V）；旧命名 {drama}_V{n}.mp4 兜底
             v_to_file = {}
             try:
                 for f in os.listdir(out_dir):
-                    m = re.search(r'V(\d+)', f)
-                    if m and f.endswith('.mp4') and 'test' not in f.lower():
+                    if not f.endswith('.mp4') or 'test' in f.lower():
+                        continue
+                    m = re.search(r'_(\d+)_[^_]*_去重版\.mp4$', f)
+                    if m:
                         v_to_file[int(m.group(1))] = f
+                    else:
+                        m = re.search(r'V(\d+)', f)
+                        if m:
+                            v_to_file[int(m.group(1))] = f
             except Exception:
                 pass
+            # 真实交付数以实际成片最大编号为准（连续场景=max=len；
+            # 非连续如捡来老公 1,2,3,5,7,8 → 8，缺失版本标注未产出；
+            # 成片数 0 才回退配置数/参数）
+            if len(v_to_file) > 0:
+                count = max(v_to_file.keys())
             report = f"""# {drama_name} 交付报告
 - 账号：{self.assign_account(drama_name)}
 - 切完时间：{datetime.now().strftime('%Y-%m-%d %H:%M')}
@@ -2560,21 +2589,25 @@ class PipelineProcessor:
                     else:
                         topics_str = f'#{topics}'
                     
-                    fname = v_to_file.get(i+1, f'{drama_name}_V{i+1}.mp4')
+                    fname = v_to_file.get(i+1)
+                    if fname is None:
+                        fname = f'（本版未产出）'
                     report += f"**标题：** {title}\n"
                     report += f"**描述：** {description}\n"
                     report += f"**话题：** {topics_str}\n"
                     report += f"**文件：** {fname}\n"
-                    report += f"**封面：** covers/{os.path.splitext(fname)[0]}_封面.jpg\n"
+                    report += f"**封面：** " + (f"covers/{os.path.splitext(fname)[0]}_封面.jpg" if fname != '（本版未产出）' else "（本版未产出）") + "\n"
                     
                 except Exception as e:
                     # 如果读取配置失败，使用默认值
-                    fname = v_to_file.get(i+1, f'{drama_name}_V{i+1}.mp4')
+                    fname = v_to_file.get(i+1)
+                    if fname is None:
+                        fname = f'（本版未产出）'
                     report += f"**标题：** 待补充\n"
                     report += f"**描述：** 待补充\n"
                     report += f"**话题：** #短剧 #短剧推荐 #追剧 #热门短剧 #好剧推荐\n"
                     report += f"**文件：** {fname}\n"
-                    report += f"**封面：** covers/{os.path.splitext(fname)[0]}_封面.jpg\n"
+                    report += f"**封面：** " + (f"covers/{os.path.splitext(fname)[0]}_封面.jpg" if fname != '（本版未产出）' else "（本版未产出）") + "\n"
                     self.logger.log('system', 'WARN', f'读取V{i+1}配置失败：{str(e)}')
             
             with open(os.path.join(out_dir, f"{drama_name}_交付报告.md"), "w", encoding="utf-8") as f:
