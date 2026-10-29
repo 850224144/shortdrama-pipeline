@@ -100,13 +100,19 @@ def probe_info(filepath):
 
 
 # ===== 预检查 =====
+# 容忍 EDL 生成端 round(,1) 四舍五入 + 浮点 + ASR/视频时长微差导致的边界误差
+# （如源文件真实 43.17s，片段结束点 round 后 43.2s，严格 > 会误判超界）。
+# 0.1s 覆盖舍入最大误差 0.05s 与转写时长微差；真实超界（差 > 0.1s）仍失败。
+_BOUNDARY_EPS = 0.1
+
+
 def validate_source(path, start, duration):
     if not os.path.exists(path):
         raise FileNotFoundError(f"源文件不存在: {path}")
     total = probe_duration(path)
     if start < 0:
         raise ValueError(f"起始时间不能为负: {start}")
-    if start + duration > total:
+    if start + duration > total + _BOUNDARY_EPS:
         raise ValueError(
             f"时间码 [{start:.1f}s - {start+duration:.1f}s] "
             f"超出源文件时长 {total:.1f}s ({os.path.basename(path)})"
@@ -344,6 +350,10 @@ def process_video(video, config, tmp_base):
             total = validate_source(src, seg["start"], seg["duration"])
             log(f"    [{i+1}] Ep{ep} [{seg['start']:.1f}s-{seg['start']+seg['duration']:.1f}s] / {total:.1f}s ✓")
         except Exception as e:
+            # 错误同时写 stderr，供上层 processor 日志显示（否则 stderr 为空，
+            # processor 的 'EDL渲染失败：{stderr[:200]}' 看不到真实原因）
+            import sys
+            print(f"验证失败: {e}", file=sys.stderr, flush=True)
             return {"id": vid, "kw": kw, "status": "FAILED", "detail": f"验证失败: {e}"}
 
     seg_files = []
@@ -475,7 +485,7 @@ def main():
                 continue
             try:
                 total = probe_duration(src)
-                if seg["start"] + seg["duration"] > total:
+                if seg["start"] + seg["duration"] > total + _BOUNDARY_EPS:
                     time_errors.append(
                         f"V{v['id']}/Ep{ep}: [{seg['start']:.1f}s-{seg['start']+seg['duration']:.1f}s] > {total:.1f}s"
                     )
