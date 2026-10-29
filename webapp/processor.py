@@ -1650,9 +1650,31 @@ class PipelineProcessor:
         keywords = ["逆袭", "打脸", "真相", "反转", "高潮", "泪目"]
         videos = []
         
+        # 导演/编剧弧线方案：每版独立主线（不同开头集/切入角度/叙事顺序），
+        # 解决 V1-V8 用同一段素材、开头雷同。GLM 失败回退默认方案（top-N 高分集
+        # 轮换开头），不阻塞版本生成。
+        edl_plan = None
+        if use_reverse:
+            try:
+                eps_hl = self._load_episode_highlights(edl_eps, drama_name=drama_name)
+                edl_plan = self._analyze_drama_arc(eps_hl, min(count, len(ep_nums)),
+                                                   drama_name=drama_name)
+                if edl_plan:
+                    self.logger.log(
+                        drama_name, 'INFO',
+                        f'导演方案就绪：{len(edl_plan)}版，'
+                        f'开头集 {[v["opening_ep"] for v in edl_plan]}，'
+                        f'角度 {[v["angle"] for v in edl_plan]}')
+            except Exception as e:
+                self.logger.log(drama_name, 'WARN',
+                                f'导演方案生成异常，走关键词轮换：{e}')
+                edl_plan = None
+        
         for v_idx in range(min(count, len(ep_nums))):
             # 使用AI生成文案
-            hook = keywords[v_idx % len(keywords)]
+            hook = (edl_plan[v_idx]['angle']
+                    if (edl_plan and v_idx < len(edl_plan))
+                    else keywords[v_idx % len(keywords)])
             # 把ASR抽出的真实金句喂给AI，不再编假plot_summary
             quote = long_titles[v_idx % len(long_titles)] if long_titles else ''
             try:
@@ -1706,7 +1728,8 @@ class PipelineProcessor:
             # 根据倒叙或随机生成segments
             if use_reverse:
                 segments = self._generate_reverse_segments(edl_eps, v_idx,
-                                                           drama_name=drama_name)
+                                                           drama_name=drama_name,
+                                                           plan=edl_plan)
             else:
                 segments = self._generate_random_segments(edl_eps, v_idx)
             
@@ -1737,7 +1760,9 @@ class PipelineProcessor:
             # 交付文件名的安全剧名（与 render_generic 一致：全角/半角逗号、空格 → _）
             drama_safe = drama_name.replace('，', '_').replace(',', '_').replace(' ', '_')
             # 钩子关键词（与 config videos[0].hook_keyword 一致）
-            kw = keywords[v_idx % len(keywords)]
+            kw = (edl_plan[v_idx]['angle']
+                  if (edl_plan and v_idx < len(edl_plan))
+                  else keywords[v_idx % len(keywords)])
             artifacts = {
                 "video_path": os.path.join(out_dir, f'{drama_safe}_{v_idx+1}_{kw}_去重版.mp4'),
                 # _generate_cover 用原始剧名写 covers/{剧名}_{版本}_封面.jpg
@@ -1755,7 +1780,9 @@ class PipelineProcessor:
                 "videos": [
                     {
                         "id": v_idx + 1,
-                        "hook_keyword": keywords[v_idx % len(keywords)],
+                        "hook_keyword": (edl_plan[v_idx]['angle']
+                                         if (edl_plan and v_idx < len(edl_plan))
+                                         else keywords[v_idx % len(keywords)]),
                         "title": titles[v_idx % len(titles)],
                         "description": descriptions[v_idx % len(descriptions)],
                         "hashtags": hashtags_list[v_idx % len(hashtags_list)],
@@ -1879,11 +1906,15 @@ class PipelineProcessor:
     # 「输出时间窗 + 分数 + 理由」，理由必须可审计。score 用整数便于跨集比较。
     _HIGHLIGHT_PROMPT = (
         "你是短剧高光剪辑师。下面是《{drama}》第{ep}集的台词转写（带时间轴）。\n"
-        "判断这一集值不值得被剪进 2-4 分钟的推广成片。\n\n"
+        "判断这一集值不值得被剪进 2-4 分钟的推广成片，并给出这一集里最值得剪的"
+        "1-3 个互不重叠的高光窗口。\n\n"
         "台词（[起-止] 秒）：\n{lines}\n\n"
         "只输出一个 JSON 对象，不要解释、不要 markdown 代码块：\n"
-        '{{"score": 0到10的整数, "reason": "不超过40字，说清这一集真实发生了什么", '
-        '"start": 窗口起点秒, "end": 窗口终点秒, "hook_type": "类型"}}\n\n'
+        '{{"windows": ['
+        '{{"score": 0到10的整数, "reason": "不超过40字，说清这个窗口真实发生了什么", '
+        '"start": 窗口起点秒, "end": 窗口终点秒, "hook_type": "类型"}}, '
+        '{{"score": 0到10的整数, "reason": "不超过40字", '
+        '"start": 窗口起点秒, "end": 窗口终点秒, "hook_type": "类型"}}]}}\n\n'
         "评分标准：\n"
         "9-10 强烈冲突爆发或关键反转，能当开头钩子\n"
         "7-8  明确冲突或对峙\n"
@@ -1891,10 +1922,36 @@ class PipelineProcessor:
         "3-4  过渡铺垫\n"
         "0-2  平淡无冲突，不值得剪\n\n"
         "要求：\n"
+        "- windows 是数组，按 score 从高到低排序，最多 3 个；同一集内各窗口"
+        "必须互不重叠（间隔 ≥5s），各自覆盖完整一轮冲突\n"
+        "- 只有 1 个爆点就只给 1 个；没有可剪的就给空数组 windows: []\n"
         "- hook_type 只能是：逆袭、打脸、真相、反转、高潮、泪目、平淡 七选一\n"
-        "- start/end 必须落在台词时间范围内，窗口 12 到 40 秒，尽量覆盖完整一轮冲突\n"
+        "- start/end 必须落在台词时间范围内，窗口 12 到 40 秒\n"
         "- reason 只描述台词里真实发生的事，不要脑补剧情\n"
         "- 没冲突就老实给低分，不要为了好看而拔高"
+    )
+
+    # 导演/编剧弧线方案提示词：读各集高光摘要 → 设计 count 个差异化叙事版本。
+    # 每版独立主线：不同 opening_ep（开头钩子集）+ 不同切入角度 + 不同叙事顺序，
+    # 保证版本间开头/素材/结构都不相同（解决 V1-V8 用同一段素材、开头雷同）。
+    _ARC_PROMPT = (
+        "你是短剧导演兼编剧。下面是《{drama}》各集的高光摘要（集号：分数/类型/剧情）。\n"
+        "请理解整个故事的主线结构（起因→冲突→升级→真相→高潮→结局），"
+        "并设计 {count} 个叙事上相互独立的版本方案。\n\n"
+        "集摘要：\n{eps_summary}\n\n"
+        "只输出一个 JSON 对象，不要解释、不要 markdown 代码块：\n"
+        '{{"versions": ['
+        '{{"opening_ep": 集号, "angle": "切入角度", "order_type": "类型"}}, '
+        '{{"opening_ep": 集号, "angle": "切入角度", "order_type": "类型"}}]}}\n\n'
+        "要求：\n"
+        "- versions 是数组，长度 {count}，每版一个，叙事上彼此独立\n"
+        "- 每版 opening_ep 必须不同（不同集做开头钩子 → 开头差异化）\n"
+        "- opening_ep 优先选高光分 ≥7 的爆点集（真相/高潮/反转/打脸集），别选平淡集\n"
+        "- angle 是这一版的叙事切入角度：逆袭/打脸/真相/反转/高潮/泪目 之一，\n"
+        "  与 opening_ep 的剧情类型一致（决定这一版讲哪条故事线）\n"
+        "- order_type 只能是：reverse（开头钩子→闪回前因→顺叙到结局）、\n"
+        "  flashback（开头钩子→前因闪回→顺叙）、forward（顺叙全片）之一\n"
+        "- 每版叙事必须连贯（先钩子后因果，别跨时间线乱跳）\n"
     )
 
     def _keyword_cands(self, raw, ep_dur):
@@ -1936,7 +1993,11 @@ class PipelineProcessor:
         return cands
 
     def _score_episode_llm(self, ai, drama_name, ep_num, raw, ep_dur):
-        """LLM 给单集打高光分；失败返回 None，由调用方回退关键词。"""
+        """LLM 给单集打高光分，返回 1-3 个互不重叠候选窗口（按 score 降序）。
+
+        候选窗口用于版本差异化：V1 取候选0、V2 取候选1……避免所有版本
+        用同一个高光段。LLM 无效返回 []，由调用方回退关键词。
+        """
         lines = "\n".join(
             f"[{float(s.get('start', 0)):.1f}-{float(s.get('end', 0)):.1f}] "
             f"{s.get('text', '')}" for s in raw)
@@ -1945,45 +2006,55 @@ class PipelineProcessor:
         content = ai.chat_json(self._HIGHLIGHT_PROMPT.format(
             drama=drama_name or "", ep=ep_num, lines=lines))
         if not content:
-            return None
+            return []
         try:
             data = json.loads(content)
         except json.JSONDecodeError:
             # LLM 偶尔多嘴包一层文本，尽力抢救第一个 {...}
             i, j = content.find('{'), content.rfind('}')
             if i < 0 or j <= i:
-                return None
+                return []
             try:
                 data = json.loads(content[i:j + 1])
             except json.JSONDecodeError:
-                return None
-        try:
-            score = max(0, min(10, int(round(float(data['score'])))))
-            start = float(data['start'])
-            end = float(data['end'])
-        except (KeyError, TypeError, ValueError):
-            return None
-        # 窗口必须落在本集时间轴内，否则 LLM 在编时间码
-        if not (0 <= start < end <= ep_dur + 0.5):
-            return None
-        # LLM 常按精确台词边界给短窗口（5-9s）。短是它判断得准，不该丢弃——
-        # 往外扩到至少 12s（前铺垫+后反应），扩不动才放弃。
-        MIN_WIN = 12.0
-        need = MIN_WIN - (end - start)
-        if need > 0:
-            add_l = min(need, start)
-            add_r = min(need - add_l, max(0.0, ep_dur - end))
-            start -= add_l
-            end += add_r
-        if end - start < 8.0:      # 整集都不到 8s，没法剪
-            return None
-        return {
-            "score": score,
-            "reason": str(data.get("reason", ""))[:60],
-            "start": round(start, 1),
-            "end": round(end, 1),
-            "hook_type": str(data.get("hook_type", "高潮"))[:4],
-        }
+                return []
+        # 兼容旧格式：LLM 返回单窗口 {score,...} 而非 {windows:[...]}
+        if isinstance(data, dict) and 'score' in data and 'start' in data:
+            data = {'windows': [data]}
+        windows = data.get('windows') if isinstance(data, dict) else None
+        if not isinstance(windows, list) or not windows:
+            return []
+        cands = []
+        for w in windows[:3]:
+            try:
+                score = max(0, min(10, int(round(float(w['score'])))))
+                start = float(w['start'])
+                end = float(w['end'])
+            except (KeyError, TypeError, ValueError):
+                continue
+            # 窗口必须落在本集时间轴内，否则 LLM 在编时间码
+            if not (0 <= start < end <= ep_dur + 0.5):
+                continue
+            # LLM 常按精确台词边界给短窗口（5-9s）。短是它判断得准，不该丢弃——
+            # 往外扩到至少 12s（前铺垫+后反应），扩不动才放弃。
+            MIN_WIN = 12.0
+            need = MIN_WIN - (end - start)
+            if need > 0:
+                add_l = min(need, start)
+                add_r = min(need - add_l, max(0.0, ep_dur - end))
+                start -= add_l
+                end += add_r
+            if end - start < 8.0:      # 整集都不到 8s，没法剪
+                continue
+            cands.append({
+                "score": score,
+                "reason": str(w.get("reason", ""))[:60],
+                "start": round(start, 1),
+                "end": round(end, 1),
+                "hook_type": str(w.get("hook_type", "高潮"))[:4],
+            })
+        cands.sort(key=lambda c: -c["score"])
+        return cands
 
     def _save_highlight_cache(self, cache_path, scores):
         """高光打分结果落盘，按剧缓存。重跑不重复调用 API。"""
@@ -2017,7 +2088,8 @@ class PipelineProcessor:
                     disk = json.load(f)
                 if isinstance(disk, dict):
                     cached = {int(k): v for k, v in disk.items()
-                              if isinstance(v, dict) and 'score' in v}
+                              if isinstance(v, dict)
+                              and ('score' in v or 'cands' in v)}
             except Exception:
                 pass
 
@@ -2051,16 +2123,16 @@ class PipelineProcessor:
             if ai.enabled:
                 hits = 0
                 for ep_num, ep_file, raw, ep_dur in todo:
-                    res = self._score_episode_llm(ai, drama_name, ep_num, raw, ep_dur)
-                    if res:
-                        res = dict(res, src="llm")
-                        cached[ep_num] = res
+                    cands = self._score_episode_llm(ai, drama_name, ep_num, raw, ep_dur)
+                    if cands:
+                        cached[ep_num] = {"cands": cands, "src": "llm"}
                         hits += 1
+                        top = cands[0]
                         self.logger.log(
                             'system', 'INFO',
-                            f'高光打分 第{ep_num}集：{res["score"]}分 '
-                            f'[{res["hook_type"]}] {res["start"]}-{res["end"]}s '
-                            f'｜ {res["reason"]}')
+                            f'高光打分 第{ep_num}集：{top["score"]}分 '
+                            f'[{top["hook_type"]}] {top["start"]}-{top["end"]}s '
+                            f'｜ {top["reason"]}（{len(cands)}候选）')
                     else:
                         self.logger.log(
                             'system', 'WARN',
@@ -2076,20 +2148,39 @@ class PipelineProcessor:
             self.logger.log('system', 'INFO',
                             f'高光打分：{len(eps_data)} 集全部命中缓存，不调用 API')
 
-        # 4) 组装候选窗口
+        # 4) 组装候选窗口（每集 1-N 个：LLM 多候选，版本轮换用；关键词兜底）
         out = []
         for ep_num, ep_file, raw, ep_dur in eps_data:
             s = cached.get(ep_num)
             cands = []
             if s:
-                # LLM 给的是绝对窗口，外扩一点前后文再夹进本集时长
-                start = max(0.0, s["start"] - 1.5)
-                dur = min(s["end"] - start + 3.0, ep_dur - start)
-                if dur >= 12.0:
-                    cands = [{"score": s["score"], "start": round(start, 1),
-                              "dur": round(dur, 1), "src": s.get("src", "llm"),
-                              "hook_type": s.get("hook_type", ""),
-                              "reason": s.get("reason", "")}]
+                if isinstance(s, dict) and isinstance(s.get('cands'), list):
+                    raw_cands = [c for c in s['cands']
+                                 if isinstance(c, dict) and 'score' in c]
+                    src = s.get('src', 'llm')
+                elif isinstance(s, dict) and 'score' in s:
+                    raw_cands = [s]      # 旧单候选缓存兼容
+                    src = s.get('src', 'llm')
+                else:
+                    raw_cands = []
+                    src = 'llm'
+                for c in raw_cands:
+                    if 'dur' in c:                       # 关键词格式
+                        st = c.get('start', 0.0)
+                        dur = c['dur']
+                    elif 'end' in c and 'start' in c:    # LLM 格式
+                        st = c['start']
+                        dur = c['end'] - c['start']
+                    else:
+                        continue
+                    dur = min(dur, max(0.0, ep_dur - st))
+                    if dur < 8.0:
+                        continue
+                    cands.append({"score": c['score'], "start": round(st, 1),
+                                  "dur": round(dur, 1),
+                                  "src": c.get('src', src),
+                                  "hook_type": c.get("hook_type", ""),
+                                  "reason": c.get("reason", "")})
             if not cands:
                 cands = self._keyword_cands(raw, ep_dur)
             if cands:
@@ -2097,13 +2188,149 @@ class PipelineProcessor:
                             "dur": ep_dur, "cands": cands})
         return out
 
-    def _generate_reverse_segments(self, edl_eps, v_idx, drama_name=None):
-        """倒叙结构：开头上钩子，随后按集号逆序铺开每集的高能窗口。
+    def _analyze_drama_arc(self, eps_hl, count, drama_name=None):
+        """导演/编剧 GLM：读各集高光摘要 → 设计 count 个差异化叙事版本方案。
+
+        返回 versions 列表，每项 {opening_ep, angle, order_type}：
+        - opening_ep：本版开头钩子所在集（不同版不同集 → 开头差异化）
+        - angle：本版叙事切入角度（逆袭/打脸/真相/反转/高潮/泪目）
+        - order_type：叙事顺序（reverse/flashback/forward）
+
+        GLM 失败或未配置 → 默认方案（按高光分降序 top-count 集轮换做开头，
+        angle 取该集 hook_type，order_type=reverse），保证版本仍差异化开出。
+        按剧缓存 <src>/transcribe/arc_plan.json（第二版起 0 API）。
+        """
+        if not eps_hl:
+            return []
+
+        def default_plan():
+            ordered = sorted(eps_hl, key=lambda e: -e['cands'][0]['score'])
+            versions = []
+            for i in range(min(count, len(ordered))):
+                c = ordered[i]['cands'][0]
+                versions.append({
+                    "opening_ep": ordered[i]['episode'],
+                    "angle": c.get('hook_type') or '高潮',
+                    "order_type": 'reverse',
+                })
+            return versions
+
+        cache_path = os.path.join(
+            os.path.dirname(os.path.abspath(eps_hl[0].get('path', ''))),
+            'transcribe', 'arc_plan.json')
+        try:
+            if os.path.exists(cache_path):
+                with open(cache_path, 'r', encoding='utf-8') as f:
+                    disk = json.load(f)
+                if isinstance(disk, dict) and isinstance(disk.get('versions'), list):
+                    cached = self._validate_arc_plan(disk, eps_hl, count)
+                    if cached and len(cached) >= count:
+                        return cached[:count]
+        except Exception:
+            pass
+
+        ai = AICopyGenerator()
+        if not ai.enabled:
+            return default_plan()
+        eps_summary = "\n".join(
+            f"第{e['episode']}集：{e['cands'][0]['score']}分 "
+            f"[{e['cands'][0].get('hook_type', '')}] "
+            f"{e['cands'][0].get('reason', '')}"
+            for e in eps_hl)
+        if len(eps_summary) > 4000:
+            eps_summary = eps_summary[:4000]
+        try:
+            content = ai.chat_json(self._ARC_PROMPT.format(
+                drama=drama_name or "", count=count, eps_summary=eps_summary))
+            if content:
+                try:
+                    data = json.loads(content)
+                except json.JSONDecodeError:
+                    i, j = content.find('{'), content.rfind('}')
+                    if i < 0 or j <= i:
+                        data = None
+                    else:
+                        try:
+                            data = json.loads(content[i:j + 1])
+                        except json.JSONDecodeError:
+                            data = None
+                versions = self._validate_arc_plan(data, eps_hl, count)
+                if versions and len(versions) >= count:
+                    try:
+                        os.makedirs(os.path.dirname(cache_path), exist_ok=True)
+                        tmp = cache_path + ".tmp"
+                        with open(tmp, 'w', encoding='utf-8') as f:
+                            json.dump({'versions': versions}, f,
+                                      ensure_ascii=False, indent=1)
+                        os.replace(tmp, cache_path)
+                    except Exception:
+                        pass
+                    self.logger.log(
+                        'system', 'INFO',
+                        f'导演弧线方案生成：{len(versions)}版 '
+                        f'（开头集 {[v["opening_ep"] for v in versions]}）')
+                    return versions
+        except Exception as e:
+            self.logger.log('system', 'WARN',
+                            f'导演弧线方案 GLM 失败，走默认方案：{e}')
+        return default_plan()
+
+    def _validate_arc_plan(self, data, eps_hl, count):
+        """校验 GLM 弧线方案：opening_ep 必须互不相同、在有效集内、angle/order_type 合法。"""
+        if not isinstance(data, dict) or not isinstance(data.get('versions'), list):
+            return None
+        valid_eps = {e['episode'] for e in eps_hl}
+        angles = {'逆袭', '打脸', '真相', '反转', '高潮', '泪目', '平淡'}
+        orders = {'reverse', 'flashback', 'forward'}
+        versions = []
+        used = set()
+        for v in data['versions'][:count]:
+            if not isinstance(v, dict):
+                continue
+            try:
+                ep = int(v['opening_ep'])
+            except (KeyError, TypeError, ValueError):
+                continue
+            if ep not in valid_eps or ep in used:
+                continue
+            angle = str(v.get('angle') or '')
+            if angle not in angles:
+                angle = '高潮'
+            order_type = str(v.get('order_type') or 'reverse')
+            if order_type not in orders:
+                order_type = 'reverse'
+            versions.append({'opening_ep': ep, 'angle': angle,
+                             'order_type': order_type})
+            used.add(ep)
+        return versions if len(versions) >= count else None
+
+    def _build_arc_order(self, eps_hl, opening_ep, order_type='reverse'):
+        """按导演方案生成叙事集序列（钩子集在前，其余按因果/时间顺序）。
+
+        保证剧情连贯不跳戏：钩子集 → 前因集（<opening，倒序闪回，近因到远因）
+        → 后果集（>opening，顺叙到结局）。forward 则钩子 + 全时间顺序。
+        """
+        eps = sorted(e['episode'] for e in eps_hl)
+        if not eps:
+            return []
+        head = [opening_ep] if opening_ep in eps else []
+        rest = [e for e in eps if e != opening_ep]
+        before = sorted([e for e in rest if e < opening_ep])
+        after = sorted([e for e in rest if e > opening_ep])
+        if order_type == 'forward':
+            return head + before + after
+        return head + list(reversed(before)) + after
+
+    def _generate_reverse_segments(self, edl_eps, v_idx, drama_name=None, plan=None):
+        """倒叙结构：开头上钩子，随后按叙事顺序铺开每集的高能窗口。
 
         高能点主路径是 LLM 逐集打分（带理由，落日志可审计），关键词兜底。
-        开头的选型取业界标准与倒叙结构折中：业界（DramaClip 片头解说、字节
-        WithOpeningHook）是「最炸场面前置」；但结局那集本身够炸时，锁最后一集
-        倒叙感更强。所以：结局集分数 >= 全局最高的 70% 就锁结局集，否则用最炸。
+
+        plan（导演方案）驱动版本差异化：
+        - 开头钩子 = plan[v_idx].opening_ep 所在集（不同版不同集 → 开头不同）
+        - 该集候选轮换 = cands[v_idx % len(cands)]（不同版不同候选段）
+        - 叙事顺序 = _build_arc_order（钩子→前因闪回→顺叙结局，剧情连贯不跳戏）
+        无 plan 回退原逻辑（全局最高分钩子 + 集号逆序）。
         """
         eps_hl = self._load_episode_highlights(edl_eps, drama_name=drama_name)
         if not eps_hl:
@@ -2127,37 +2354,71 @@ class PipelineProcessor:
             })
             return True
 
-        # 1. 开头钩子。只在同一打分体系内比较（LLM 0-10 分与关键词 2-14 分不同量纲）
-        pool = [e for e in eps_hl if e["cands"][0].get("src") == "llm"] or eps_hl
-        best = max(pool, key=lambda e: e["cands"][0]["score"])
-        last_ep = max(e["episode"] for e in eps_hl)
-        last = next((e for e in eps_hl if e["episode"] == last_ep), None)
-        opening, ratio = best, 0.0
-        if (last is not None and last["cands"][0].get("src") == "llm"
-                and best["cands"][0]["score"] > 0):
-            ratio = last["cands"][0]["score"] / best["cands"][0]["score"]
-            if ratio >= 0.7:
-                opening = last
-        oc = opening["cands"][0]
-        self.logger.log(
-            'system', 'INFO',
-            f'开头钩子：第{opening["episode"]}集 {oc["score"]}分 '
-            f'[{oc.get("hook_type", "")}] {oc.get("reason", "")}'
-            f'（结局集/全局最高 = {ratio:.0%}，{"锁结局" if opening is last else "用最炸"}）')
+        # 1. 开头钩子。优先取导演方案指定的 opening_ep（版本差异化）；
+        #    无方案回退原逻辑（结局集 ≥ 全局最高 70% 锁结局，否则用最炸）。
+        vplan = plan[v_idx] if (plan and v_idx < len(plan)) else None
+        opening = None
+        if vplan:
+            opening = next(
+                (e for e in eps_hl if e["episode"] == vplan["opening_ep"]), None)
+        if opening is None:
+            pool = [e for e in eps_hl if e["cands"][0].get("src") == "llm"] or eps_hl
+            best = max(pool, key=lambda e: e["cands"][0]["score"])
+            last_ep = max(e["episode"] for e in eps_hl)
+            last = next((e for e in eps_hl if e["episode"] == last_ep), None)
+            opening, ratio = best, 0.0
+            if (last is not None and last["cands"][0].get("src") == "llm"
+                    and best["cands"][0]["score"] > 0):
+                ratio = last["cands"][0]["score"] / best["cands"][0]["score"]
+                if ratio >= 0.7:
+                    opening = last
+        # 候选轮换：不同版本取不同候选段（V1 候选0、V2 候选1…）
+        oc = opening["cands"][v_idx % len(opening["cands"])]
+        if vplan:
+            self.logger.log(
+                'system', 'INFO',
+                f'开头钩子：第{opening["episode"]}集 {oc["score"]}分 '
+                f'[{oc.get("hook_type", "")}] {oc.get("reason", "")}'
+                f'（方案v{v_idx + 1} {vplan["angle"]}，候选{v_idx % len(opening["cands"]) + 1}）')
+        else:
+            self.logger.log(
+                'system', 'INFO',
+                f'开头钩子：第{opening["episode"]}集 {oc["score"]}分 '
+                f'[{oc.get("hook_type", "")}] {oc.get("reason", "")}')
         add(opening["episode"], oc["start"], oc["dur"])
 
-        # 2. 按集号逆序铺开，每集取该集未被占用的高能窗口
+        # 2. 叙事顺序：导演方案 order_type（钩子→前因闪回→顺叙结局）；
+        #    无方案回退集号逆序（原逻辑）。
         used = {(opening["episode"], oc["start"])}
-        for e in sorted(eps_hl, key=lambda x: -x["episode"]):
+        if vplan:
+            order = self._build_arc_order(eps_hl, opening["episode"],
+                                          vplan.get('order_type', 'reverse'))
+        else:
+            order = [e["episode"] for e in
+                     sorted(eps_hl, key=lambda x: -x["episode"])]
+        for e_num in order:
+            if e_num == opening["episode"]:
+                continue
             if self._seg_budget_left(segments) <= self.MIN_SEG_DUR:
                 break
-            for c in e["cands"]:
-                key = (e["episode"], c["start"])
-                if key in used:
+            e = next((x for x in eps_hl if x["episode"] == e_num), None)
+            if e is None or not e["cands"]:
+                continue
+            # 每集候选轮换：v_idx 偏移取该集候选，被占则顺延下一个未用候选
+            cands = e["cands"]
+            c = cands[v_idx % len(cands)]
+            if (e_num, c["start"]) in used:
+                picked = None
+                for c2 in cands:
+                    if (e_num, c2["start"]) not in used:
+                        picked = c2
+                        break
+                if picked is None:
                     continue
-                used.add(key)
-                if add(e["episode"], c["start"], c["dur"]):
-                    break
+                c = picked
+            used.add((e_num, c["start"]))
+            if add(e_num, c["start"], c["dur"]):
+                continue
 
         return segments
 
