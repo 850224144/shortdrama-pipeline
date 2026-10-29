@@ -80,7 +80,7 @@ class BatchCutManager:
         self.cut_thread = None
         self.logs = []
     
-    def add_to_queue(self, drama_name, account='小桃追剧中'):
+    def add_to_queue(self, drama_name, account='小桃追剧中', resume=False):
         """添加切片任务到队列"""
         with self.lock:
             # 检查是否已在队列中
@@ -92,11 +92,12 @@ class BatchCutManager:
                 'id': len(self.queue) + 1,
                 'drama_name': drama_name,
                 'account': account,
+                'resume': bool(resume),
                 'status': 'pending',
                 'created_at': datetime.now().strftime('%Y-%m-%d %H:%M:%S')
             }
             self.queue.append(task)
-            self._log('info', f'添加切片任务：{drama_name}')
+            self._log('info', f'添加切片任务：{drama_name}{"（续跑）" if resume else ""}')
             return {'status': 'success', 'id': task['id']}
     
     def start_cutting(self):
@@ -202,7 +203,8 @@ class BatchCutManager:
             
             # 执行切片
             try:
-                result = self.processor.manual_cut(task['drama_name'])
+                result = self.processor.manual_cut(task['drama_name'],
+                                                   resume=task.get('resume', False))
                 
                 if result['status'] == 'success':
                     task['status'] = 'completed'
@@ -875,6 +877,41 @@ def clear_cut_queue():
         data = request.get_json() or {}
         status = data.get('status', 'pending')
         result = batch_cut_manager.clear_queue(status)
+        
+        from flask import Response
+        import json
+        return Response(json.dumps(result, ensure_ascii=False), mimetype='application/json')
+    except Exception as e:
+        from flask import Response
+        import json
+        return Response(json.dumps({'status': 'failed', 'error': str(e)}, ensure_ascii=False), mimetype='application/json', status=500)
+
+@app.route('/api/cut/retry', methods=['POST'])
+def retry_cut_task():
+    """失败续跑：重新入队失败剧（只重渲染保留的 edl_config，不重新生成 EDL）。
+
+    与 /api/cut/add 的区别：add 走全量（重新 ASR + 生成 EDL），
+    retry 标记 resume=True，manual_cut 读 out_dir 保留的 edl_config_v*.json
+    直接重渲染；无保留 config 时自动回退全量重切。
+    用户可点「继续」重试失败任务，无需从头来。
+    """
+    try:
+        data = request.get_json() or {}
+        drama_name = data.get('drama_name')
+        account = data.get('account', '小桃追剧中')
+        
+        if not drama_name:
+            return jsonify({'status': 'failed', 'error': '缺少剧名'}), 400
+        
+        result = batch_cut_manager.add_to_queue(drama_name, account, resume=True)
+        # 自动开始（若未在切且入队成功）
+        if result.get('status') == 'success':
+            start = batch_cut_manager.start_cutting()
+            if start.get('status') != 'success':
+                result['started'] = False
+                result['start_error'] = start.get('error')
+            else:
+                result['started'] = True
         
         from flask import Response
         import json

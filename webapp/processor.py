@@ -6,6 +6,7 @@
 import os
 import re
 import json
+import glob
 import time
 import shutil
 import subprocess
@@ -535,8 +536,12 @@ class PipelineProcessor:
             with self.lock:
                 self.processing = False
     
-    def manual_cut(self, drama_name):
-        """手动切片 - 从素材目录直接切片"""
+    def manual_cut(self, drama_name, resume=False):
+        """手动切片 - 从素材目录直接切片
+
+        resume=True：失败续跑，只重渲染保留的 edl_config，不重新生成 EDL；
+        无保留 config 时自动回退全量重切。
+        """
         if not drama_name:
             return {'status': 'failed', 'error': '请输入剧名'}
 
@@ -584,7 +589,7 @@ class PipelineProcessor:
         }
         
         # 切片
-        result = self.cut_batch([download_result])
+        result = self.cut_batch([download_result], resume=resume)
         
         successful_cuts = [r for r in result if r['success']]
         failed_cuts = [r for r in result if not r['success']]
@@ -1203,14 +1208,14 @@ class PipelineProcessor:
             self.logger.log('system', 'WARN', f'清理渲染残留失败：{str(e)}')
         return removed
 
-    def cut_batch(self, downloads):
+    def cut_batch(self, downloads, resume=False):
         """批量切片"""
         results = []
         failed = []
         
         # 第一轮：处理所有
         for d in downloads:
-            result = self._cut_once(d)
+            result = self._cut_once(d, resume=resume)
             result['retried'] = False
             
             if result['success']:
@@ -1224,7 +1229,7 @@ class PipelineProcessor:
         for item in failed:
             d = item['download']
             self.logger.log('system', 'INFO', f'重试切片：{d.get("link_id", "未知")}')
-            result = self._cut_once(d)
+            result = self._cut_once(d, resume=resume)
             result['retried'] = True
             
             if result['success']:
@@ -1242,7 +1247,7 @@ class PipelineProcessor:
         
         return results
     
-    def _cut_once(self, download_result):
+    def _cut_once(self, download_result, resume=False):
         """单次切片"""
         # 从下载目录提取实际剧名
         drama_name = download_result.get('drama_name') or download_result.get('link_id', '')
@@ -1310,9 +1315,11 @@ class PipelineProcessor:
             # out_dir 里的旧 mp4 只可能是未过后处理的"假成品"：不清则
             # should_process 第三层会把重试误判为"已有成品"，收集按 _{n}_
             # 子串还会把旧件混进本次交付。
-            swept = self._clean_partial_outputs(out_dir)
+            # include_configs=False：保留历史 edl_config 作为续跑现场，
+            # 若本剧之前失败过，_re_render_from_configs 可直接续跑。
+            swept = self._clean_partial_outputs(out_dir, include_configs=False)
             if swept:
-                self.logger.log(drama_name, 'WARN', f'run开始清理：删除{swept}个历史残留渲染产物')
+                self.logger.log(drama_name, 'WARN', f'run开始清理：删除{swept}个历史残留渲染产物（保留EDL配置）')
             
             # 收集素材 - 使用新的list_episodes方法
             episodes = self.list_episodes(src_dir)
@@ -1323,30 +1330,47 @@ class PipelineProcessor:
             
             self.logger.log(drama_name, 'INFO', f'总集数：{ep_count}，计划生成{version_count}个版本')
             
-            # ASR转写
-            self._update_state('processing', drama_name, 10, 'ASR转写中')
-            transcript_path = self._run_asr(src_dir, drama_name)
-            short_titles, long_titles = self._extract_quotes(transcript_path, 10)
-            
-            # 全部素材交给 EDL 切片。
-            # AI 高光智剪已移除：它依赖火山引擎 mediakit-cli 的认证，项目未配置该 key，
-            # 每次运行都会白等一次 doctor + 最长 20 分钟任务轮询然后空转。
-            # 版本差异化由 EDL 的倒叙/随机结构 + 钩子主题 + ASR 高光台词保证。
-            edl_eps = all_eps
-            
-            self.logger.log(drama_name, 'INFO',
-                           f'EDL素材：{len(edl_eps)}集（全量）')
-            
-            # 随机选择切法：倒叙或随机
-            use_reverse = random.random() < 0.5
-            cut_method = '倒叙结构' if use_reverse else '随机结构'
-            self.logger.log(drama_name, 'INFO', f'使用切法：{cut_method}')
-            
-            # EDL手动切片（AI 高光已移除，ai_videos 恒为空，保留变量以兼容报告/状态字段）
-            ai_videos = []
-            edl_count = version_count
-            self._update_state('processing', drama_name, 30, 'EDL切片中')
-            edl_videos = self._generate_edl_versions(drama_name, src_dir, edl_eps, edl_count, out_dir, use_reverse, short_titles, long_titles)
+            # ASR转写（失败续跑时跳过：直接用保留的 edl_config 重渲染，不重新生成）
+            resume = bool(resume)
+            if resume:
+                ai_videos = []
+                self._update_state('processing', drama_name, 30, '续跑重渲染中')
+                edl_videos = self._re_render_from_configs(drama_name, out_dir)
+                if not edl_videos:
+                    # 无保留 config 或全部渲染失败 → 回退全量重切（重新生成 EDL）
+                    self.logger.log(drama_name, 'WARN',
+                                    '续跑无可用版本，回退全量重切（重新生成EDL）')
+                    resume = False
+            if not resume:
+                # 全量路径：ASR + 重新生成 EDL
+                self._update_state('processing', drama_name, 10, 'ASR转写中')
+                transcript_path = self._run_asr(src_dir, drama_name)
+                short_titles, long_titles = self._extract_quotes(transcript_path, 10)
+                
+                # 全部素材交给 EDL 切片。
+                # AI 高光智剪已移除：它依赖火山引擎 mediakit-cli 的认证，项目未配置该 key，
+                # 每次运行都会白等一次 doctor + 最长 20 分钟任务轮询然后空转。
+                # 版本差异化由 EDL 的倒叙/随机结构 + 钩子主题 + ASR 高光台词保证。
+                edl_eps = all_eps
+                
+                self.logger.log(drama_name, 'INFO',
+                               f'EDL素材：{len(edl_eps)}集（全量）')
+                
+                # 随机选择切法：倒叙或随机
+                use_reverse = random.random() < 0.5
+                cut_method = '倒叙结构' if use_reverse else '随机结构'
+                self.logger.log(drama_name, 'INFO', f'使用切法：{cut_method}')
+                
+                # EDL手动切片（AI 高光已移除，ai_videos 恒为空，保留变量以兼容报告/状态字段）
+                ai_videos = []
+                edl_count = version_count
+                self._update_state('processing', drama_name, 30, 'EDL切片中')
+                edl_videos = self._generate_edl_versions(drama_name, src_dir, edl_eps, edl_count, out_dir, use_reverse, short_titles, long_titles)
+            else:
+                use_reverse = False
+                cut_method = '续跑重渲染'
+                self.logger.log(drama_name, 'INFO',
+                                f'续跑重渲染完成：{len(edl_videos)}个版本（未重新生成EDL）')
             
             # 合并版本
             all_videos = ai_videos + edl_videos
@@ -1437,9 +1461,11 @@ class PipelineProcessor:
             # P1-A2：失败路径清掉本次 run 的渲染产物，瞬时故障不升级为永久卡死。
             # out_dir 是单剧目录且 run 开始时已清过，此刻的 mp4 全是本次渲染的
             # 未交付半成品；留着它们，重试会被"已有成品/已切完"闸门永久跳过。
-            swept = self._clean_partial_outputs(out_dir)
+            # include_configs=False：保留 edl_config_v*.json 作为失败现场，
+            # 供 _re_render_from_configs 续跑（失败可继续处理），不重新生成 EDL。
+            swept = self._clean_partial_outputs(out_dir, include_configs=False)
             if swept:
-                self.logger.log(drama_name, 'WARN', f'失败清理：已删除{swept}个未交付渲染产物')
+                self.logger.log(drama_name, 'WARN', f'失败清理：已删除{swept}个未交付渲染产物（保留EDL配置可续跑）')
             return {
                 'name': drama_name,
                 'success': False,
@@ -1749,35 +1775,83 @@ class PipelineProcessor:
             self.logger.log(drama_name, 'INFO', f'生成EDL配置V{v_idx+1}：{len(segments)}个片段，'
                                                  f'规划合计{sum(s["duration"] for s in segments):.0f}s')
             
-            # 调用render_generic.py
-            try:
-                result = subprocess.run(
-                    [sys.executable, os.path.join(CONFIG['scripts_dir'], "render_generic.py"), config_path],
-                    capture_output=True, text=True, encoding="utf-8", timeout=600,
-                    cwd=os.path.dirname(CONFIG['scripts_dir'])
-                )
-                
-                if result.returncode == 0:
-                    self.logger.log(drama_name, 'INFO', f'V{v_idx+1} EDL渲染成功')
-                    # 查找输出文件
-                    output_files = [f for f in os.listdir(out_dir) if f.endswith(".mp4") and f"_{v_idx+1}_" in f]
-                    for output_file in output_files:
-                        videos.append({
-                            'path': os.path.join(out_dir, output_file),
-                            'final_path': os.path.join(out_dir, output_file),
-                            'filename': output_file,
-                            'type': 'edl'
-                        })
-                        # 回写实际 video_path 到 artifacts（钩子可能与预判不同）
-                        self._update_config_artifacts(
-                            out_dir, v_idx + 1, 'video_path',
-                            os.path.join(out_dir, output_file))
-                else:
-                    self.logger.log(drama_name, 'ERROR', f'V{v_idx+1} EDL渲染失败：{result.stderr[:200]}')
-                    
-            except Exception as e:
-                self.logger.log(drama_name, 'ERROR', f'V{v_idx+1} EDL异常：{str(e)}')
+            # 调用render_generic.py（公共渲染方法，失败续跑也复用）
+            video = self._run_render_one(drama_name, out_dir, v_idx, config_path)
+            if video:
+                videos.append(video)
         
+        return videos
+    
+    def _run_render_one(self, drama_name, out_dir, v_idx, config_path):
+        """对单个 edl_config_v*.json 调 render_generic.py 渲染。
+
+        公共方法：_generate_edl_versions（全量生成）与 _re_render_from_configs
+        （失败续跑）共用，保证渲染/日志行为一致。
+
+        Returns: video dict（path/final_path/filename/type）或 None（失败）。
+        """
+        try:
+            result = subprocess.run(
+                [sys.executable, os.path.join(CONFIG['scripts_dir'], "render_generic.py"), config_path],
+                capture_output=True, text=True, encoding="utf-8", timeout=600,
+                cwd=os.path.dirname(CONFIG['scripts_dir'])
+            )
+
+            if result.returncode == 0:
+                self.logger.log(drama_name, 'INFO', f'V{v_idx+1} EDL渲染成功')
+                # 查找输出文件
+                output_files = [f for f in os.listdir(out_dir) if f.endswith(".mp4") and f"_{v_idx+1}_" in f]
+                video = None
+                for output_file in output_files:
+                    video = {
+                        'path': os.path.join(out_dir, output_file),
+                        'final_path': os.path.join(out_dir, output_file),
+                        'filename': output_file,
+                        'type': 'edl'
+                    }
+                    # 回写实际 video_path 到 artifacts（钩子可能与预判不同）
+                    self._update_config_artifacts(
+                        out_dir, v_idx + 1, 'video_path',
+                        os.path.join(out_dir, output_file))
+                return video
+            else:
+                self.logger.log(drama_name, 'ERROR', f'V{v_idx+1} EDL渲染失败：{result.stderr[:200]}')
+                return None
+
+        except Exception as e:
+            self.logger.log(drama_name, 'ERROR', f'V{v_idx+1} EDL异常：{str(e)}')
+            return None
+
+    def _re_render_from_configs(self, drama_name, out_dir):
+        """失败续跑：读 out_dir 里保留的 edl_config_v*.json，只重渲染，不重新生成 EDL。
+
+        前提：失败路径不再删除 edl_config（_clean_partial_outputs include_configs=False），
+        所以失败后现场完整保留，修复后可直接续跑，无需重新 ASR/EDL 生成。
+
+        Returns: videos 列表（与 _generate_edl_versions 相同格式），供
+        _select_best_videos / 后处理 / 交付复用。全部失败或无可续跑配置时返回空列表。
+        """
+        videos = []
+        config_paths = sorted(glob.glob(os.path.join(out_dir, 'edl_config_v*.json')))
+        if not config_paths:
+            self.logger.log(drama_name, 'WARN', '无保留的EDL配置可续跑（可能从未生成或已被旧清理删除）')
+            return videos
+
+        self.logger.log(drama_name, 'INFO', f'续跑：找到{len(config_paths)}个保留的EDL配置，开始重渲染')
+        for config_path in config_paths:
+            m = re.search(r'edl_config_v(\d+)\.json$', config_path)
+            v_idx = (int(m.group(1)) - 1) if m else len(videos)
+            try:
+                with open(config_path, encoding='utf-8') as f:
+                    edl_config = json.load(f)
+                seg_count = len(edl_config.get('videos', [{}])[0].get('segments', []))
+                self.logger.log(drama_name, 'INFO',
+                                f'续跑 V{v_idx+1}：{seg_count}个片段，配置 {os.path.basename(config_path)}')
+            except Exception as e:
+                self.logger.log(drama_name, 'WARN', f'续跑读取配置失败 {os.path.basename(config_path)}: {e}')
+            video = self._run_render_one(drama_name, out_dir, v_idx, config_path)
+            if video:
+                videos.append(video)
         return videos
     
     # 成片业务窗口 210-300s（见 _select_best_videos）。渲染会跑 atempo=1.05 轻微加速，
@@ -1961,8 +2035,12 @@ class PipelineProcessor:
                 continue
             if not isinstance(raw, list) or not raw:
                 continue
+            # ep_dur 用源文件真实时长（probe，与渲染端一致）而非转写 last end：
+            # 转写可能错位/异常（如某集只剩 2 段、end=59.98s 而源文件仅 36.6s），
+            # 用转写时长做 clamp 基准会让片段规划超源文件时长，渲染端 probe
+            # 校验必然失败（V6-V8 因此失败）。probe 失败才回退转写 last end。
             eps_data.append((self._get_episode_num(ep_file), ep_file, raw,
-                             max((float(s.get("end", 0)) for s in raw), default=0.0)))
+                             self._episode_real_duration(ep_file, raw)))
         if not eps_data:
             return []
 
@@ -2176,6 +2254,14 @@ class PipelineProcessor:
             return float(result.stdout.strip())
         except Exception:
             return 0
+
+    def _episode_real_duration(self, ep_file, raw):
+        """单集真实时长：probe 权威（与渲染端 render_generic 一致），
+        防止 EDL 规划超源文件时长；probe 失败回退转写 last end（保底不丢集）。"""
+        dur = self._get_video_duration(ep_file)
+        if dur > 0:
+            return dur
+        return max((float(s.get("end", 0)) for s in raw), default=0.0)
     
     def _post_process(self, input_path, output_path, src_dir=None, drama_name=None):
         """后处理 - 抗查重 + 四角循环水印"""
