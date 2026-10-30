@@ -1726,6 +1726,49 @@ class PipelineProcessor:
                 descriptions.append(f'{drama_name}精彩剧情，{hook}瞬间，不容错过！')
                 hashtags_list.append(["#短剧", "#短剧推荐", "#热门", f"#{hook}"])
         
+        # fail-fast ①源头预检：source_pattern 统一在循环外计算一次（所有版本共享同一源模式）。
+        # 递归扫描取样（素材可能只在嵌套子目录，如 BaiduPCS-Go 下载产物）
+        sample_files = [os.path.basename(f)
+                        for f in self._scan_files_recursive(src_dir)
+                        if f.endswith('.mp4')][:3]
+        if sample_files:
+            # 检查文件名格式
+            first_file = sample_files[0]
+            if "第" in first_file and "集" in first_file:
+                # 检查是否有空格
+                if " - " in first_file:
+                    source_pattern = "{name} - 第{ep}集.mp4"
+                elif "-" in first_file:
+                    source_pattern = "{name}-第{ep}集.mp4"
+                else:
+                    source_pattern = "{name}第{ep}集.mp4"
+            elif re.match(r'\d+\.mp4', first_file):
+                source_pattern = "{ep}.mp4"
+            elif re.search(r'[_-]\d+\.mp4$', first_file):
+                # 剧名-集号.mp4 / 剧名_集号.mp4（如 前夫你来迟了-36.mp4），
+                # 百度网盘下载最常见的命名。原逻辑漏识别落入 {ep}.mp4 fallback，
+                # 渲染端拼出裸名 36.mp4 → 源文件不存在 → 该剧全版本渲染失败。
+                sep = '-' if re.search(r'-\d+\.mp4$', first_file) else '_'
+                source_pattern = f"{{name}}{sep}{{ep}}.mp4"
+            else:
+                source_pattern = "{ep}.mp4"
+        else:
+            source_pattern = "{ep}.mp4"
+
+        # fail-fast ①：source_pattern 无法匹配任何实际源文件 = 系统性错误
+        # （所有版本必然失败，如命名格式漏识别/素材缺失），立即停止，不浪费在
+        # 必然失败的版本上。单文件偶发缺失不在此列（由循环内连续失败②兜底）。
+        precheck_err = self._precheck_source_pattern(src_dir, source_pattern, drama_name)
+        if precheck_err:
+            self.logger.log(drama_name, 'ERROR',
+                            f'源文件预检失败（系统性错误，停止全部版本）：{precheck_err}')
+            raise RuntimeError(
+                f'源文件模式不匹配（系统性错误）：{precheck_err}')
+
+        # fail-fast ②状态：连续同类别失败计数（≥2 同类失败 = 系统性错误，停止剩余版本）
+        consecutive_fail = 0
+        last_fail_cat = None
+
         for v_idx in range(min(count, len(ep_nums))):
             # 根据倒叙或随机生成segments
             if use_reverse:
@@ -1738,36 +1781,7 @@ class PipelineProcessor:
             if not segments:
                 continue
             
-            # 创建EDL配置 - 动态source_pattern
-            # 检测文件命名格式
-            # 递归扫描取样（素材可能只在嵌套子目录，如 BaiduPCS-Go 下载产物）
-            sample_files = [os.path.basename(f)
-                            for f in self._scan_files_recursive(src_dir)
-                            if f.endswith('.mp4')][:3]
-            if sample_files:
-                # 检查文件名格式
-                first_file = sample_files[0]
-                if "第" in first_file and "集" in first_file:
-                    # 检查是否有空格
-                    if " - " in first_file:
-                        source_pattern = "{name} - 第{ep}集.mp4"
-                    elif "-" in first_file:
-                        source_pattern = "{name}-第{ep}集.mp4"
-                    else:
-                        source_pattern = "{name}第{ep}集.mp4"
-                elif re.match(r'\d+\.mp4', first_file):
-                    source_pattern = "{ep}.mp4"
-                elif re.search(r'[_-]\d+\.mp4$', first_file):
-                    # 剧名-集号.mp4 / 剧名_集号.mp4（如 前夫你来迟了-36.mp4），
-                    # 百度网盘下载最常见的命名。原逻辑漏识别落入 {ep}.mp4 fallback，
-                    # 渲染端拼出裸名 36.mp4 → 源文件不存在 → 该剧全版本渲染失败。
-                    sep = '-' if re.search(r'-\d+\.mp4$', first_file) else '_'
-                    source_pattern = f"{{name}}{sep}{{ep}}.mp4"
-                else:
-                    source_pattern = "{ep}.mp4"
-            else:
-                source_pattern = "{ep}.mp4"
-            
+            # source_pattern 已在循环外统一计算（fail-fast ①，所有版本共享同一源模式）
             # 交付文件名的安全剧名（与 render_generic 一致：全角/半角逗号、空格 → _）
             drama_safe = drama_name.replace('，', '_').replace(',', '_').replace(' ', '_')
             # 钩子关键词（与 config videos[0].hook_keyword 一致）
@@ -1814,12 +1828,71 @@ class PipelineProcessor:
                                                  f'规划合计{sum(s["duration"] for s in segments):.0f}s')
             
             # 调用render_generic.py（公共渲染方法，失败续跑也复用）
-            video = self._run_render_one(drama_name, out_dir, v_idx, config_path)
+            video, fail_cat = self._run_render_one(drama_name, out_dir, v_idx, config_path)
             if video:
                 videos.append(video)
+                consecutive_fail = 0
+                last_fail_cat = None
+            else:
+                # fail-fast ②：连续同类别失败 = 系统性错误（源文件缺失/编码器故障等），
+                # 剩余版本必然同样失败，立即停止。不同类或单次失败视为偶发，继续。
+                if fail_cat and fail_cat == last_fail_cat:
+                    consecutive_fail += 1
+                else:
+                    consecutive_fail = 1
+                    last_fail_cat = fail_cat
+                if fail_cat and fail_cat != 'other' and consecutive_fail >= 2:
+                    self.logger.log(drama_name, 'ERROR',
+                        f'连续{consecutive_fail}个版本同类失败（{fail_cat}），判定系统性错误，'
+                        f'停止剩余版本（已成功{len(videos)}个）')
+                    break
         
         return videos
     
+    def _precheck_source_pattern(self, src_dir, source_pattern, drama_name):
+        """fail-fast ①源头预检：source_pattern 能否匹配到实际源文件。
+
+        返回 None=通过；返回 str=系统性错误消息（应停止全部版本）。
+        与渲染端（render_generic 用 config drama_name 拼源路径）同源判定：
+        预检拦下的，渲染必然失败；宁可拦下让用户看到，也不让所有版本
+        浪费在必然失败的渲染上。单文件偶发缺失不在此列（循环内连续失败②兜底）。
+        """
+        files = [os.path.basename(f) for f in self._scan_files_recursive(src_dir)
+                 if f.lower().endswith('.mp4')]
+        if not files:
+            return f'源目录无 mp4 文件：{src_dir}'
+        matched = 0
+        for bn in files:
+            # 取文件名末尾数字（集号，如 前夫你来迟了-36.mp4 → 36）
+            m = re.search(r'(\d+)(?=[^\d]*\.mp4$)', bn)
+            if not m:
+                continue
+            try:
+                if source_pattern.format(name=drama_name, ep=int(m.group(1))) == bn:
+                    matched += 1
+            except Exception:
+                # pattern/name 含特殊字符（如 {}），无法重建——交给渲染端处理
+                continue
+        if matched == 0:
+            return (f'source_pattern "{source_pattern}" 无法匹配任何实际源文件'
+                    f'（样例文件名：{sorted(files)[:3]}）——所有版本渲染将必然失败')
+        return None
+
+    def _classify_render_failure(self, stderr='', exc=None):
+        """把渲染失败 stderr/异常归类为 {'source','encode','other'}。
+
+        'source' = 源文件缺失/路径错（系统性，fail-fast ②关注）
+        'encode' = 编码器/资源错误（系统性，fail-fast ②关注）
+        'other' = 其他/未识别（偶发，不触发 fail-fast ②）
+        """
+        s = (stderr or '') + (str(exc or ''))
+        if isinstance(exc, FileNotFoundError) or re.search(r'源文件不存在|No such file|FileNotFoundError', s):
+            return 'source'
+        if re.search(r'Conversion failed|Invalid data|No space left|Cannot allocate memory|'
+                     r'Permission denied|device or resource busy|Error initializing', s):
+            return 'encode'
+        return 'other'
+
     def _run_render_one(self, drama_name, out_dir, v_idx, config_path):
         """对单个 edl_config_v*.json 调 render_generic.py 渲染。
 
@@ -1854,14 +1927,18 @@ class PipelineProcessor:
                     self._update_config_artifacts(
                         out_dir, v_idx + 1, 'video_path',
                         os.path.join(out_dir, output_file))
-                return video
+                return video, None
             else:
-                self.logger.log(drama_name, 'ERROR', f'V{v_idx+1} EDL渲染失败：{result.stderr[:200]}')
-                return None
+                fail_cat = self._classify_render_failure(result.stderr)
+                self.logger.log(drama_name, 'ERROR',
+                                f'V{v_idx+1} EDL渲染失败（{fail_cat}）：{result.stderr[:200]}')
+                return None, fail_cat
 
         except Exception as e:
-            self.logger.log(drama_name, 'ERROR', f'V{v_idx+1} EDL异常：{str(e)}')
-            return None
+            fail_cat = self._classify_render_failure('', e)
+            self.logger.log(drama_name, 'ERROR',
+                            f'V{v_idx+1} EDL异常（{fail_cat}）：{str(e)}')
+            return None, fail_cat
 
     def _re_render_from_configs(self, drama_name, out_dir):
         """失败续跑：读 out_dir 里保留的 edl_config_v*.json，只重渲染，不重新生成 EDL。
@@ -1879,6 +1956,9 @@ class PipelineProcessor:
             return videos
 
         self.logger.log(drama_name, 'INFO', f'续跑：找到{len(config_paths)}个保留的EDL配置，开始重渲染')
+        # fail-fast ②状态：连续同类别失败计数（≥2 同类失败 = 系统性错误，停止剩余版本）
+        consecutive_fail = 0
+        last_fail_cat = None
         for config_path in config_paths:
             m = re.search(r'edl_config_v(\d+)\.json$', config_path)
             v_idx = (int(m.group(1)) - 1) if m else len(videos)
@@ -1890,15 +1970,30 @@ class PipelineProcessor:
                                 f'续跑 V{v_idx+1}：{seg_count}个片段，配置 {os.path.basename(config_path)}')
             except Exception as e:
                 self.logger.log(drama_name, 'WARN', f'续跑读取配置失败 {os.path.basename(config_path)}: {e}')
-            video = self._run_render_one(drama_name, out_dir, v_idx, config_path)
+            video, fail_cat = self._run_render_one(drama_name, out_dir, v_idx, config_path)
             if video:
                 videos.append(video)
+                consecutive_fail = 0
+                last_fail_cat = None
                 # P2-4: 渲染成功即删除该版本 config——失败路径保留 config 以便续跑，
                 # 成功删除避免 stale config 跨 run 累积、下次续跑重复渲染抬高 real_count
                 try:
                     os.remove(config_path)
                 except OSError as e:
                     self.logger.log(drama_name, 'WARN', f'清理已渲染配置失败（可忽略）: {e}')
+            else:
+                # fail-fast ②：连续同类别失败 = 系统性错误，剩余版本必然同样失败，立即停止。
+                # 不同类或单次失败视为偶发，继续。
+                if fail_cat and fail_cat == last_fail_cat:
+                    consecutive_fail += 1
+                else:
+                    consecutive_fail = 1
+                    last_fail_cat = fail_cat
+                if fail_cat and fail_cat != 'other' and consecutive_fail >= 2:
+                    self.logger.log(drama_name, 'ERROR',
+                        f'续跑连续{consecutive_fail}个版本同类失败（{fail_cat}），判定系统性错误，'
+                        f'停止剩余版本（已成功{len(videos)}个）')
+                    break
         return videos
     
     # 成片业务窗口 210-300s（见 _select_best_videos）。渲染会跑 atempo=1.05 轻微加速，
