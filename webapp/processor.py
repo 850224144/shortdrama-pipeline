@@ -645,6 +645,20 @@ class PipelineProcessor:
                 result = self._download_once(link_info)
                 
                 if result['success']:
+                    # archive 回填：真实下载/手动素材成功；防重跳过不覆盖历史
+                    if not (result.get('error') or '').startswith('防重'):
+                        try:
+                            from archive import upsert_archive as _arch_up
+                            _dn = result.get('drama_name') or link_info['link_id']
+                            _mp4s = [f for f in result['downloaded_files'] if f.endswith('.mp4')]
+                            _sz = sum(os.path.getsize(f) for f in result['downloaded_files'] if os.path.exists(f))
+                            _arch_up(_dn, download_state='done',
+                                     episode_count=len(_mp4s),
+                                     download_size=_sz // (1024 * 1024),
+                                     download_files=len(result['downloaded_files']),
+                                     download_error=None)
+                        except Exception as _e:
+                            self.logger.log(link_info['link_id'], 'WARN', f'archive 下载成功回填失败：{_e}')
                     return {
                         'link': link_info['link'],
                         'link_id': link_info['link_id'],
@@ -665,6 +679,14 @@ class PipelineProcessor:
                 wait_time = 2 ** attempts
                 time.sleep(wait_time)
         
+        # archive 标记失败（最终重试失败后）
+        try:
+            from archive import upsert_archive as _arch_up
+            _fail_name = link_info['link_id'] or link_info['link'].split('/')[-1].split('?')[0]
+            _arch_up(_fail_name, download_state='failed',
+                     download_error=f'Failed after {max_retries} attempts: {last_error}')
+        except Exception as _e:
+            self.logger.log(link_info['link_id'], 'WARN', f'archive 下载失败标记失败：{_e}')
         return {
             'link': link_info['link'],
             'link_id': link_info['link_id'],
@@ -682,6 +704,22 @@ class PipelineProcessor:
         
         # 从链接提取ID（用于日志）
         link_dir_name = link.split('/')[-1].split('?')[0]
+        
+        # archive 防重：本地目录已存在 或 历史 download_state=done → 不重复下载
+        # （用户设计：防重复下载，集数完整性不校验）
+        try:
+            from archive import should_download as _arch_should
+            _drama_guess = link_id or link_dir_name
+            _local = os.path.join(CONFIG['download_base_dir'], _drama_guess)
+            _ok, _reason = _arch_should(_drama_guess, _local)
+            if not _ok:
+                _existing = self._scan_files_recursive(_local) if os.path.isdir(_local) else []
+                self.logger.log(_drama_guess, 'INFO', f'防重跳过下载：{_reason}')
+                return {'success': True, 'downloaded_files': _existing,
+                        'target_dir': _local, 'drama_name': _drama_guess,
+                        'error': f'防重：{_reason}', 'transferred': False}
+        except Exception as _e:
+            self.logger.log(link_id, 'WARN', f'archive 防重检查失败（继续下载）：{_e}')
         
         # 1. 检查用户是否已手动放置素材
         # 检查所有可能的目录名
