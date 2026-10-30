@@ -671,6 +671,8 @@ def cleanup_plan():
                                        ensure_ascii=False), mimetype='application/json', status=400)
         # 仅当前端明确勾选自动清理才启用；API 直调默认 none
         strategy = data.get('strategy', STRATEGY_RECYCLE)
+        if strategy not in (STRATEGY_RECYCLE, STRATEGY_NONE):
+            strategy = STRATEGY_RECYCLE  # P2-17: 白名单校验，客户端非法值回落默认
         if not data.get('auto_cleanup'):
             strategy = STRATEGY_NONE
         plan = artifact_cleanup.plan_cleanup(batch_id, strategy=strategy, dry_run=True)
@@ -697,6 +699,8 @@ def cleanup_execute():
                                         'strategy': STRATEGY_NONE},
                                        ensure_ascii=False), mimetype='application/json')
         strategy = data.get('strategy', STRATEGY_RECYCLE)
+        if strategy not in (STRATEGY_RECYCLE, STRATEGY_NONE):
+            strategy = STRATEGY_RECYCLE  # P2-17: 白名单校验，客户端非法值回落默认
         result = artifact_cleanup.execute_cleanup(batch_id, strategy=strategy)
         return Response(json.dumps(result, ensure_ascii=False), mimetype='application/json')
     except Exception as e:

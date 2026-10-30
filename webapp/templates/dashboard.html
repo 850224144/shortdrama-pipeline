@@ -1350,7 +1350,6 @@
             
             // 生成批次 ID（时间戳），供清理计划器按批次聚合
             const batchId = 'batch_' + Date.now() + '_' + Math.floor(Math.random() * 1000);
-            window.currentBatchId = batchId;
             
             // 添加所有选中的剧到队列
             let addedCount = 0;
@@ -1416,9 +1415,8 @@
                             console.log(`添加任务结果: V${version}`, result);
                         } catch (jsonError) {
                             console.error(`JSON解析失败: V${version}`, jsonError);
-                            console.warn(`但任务可能已添加，继续处理`);
-                            addedCount++;
-                            continue;
+                            // P2-19: 解析失败不静默计成功（任务状态未知，保守计失败）
+                            result = { status: 'unknown', error: `响应解析失败: ${jsonError}` };
                         }
                         
                         // 检查result.status
@@ -1434,8 +1432,8 @@
                         }
                     } catch (error) {
                         console.error(`添加异常: V${version}`, error);
-                        console.warn(`但任务可能已添加，继续处理`);
-                        addedCount++;
+                        // P2-19: fetch 异常=请求可能未达服务器，不静默计成功
+                        showNotification(`V${version} 添加失败: ${error}`, 'error');
                     }
                 }
             }
@@ -1448,7 +1446,6 @@
             }
             
             // 记录批次 ID（供日志/展示）与自动清理开关（传给后端，由后端在批次自然结束时触发）
-            window.currentBatchId = batchId;
             const autoCleanupEnabled = document.getElementById('autoCleanup')?.checked || false;
             
             // 开始上传（auto_cleanup 由后端 worker 在批次自然结束时执行清理）
@@ -1667,30 +1664,6 @@
             uploadPollTimer = setInterval(updateUploadUI, 2000);
         }
         
-        // 触发成品清理（上传完成后调用）
-        async function triggerCleanup(batchId) {
-            if (!batchId) return;
-            try {
-                showNotification('上传完成，正在清理成品（移入回收站）...', 'info');
-                const resp = await fetch('/api/cleanup/execute', {
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ batch_id: batchId, auto_cleanup: true })
-                });
-                const result = await resp.json();
-                if (result.status === 'success') {
-                    const moved = (result.results || []).filter(r => r.status === 'moved').length;
-                    const skipped = (result.skipped || []).length;
-                    showNotification(`清理完成：移动 ${moved} 项，跳过 ${skipped} 项`, 'success');
-                } else {
-                    showNotification('清理未执行: ' + (result.error || result.reason || '未知'), 'warning');
-                }
-            } catch (error) {
-                console.error('触发清理失败:', error);
-                showNotification('清理请求失败: ' + error.message, 'error');
-            }
-        }
-        
         // 停止上传轮询
         function stopUploadPolling() {
             if (uploadPollTimer) {
@@ -1730,6 +1703,13 @@
                 const response = await fetch('/api/cut/dramas');
                 const data = await response.json();
                 
+                // P2-18: 转义辅助（防剧名含引号/HTML 的 DOM XSS）
+                function escapeHtml(s) {
+                    return String(s ?? '').replace(/[&<>"']/g, c => ({
+                        '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;'
+                    }[c]));
+                }
+
                 const container = document.getElementById('cutDramaList');
                 
                 if (!data.dramas || data.dramas.length === 0) {
@@ -1737,16 +1717,28 @@
                     return;
                 }
                 
-                container.innerHTML = data.dramas.map(drama => `
+                container.innerHTML = data.dramas.map(drama => {
+                    const name = escapeHtml(drama.name);
+                    return `
                     <div class="drama-item">
-                        <input type="checkbox" id="cutDrama_${drama.name}" value="${drama.name}" 
-                               onchange="toggleCutDrama('${drama.name}', this.checked)">
-                        <label for="cutDrama_${drama.name}">
-                            <strong>${drama.name}</strong>
-                            <span class="drama-info">(${drama.episodes}集素材)</span>
+                        <input type="checkbox" class="cut-drama-cb" data-name="${name}" 
+                               id="cutDrama_${name}" value="${name}">
+                        <label for="cutDrama_${name}">
+                            <strong>${name}</strong>
+                            <span class="drama-info">(${escapeHtml(drama.episodes)}集素材)</span>
                         </label>
-                    </div>
-                `).join('');
+                    </div>`;
+                }).join('');
+                // P2-18: 事件委托替代剧名内联 onchange（防剧名含引号的 DOM XSS）
+                if (!container.dataset.changeBound) {
+                    container.addEventListener('change', (ev) => {
+                        const cb = ev.target;
+                        if (cb.classList && cb.classList.contains('cut-drama-cb')) {
+                            toggleCutDrama(cb.dataset.name, cb.checked);
+                        }
+                    });
+                    container.dataset.changeBound = '1';
+                }
                 
                 showNotification('已刷新剧列表', 'success');
             } catch (error) {

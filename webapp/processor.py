@@ -208,11 +208,13 @@ class StateManager:
             }
     
     def save(self, state):
-        """保存状态"""
+        """保存状态（原子写：.tmp + os.replace，防崩溃截断 state.json）"""
         try:
             with self.lock:
-                with open(self.state_file, 'w', encoding='utf-8') as f:
+                tmp = self.state_file + '.tmp'
+                with open(tmp, 'w', encoding='utf-8') as f:
                     json.dump(state, f, ensure_ascii=False, indent=2)
+                os.replace(tmp, self.state_file)
             return True
         except Exception as e:
             print(f"保存状态失败: {e}")
@@ -1827,7 +1829,10 @@ class PipelineProcessor:
             if result.returncode == 0:
                 self.logger.log(drama_name, 'INFO', f'V{v_idx+1} EDL渲染成功')
                 # 查找输出文件
-                output_files = [f for f in os.listdir(out_dir) if f.endswith(".mp4") and f"_{v_idx+1}_" in f]
+                # P2-2: 锚定版本匹配（文件名尾段 {drama}_{n}_{主题}_去重版.mp4 或 V{n}.mp4），
+                # 防剧名含 "_数字_"（如"夺产_2_版"）时 v2 误绑 v1 文件
+                pat = re.compile(rf'_{v_idx+1}_[^_]*_去重版\.mp4$|V{v_idx+1}\.mp4$')
+                output_files = [f for f in os.listdir(out_dir) if f.endswith(".mp4") and pat.search(f)]
                 video = None
                 for output_file in output_files:
                     video = {
@@ -1879,6 +1884,12 @@ class PipelineProcessor:
             video = self._run_render_one(drama_name, out_dir, v_idx, config_path)
             if video:
                 videos.append(video)
+                # P2-4: 渲染成功即删除该版本 config——失败路径保留 config 以便续跑，
+                # 成功删除避免 stale config 跨 run 累积、下次续跑重复渲染抬高 real_count
+                try:
+                    os.remove(config_path)
+                except OSError as e:
+                    self.logger.log(drama_name, 'WARN', f'清理已渲染配置失败（可忽略）: {e}')
         return videos
     
     # 成片业务窗口 210-300s（见 _select_best_videos）。渲染会跑 atempo=1.05 轻微加速，
@@ -2385,7 +2396,12 @@ class PipelineProcessor:
                 'system', 'INFO',
                 f'开头钩子：第{opening["episode"]}集 {oc["score"]}分 '
                 f'[{oc.get("hook_type", "")}] {oc.get("reason", "")}')
-        add(opening["episode"], oc["start"], oc["dur"])
+        if not add(opening["episode"], oc["start"], oc["dur"]):
+            # P2-3: LLM 候选只过滤 dur>=8.0，但 add 要求 >=MIN_SEG_DUR(15s)，
+            # 8-15s 候选会静默丢失导致开头退化为非计划集——显式告警不再静默。
+            self.logger.log('system', 'WARN',
+                            f'开头钩子第{opening["episode"]}集 {oc["start"]}s/{oc["dur"]}s '
+                            f'未入段（<{self.MIN_SEG_DUR}s 最短段或预算耗尽），开头钩子跳过')
 
         # 2. 叙事顺序：导演方案 order_type（钩子→前因闪回→顺叙结局）；
         #    无方案回退集号逆序（原逻辑）。
@@ -2482,8 +2498,10 @@ class PipelineProcessor:
             artifacts = config.get('artifacts') or {}
             artifacts[key] = value
             config['artifacts'] = artifacts
-            with open(config_path, 'w', encoding='utf-8') as f:
+            tmp = config_path + '.tmp'
+            with open(tmp, 'w', encoding='utf-8') as f:
                 json.dump(config, f, ensure_ascii=False, indent=2)
+            os.replace(tmp, config_path)
         except Exception as e:
             self.logger.log('system', 'WARN', f'回写 artifacts.{key} 失败: {e}')
 

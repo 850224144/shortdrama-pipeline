@@ -77,6 +77,14 @@ class ArtifactCleanup:
         self.material_root = self.material_roots[0]
         self.output_root = os.path.normpath(output_root or r'D:\短剧工作区\output')
         self.recycle_root = os.path.normpath(recycle_root or r'D:\短剧工坊\回收站')
+        # P2-13: 校验回收站根与输出/素材根不重叠（防把输出/素材当回收站互移误删）
+        for _r in ([self.output_root] + list(self.material_roots)):
+            if _r and (_r == self.recycle_root
+                       or self.recycle_root.startswith(_r + os.sep)
+                       or _r.startswith(self.recycle_root + os.sep)):
+                print(f'WARN: 回收站根 {self.recycle_root} 与 {_r} 重叠，重置为默认')
+                self.recycle_root = os.path.normpath(r'D:\短剧工坊\回收站')
+                break
         self.db_path = os.path.join(self.data_dir or r'D:\短剧工坊\data', 'upload.db')
         # 清理任务唯一约束：同一批次同一作业类型同一目标路径只允许一条 job。
         # 失败后重复执行清理计划不再插入重复 job（幂等 upsert）。
@@ -242,8 +250,8 @@ class ArtifactCleanup:
                 if drama_name not in names:
                     names.append(drama_name)
                 conn.execute(
-                    "UPDATE upload_batches SET account=?, drama_name=?, source_dir=?, output_dir=? "
-                    "WHERE batch_id=?",
+                    "UPDATE upload_batches SET account=?, drama_name=?, source_dir=?, output_dir=?, "
+                    "status='running' WHERE batch_id=?",
                     (account, ','.join(names), source_dir, output_dir, batch_id))
             else:
                 conn.execute(
@@ -299,12 +307,18 @@ class ArtifactCleanup:
         import re
         versions = set()
         if out_dir and os.path.isdir(out_dir):
-            for fn in os.listdir(out_dir):
+            try:
+                entries = os.listdir(out_dir)
+            except OSError as e:
+                # P2-12: 目录不可读（权限/占用/脱机）→ 保守返回空集，调用方禁止目录级清理
+                print(f'WARN: 读取成品目录失败 {out_dir}: {e}')
+                return set()
+            for fn in entries:
                 m = re.match(r'^edl_config_v(\d+)\.json$', fn, re.I)
                 if m:
                     versions.add(int(m.group(1)))
             if not versions:
-                for fn in os.listdir(out_dir):
+                for fn in entries:
                     m = re.search(r'_V(\d+)_', fn, re.I)
                     if m and fn.lower().endswith('.mp4'):
                         versions.add(int(m.group(1)))
@@ -511,6 +525,50 @@ class ArtifactCleanup:
                      j['version'], j['target_path'], j['recycle_path'],
                      j.get('strategy', STRATEGY_RECYCLE)))
 
+    def _mark_job_done(self, job, status):
+        """执行后回写 artifact_cleanup_jobs.status（防遗留 pending 下次重复执行）。"""
+        try:
+            with self._connect() as conn:
+                conn.execute(
+                    "UPDATE artifact_cleanup_jobs SET status=? "
+                    "WHERE batch_id=? AND job_type=? AND version=? AND target_path=?",
+                    (status, job.get('batch_id'), job.get('job_type'),
+                     job.get('version'), job.get('target_path')))
+                conn.commit()
+        except Exception as e:
+            print(f'WARN: 回写清理任务状态失败: {e}')
+
+    def _recover_pending_jobs(self, batch_id):
+        """崩溃恢复：执行本批次 artifact_cleanup_jobs 里仍 pending 的遗留任务。
+
+        崩溃后 execute_cleanup 重跑时，上次持久化但未完成的 job 从 DB 恢复执行，
+        而非只依赖内存 plan（防 pending 任务永不续跑）。仅限本批次，防跨批次
+        测试/历史遗留任务被误执行。返回 (jobs, results)。
+        """
+        try:
+            with self._connect() as conn:
+                rows = conn.execute(
+                    "SELECT * FROM artifact_cleanup_jobs "
+                    "WHERE status='pending' AND batch_id=?",
+                    (batch_id,)).fetchall()
+        except Exception as e:
+            print(f'WARN: 读取遗留清理任务失败: {e}')
+            return [], []
+        jobs, results = [], []
+        for r in rows:
+            job = {
+                'batch_id': r['batch_id'], 'account': r['account'],
+                'drama_name': r['drama_name'], 'job_type': r['job_type'],
+                'version': r['version'], 'target_path': r['target_path'],
+                'recycle_path': r['recycle_path'],
+                'strategy': r['strategy'] or STRATEGY_RECYCLE,
+            }
+            jobs.append(job)
+            res = self._execute_job(job)
+            results.append(res)
+            self._mark_job_done(job, res.get('status', 'failed'))
+        return jobs, results
+
     # ── 引用检查 ──────────────────────────────────────────────
     def _other_references_source(self, source_dir, exclude_batch_id, exclude_output_dir=None):
         """其他批次/其他组是否仍引用该素材目录。返回引用描述或 None。
@@ -627,13 +685,23 @@ class ArtifactCleanup:
           - 有 failed 且无 moved → 'failed'
           - 无 failed → 'success'
         """
+        results = []
+        jobs = []
+        # P2-14: 崩溃恢复——先执行本批次上次遗留的 pending 任务，再执行本次计划
+        try:
+            rec_jobs, rec_results = self._recover_pending_jobs(batch_id)
+            jobs.extend(rec_jobs)
+            results.extend(rec_results)
+        except Exception as e:
+            print(f'WARN: 恢复遗留清理任务失败: {e}')
+
         plan = self.plan_cleanup(batch_id, strategy=strategy, dry_run=False)
         if plan['status'] != 'success':
             return plan
-        results = []
-        jobs = plan['jobs']
-        for job in jobs:
+        for job in plan['jobs']:
+            jobs.append(job)
             results.append(self._execute_job(job))
+            self._mark_job_done(job, results[-1].get('status', 'failed'))
         moved = sum(1 for r in results if r['status'] == 'moved')
         failed = sum(1 for r in results if r['status'] == 'failed')
         if failed > 0 and moved > 0:
@@ -666,16 +734,29 @@ class ArtifactCleanup:
                     job_type = job.get('job_type')
                     ver = job.get('version')
                     drama = job.get('drama_name')
+                    _acc = job.get('account')
                     if job_type in ('version', 'version_cover') and ver is not None:
-                        conn.execute(
-                            "UPDATE upload_records SET cleanup_status=?, cleanup_error=? "
-                            "WHERE batch_id=? AND version=?",
-                            (status, error, batch, ver))
+                        if _acc:
+                            conn.execute(
+                                "UPDATE upload_records SET cleanup_status=?, cleanup_error=? "
+                                "WHERE batch_id=? AND version=? AND account=?",
+                                (status, error, batch, ver, _acc))
+                        else:
+                            conn.execute(
+                                "UPDATE upload_records SET cleanup_status=?, cleanup_error=? "
+                                "WHERE batch_id=? AND version=?",
+                                (status, error, batch, ver))
                     elif job_type in ('drama_output', 'drama_source'):
-                        conn.execute(
-                            "UPDATE upload_records SET cleanup_status=?, cleanup_error=? "
-                            "WHERE batch_id=? AND drama_name=?",
-                            (status, error, batch, drama))
+                        if _acc:
+                            conn.execute(
+                                "UPDATE upload_records SET cleanup_status=?, cleanup_error=? "
+                                "WHERE batch_id=? AND drama_name=? AND account=?",
+                                (status, error, batch, drama, _acc))
+                        else:
+                            conn.execute(
+                                "UPDATE upload_records SET cleanup_status=?, cleanup_error=? "
+                                "WHERE batch_id=? AND drama_name=?",
+                                (status, error, batch, drama))
                 # upload_batches 计数 + 整体状态
                 cnt = conn.execute(
                     "SELECT COUNT(*), "

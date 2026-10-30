@@ -399,6 +399,18 @@ def process_video(video, config, tmp_base):
 
     seg_files = []
     try:
+        # P2-16: 渲染前磁盘空间预检（NVENC 快写大文件可能中途耗尽，防残留半成品）
+        try:
+            _sum_dur = sum(s.get("duration", 0) for s in segs)
+            _need = int((_sum_dur + 300) * 2_000_000)  # ~2MB/s × (片段+成片) 预估值
+            for _d in (vtmp, os.path.dirname(final_path)):
+                if os.path.isdir(_d):
+                    _free = shutil.disk_usage(_d).free
+                    if _free < _need:
+                        return {"id": vid, "kw": kw, "status": "FAILED",
+                                "detail": f"磁盘空间不足：{_d} 剩余 {_free/1e9:.1f}GB，需约 {_need/1e9:.1f}GB"}
+        except Exception:
+            pass  # 预检尽力而为，失败不阻塞渲染
         # 2. 渲染片段
         log(f"  🎬 渲染片段...")
         for i, seg in enumerate(segs):

@@ -295,7 +295,13 @@ class AICopyGenerator:
 
     @classmethod
     def _looks_like_fragment(cls, title):
-        """标题疑似 ASR 台词碎片：含数字（时间码残渣）即判非法。"""
+        """标题疑似 ASR 台词碎片：含数字（时间码残渣）即判非法。
+
+        P2-20 评审曾建议收窄到时间码形态，但测试锁定的碎片场景
+        （'58474她突然晕倒'/'她突然晕倒5'）与欲放行的合法标题（'闪婚2'）
+        在形态上不可区分（都是中文+数字），收窄会放过真实 ASR 碎片、
+        削弱发布质量校验——维持含数字判据。
+        """
         import re
         return bool(re.search(r'\d', title or ''))
 

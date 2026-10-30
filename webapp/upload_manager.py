@@ -381,6 +381,13 @@ class UploadManager:
                 conn = _connect_db(self.db_path)
                 cursor = conn.cursor()
                 cursor.execute('DELETE FROM upload_records')
+                # P2-7: 'all' 也清空批次/清理任务/期望表，防孤儿行残留
+                # （upload_batches / artifact_cleanup_jobs / upload_batch_expected）
+                for tbl in ('upload_batches', 'artifact_cleanup_jobs', 'upload_batch_expected'):
+                    try:
+                        cursor.execute(f'DELETE FROM {tbl}')
+                    except sqlite3.OperationalError:
+                        pass  # 表可能不存在（旧库），跳过
                 conn.commit()
                 conn.close()
             else:
@@ -445,10 +452,35 @@ class UploadManager:
         # （每次 10-20s），登录过期时整条队列白跑、全部标失败。
         self._log('info', '预检登录状态...')
         if not self._precheck_logins():
+            # P2-9: 预检失败=登录态不可用，队列任务标 failed（防永久 pending），
+            # 并 finalize 已记录批次（防批次行永久 running）。auto_cleanup=False：
+            # 登录失败≠上传完成，触发清理会误删未上传的成片。
             with self.lock:
                 self.uploading = False
                 self.prechecking = False
                 self.current_task = None
+                failed_tasks = list(self.queue)
+                self.queue.clear()
+                for t in failed_tasks:
+                    t['status'] = 'failed'
+                    t['completed_at'] = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+                    t['error_message'] = t.get('error_message') or '登录态预检失败'
+                self.failed.extend(failed_tasks)
+                failed_batches = {t.get('batch_id') for t in failed_tasks if t.get('batch_id')}
+            for t in failed_tasks:
+                try:
+                    with _connect_db(self.db_path) as conn:
+                        conn.execute(
+                            "UPDATE upload_records SET status='failed', completed_at=?, error_message=? WHERE id=?",
+                            (t['completed_at'], t['error_message'], t['id']))
+                        conn.commit()
+                except Exception as e:
+                    self._log('warning', f'预检失败更新记录失败: {e}')
+            try:
+                self._finalize_batches(failed_batches, auto_cleanup=False)
+            except Exception as e:
+                self._log('error', f'预检失败finalize批次失败: {e}')
+            self._log('warning', f'预检失败，{len(failed_tasks)} 个任务标失败')
             return
 
         seen_batches = set()
@@ -673,12 +705,19 @@ class UploadManager:
         # 后续 ChromiumPage(co) 复用（同一 debug 端口自动接管），一旦浏览器
         # 完全就绪即成功。给足冷启动窗口：5 次 × 3s。
         for attempt in range(5):
+            page = None
             try:
                 page = ChromiumPage(co)
                 page.get('https://channels.weixin.qq.com/platform/post/draftListManager')
                 return page
             except Exception as e:
                 last_err = e
+                # P2-8: 失败尝试若已建页面/进程，主动 quit，防 Chrome 进程遗留
+                if page is not None:
+                    try:
+                        page.quit()
+                    except Exception:
+                        pass
                 self._log('warning',
                           f'{account} 打开草稿箱第 {attempt + 1} 次失败：{e}，'
                           f'等待浏览器就绪/释放 profile 锁...')
@@ -728,6 +767,21 @@ class UploadManager:
         except Exception as e:
             self.draft_pages.pop(account, None)
             return {'status': 'failed', 'error': str(e)}
+
+    def close_all_draft_boxes(self) -> int:
+        """批量关闭所有草稿箱浏览器（应用退出/重启前调用，防 Chrome 进程遗留）。"""
+        closed = 0
+        for account, page in list(self.draft_pages.items()):
+            try:
+                page.quit()
+                closed += 1
+            except Exception as e:
+                self._log('warning', f'{account} 关闭草稿箱失败（可忽略）: {e}')
+            finally:
+                self.draft_pages.pop(account, None)
+        if closed:
+            self._log('info', f'已关闭 {closed} 个草稿箱浏览器')
+        return closed
     
     def get_draft_status(self) -> Dict:
         """获取草稿箱打开状态（过滤已失效页面，反映真实窗口存在性）。"""

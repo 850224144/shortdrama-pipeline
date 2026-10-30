@@ -32,3 +32,11 @@ tools/BaiduPCS-Go-*/
 .env.*
 !.env.example
 webapp/_login_*.py
+
+# ===== 归档（历史遗留/诊断脚本，非源码，不入库）=====
+archive/
+
+# ===== 诊断/探测产物（不入库）=====
+webapp/shell_probe.txt
+webapp/upload_records.db
+test_upload_probe.mp4
