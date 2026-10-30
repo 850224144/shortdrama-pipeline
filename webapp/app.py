@@ -22,6 +22,9 @@ from upload_manager import UploadManager
 # 导入成品清理服务
 from artifact_cleanup import ArtifactCleanup, STRATEGY_NONE, STRATEGY_RECYCLE
 
+# 导入剧级档案（下载/切片状态追踪 + 防重 + 搜索）
+from archive import init_database as _archive_init, search_archive, get_archive, should_download
+
 app = Flask(__name__, template_folder='templates', static_folder='static')
 socketio = SocketIO(app, cors_allowed_origins="*")
 
@@ -33,6 +36,9 @@ for dir_path in [CONFIG['data_dir'], CONFIG['output_dir'], CONFIG['log_dir']]:
 logger = Logger(CONFIG['log_dir'], socketio)
 state_manager = StateManager(CONFIG['state_file'])
 processor = PipelineProcessor(logger, state_manager)
+
+# 初始化剧级档案表（下载/切片状态追踪）
+_archive_init()
 
 # 全局错误处理器 - 确保所有错误都返回JSON
 @app.errorhandler(500)
@@ -414,6 +420,49 @@ def logout_baidupcs():
         result = subprocess.run([baidupcs, 'logout'], capture_output=True, text=True, timeout=10)
         logger.log('system', 'INFO', 'BaiduPCS-Go已退出登录')
         return jsonify({'status': 'success', 'message': '已退出登录'})
+    except Exception as e:
+        return jsonify({'status': 'failed', 'error': str(e)}), 500
+
+# ===== 剧级档案（下载/切片/上传状态追踪）=====
+
+@app.route('/api/archive/search')
+def api_archive_search():
+    """搜索剧档案：q 剧名模糊 + 状态筛选 + 聚合上传状态。"""
+    q = request.args.get('q', '').strip() or None
+    dl = request.args.get('download_state', '').strip() or None
+    sl = request.args.get('slice_state', '').strip() or None
+    up = request.args.get('upload_state', '').strip() or None
+    limit = request.args.get('limit', 50, type=int)
+    try:
+        results = search_archive(q=q, download_state=dl, slice_state=sl,
+                                 upload_state=up, limit=min(limit, 200))
+        return jsonify({'status': 'success', 'results': results, 'count': len(results)})
+    except Exception as e:
+        return jsonify({'status': 'failed', 'error': str(e)}), 500
+
+@app.route('/api/archive/get')
+def api_archive_get():
+    """获取单剧档案（含聚合上传状态）。"""
+    name = request.args.get('drama_name', '').strip()
+    if not name:
+        return jsonify({'status': 'failed', 'error': '缺少 drama_name'}), 400
+    try:
+        d = get_archive(name)
+        return jsonify({'status': 'success', 'result': d})
+    except Exception as e:
+        return jsonify({'status': 'failed', 'error': str(e)}), 500
+
+@app.route('/api/archive/download-check')
+def api_archive_download_check():
+    """防重下载检查：本地目录已存在 或 历史已下载成功 → 不下载。"""
+    name = request.args.get('drama_name', '').strip()
+    if not name:
+        return jsonify({'status': 'failed', 'error': '缺少 drama_name'}), 400
+    local_dir = os.path.join(r'E:\短剧素材', name)
+    try:
+        ok, reason = should_download(name, local_dir)
+        return jsonify({'status': 'success', 'can_download': ok, 'reason': reason,
+                        'local_dir': local_dir})
     except Exception as e:
         return jsonify({'status': 'failed', 'error': str(e)}), 500
 

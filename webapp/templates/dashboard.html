@@ -731,6 +731,7 @@
                 <div class="tab" onclick="switchTab('history')">📋 历史记录</div>
                 <div class="tab" onclick="switchTab('upload')">🚀 批量上传</div>
                 <div class="tab" onclick="switchTab('cut')">✂️ 批量切片</div>
+                <div class="tab" onclick="switchTab('archive')">🗂️ 剧级档案</div>
             </div>
             
             <div class="tab-content active" id="logsTab">
@@ -852,6 +853,49 @@
                         <h3>切片日志</h3>
                         <div class="upload-log" id="cutLog"></div>
                     </div>
+                </div>
+            </div>
+            
+            <div class="tab-content" id="archiveTab">
+                <div class="upload-panel">
+                    <h2>🗂️ 剧级档案（下载/切片/上传状态）</h2>
+                    <div class="upload-controls">
+                        <input type="text" id="archiveQ" placeholder="搜索剧名（如：前夫）..." style="flex:1;padding:8px;border-radius:6px;border:1px solid #ddd;font-size:14px;">
+                        <select id="archiveDl">
+                            <option value="">下载-全部</option>
+                            <option value="done">✅ 已下载</option>
+                            <option value="downloading">⬇️ 下载中</option>
+                            <option value="failed">❌ 下载失败</option>
+                        </select>
+                        <select id="archiveSlice">
+                            <option value="">切片-全部</option>
+                            <option value="done">✅ 已切片</option>
+                            <option value="cutting">✂️ 切片中</option>
+                            <option value="failed">❌ 切片失败</option>
+                        </select>
+                        <select id="archiveUp">
+                            <option value="">上传-全部</option>
+                            <option value="done">✅ 已上传</option>
+                            <option value="partial">⚠️ 部分</option>
+                            <option value="failed">❌ 上传失败</option>
+                        </select>
+                        <button class="btn btn-primary" onclick="searchArchive()">🔍 搜索</button>
+                    </div>
+                    <table style="width:100%;margin-top:15px;border-collapse:collapse;">
+                        <thead>
+                            <tr style="text-align:left;background:#f5f5f5;">
+                                <th style="padding:8px;">剧名</th>
+                                <th style="padding:8px;">下载</th>
+                                <th style="padding:8px;">切片</th>
+                                <th style="padding:8px;">上传</th>
+                                <th style="padding:8px;">集数</th>
+                                <th style="padding:8px;">下载时间</th>
+                                <th style="padding:8px;">切片时间</th>
+                                <th style="padding:8px;">更新时间</th>
+                            </tr>
+                        </thead>
+                        <tbody id="archiveRows"></tbody>
+                    </table>
                 </div>
             </div>
         </div>
@@ -1002,6 +1046,56 @@
             if (tab === 'history') {
                 loadHistory();
             }
+        }
+        
+        // 剧级档案搜索（下载/切片/上传状态）
+        function searchArchive() {
+            const params = new URLSearchParams();
+            const q = document.getElementById('archiveQ').value.trim();
+            const dl = document.getElementById('archiveDl').value;
+            const sl = document.getElementById('archiveSlice').value;
+            const up = document.getElementById('archiveUp').value;
+            if (q) params.append('q', q);
+            if (dl) params.append('download_state', dl);
+            if (sl) params.append('slice_state', sl);
+            if (up) params.append('upload_state', up);
+            fetch('/api/archive/search?' + params.toString())
+                .then(r => r.json())
+                .then(d => {
+                    const tbody = document.getElementById('archiveRows');
+                    tbody.innerHTML = '';
+                    if (d.status !== 'success') {
+                        tbody.innerHTML = '<tr><td colspan="8" style="color:#c00;padding:8px;">搜索失败：' + escapeHtml(d.error || '未知错误') + '</td></tr>';
+                        return;
+                    }
+                    if (!d.results.length) {
+                        tbody.innerHTML = '<tr><td colspan="8" style="color:#666;padding:8px;">无记录（未下载过或未切片/上传过）</td></tr>';
+                        return;
+                    }
+                    d.results.forEach(r => {
+                        const tr = document.createElement('tr');
+                        tr.style.borderBottom = '1px solid #eee';
+                        tr.innerHTML =
+                            '<td style="padding:8px;">' + escapeHtml(r.drama_name) + '</td>' +
+                            '<td style="padding:8px;">' + stateBadge(r.download_state) + '</td>' +
+                            '<td style="padding:8px;">' + stateBadge(r.slice_state) + '</td>' +
+                            '<td style="padding:8px;">' + stateBadge(r.upload_state) + '</td>' +
+                            '<td style="padding:8px;">' + (r.episode_count || '') + '</td>' +
+                            '<td style="padding:8px;">' + (r.downloaded_at || '') + '</td>' +
+                            '<td style="padding:8px;">' + (r.sliced_at || '') + '</td>' +
+                            '<td style="padding:8px;">' + (r.updated_at || '') + '</td>';
+                        tbody.appendChild(tr);
+                    });
+                })
+                .catch(() => {
+                    document.getElementById('archiveRows').innerHTML =
+                        '<tr><td colspan="8" style="color:#c00;padding:8px;">请求失败</td></tr>';
+                });
+        }
+        
+        function stateBadge(s) {
+            const map = {done: '✅', cutting: '✂️⏳', downloading: '⬇️⏳', failed: '❌', partial: '⚠️', none: '—'};
+            return map[s] || (s ? s : '—');
         }
         
         // 加载历史记录

@@ -1210,15 +1210,49 @@ class PipelineProcessor:
             self.logger.log('system', 'WARN', f'清理渲染残留失败：{str(e)}')
         return removed
 
+    def _count_delivered_versions(self, result):
+        """统计交付版本数（output_dir 内 _去重版.mp4 数）。"""
+        od = result.get('output_dir')
+        if od and os.path.isdir(od):
+            try:
+                return len([f for f in os.listdir(od) if f.endswith('_去重版.mp4')])
+            except OSError:
+                pass
+        return 0
+
     def cut_batch(self, downloads, resume=False):
         """批量切片"""
         results = []
         failed = []
+        # 剧级档案：切片状态追踪（延迟 import 避免循环，archive 独立不依赖 processor）
+        from archive import upsert_archive, init_database as _arc_init
+        try:
+            _arc_init()
+        except Exception:
+            pass
         
         # 第一轮：处理所有
         for d in downloads:
+            drama_name = d.get('drama_name') or d.get('link_id', '')
+            if drama_name:
+                try:
+                    upsert_archive(drama_name, slice_state='cutting')
+                except Exception:
+                    pass
             result = self._cut_once(d, resume=resume)
             result['retried'] = False
+            if drama_name:
+                try:
+                    if result['success']:
+                        upsert_archive(drama_name, slice_state='done',
+                                       slice_version_count=self._count_delivered_versions(result),
+                                       sliced_at=datetime.now().strftime('%Y-%m-%d %H:%M:%S'))
+                    elif '跳过' not in (result.get('error') or ''):
+                        upsert_archive(drama_name, slice_state='failed',
+                                       slice_error=(result.get('error') or '')[:500])
+                    # 跳过（已切过）不覆盖状态
+                except Exception:
+                    pass
             
             if result['success']:
                 results.append(result)
@@ -1230,10 +1264,21 @@ class PipelineProcessor:
         # 第二轮：重试失败的
         for item in failed:
             d = item['download']
+            drama_name = d.get('drama_name') or d.get('link_id', '')
             self.logger.log('system', 'INFO', f'重试切片：{d.get("link_id", "未知")}')
             result = self._cut_once(d, resume=resume)
             result['retried'] = True
-            
+            if drama_name:
+                try:
+                    if result['success']:
+                        upsert_archive(drama_name, slice_state='done',
+                                       slice_version_count=self._count_delivered_versions(result),
+                                       sliced_at=datetime.now().strftime('%Y-%m-%d %H:%M:%S'))
+                    elif '跳过' not in (result.get('error') or ''):
+                        upsert_archive(drama_name, slice_state='failed',
+                                       slice_error=(result.get('error') or '')[:500])
+                except Exception:
+                    pass
             if result['success']:
                 results.append(result)
             else:
