@@ -1048,6 +1048,13 @@
             }
         }
         
+        // 全局转义辅助（防剧名含引号/HTML 的 DOM XSS）
+        function escapeHtml(s) {
+            return String(s ?? '').replace(/[&<>"']/g, c => ({
+                '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;'
+            }[c]));
+        }
+
         // 剧级档案搜索（下载/切片/上传状态）
         function searchArchive() {
             const params = new URLSearchParams();
