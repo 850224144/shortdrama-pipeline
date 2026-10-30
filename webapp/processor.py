@@ -1740,7 +1740,10 @@ class PipelineProcessor:
             
             # 创建EDL配置 - 动态source_pattern
             # 检测文件命名格式
-            sample_files = [f for f in os.listdir(src_dir) if f.endswith('.mp4')][:3]
+            # 递归扫描取样（素材可能只在嵌套子目录，如 BaiduPCS-Go 下载产物）
+            sample_files = [os.path.basename(f)
+                            for f in self._scan_files_recursive(src_dir)
+                            if f.endswith('.mp4')][:3]
             if sample_files:
                 # 检查文件名格式
                 first_file = sample_files[0]
@@ -1754,6 +1757,12 @@ class PipelineProcessor:
                         source_pattern = "{name}第{ep}集.mp4"
                 elif re.match(r'\d+\.mp4', first_file):
                     source_pattern = "{ep}.mp4"
+                elif re.search(r'[_-]\d+\.mp4$', first_file):
+                    # 剧名-集号.mp4 / 剧名_集号.mp4（如 前夫你来迟了-36.mp4），
+                    # 百度网盘下载最常见的命名。原逻辑漏识别落入 {ep}.mp4 fallback，
+                    # 渲染端拼出裸名 36.mp4 → 源文件不存在 → 该剧全版本渲染失败。
+                    sep = '-' if re.search(r'-\d+\.mp4$', first_file) else '_'
+                    source_pattern = f"{{name}}{sep}{{ep}}.mp4"
                 else:
                     source_pattern = "{ep}.mp4"
             else:
