@@ -202,8 +202,13 @@ class ArtifactCleanup:
 
     # ── DB 辅助 ───────────────────────────────────────────────
     def _connect(self):
-        conn = sqlite3.connect(self.db_path)
+        conn = sqlite3.connect(self.db_path, timeout=5)
         conn.row_factory = sqlite3.Row
+        try:
+            conn.execute("PRAGMA journal_mode=WAL")
+            conn.execute("PRAGMA busy_timeout=5000")
+        except Exception:
+            pass  # WAL 失败不致命，回落默认 rollback journal
         return conn
 
     def _get_batch_records(self, batch_id):

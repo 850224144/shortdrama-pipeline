@@ -22,6 +22,47 @@ import time
 FFMPEG = r"D:\ffmpeg-master-latest-win64-gpl-shared\bin\ffmpeg.exe"
 FFPROBE = r"D:\ffmpeg-master-latest-win64-gpl-shared\bin\ffprobe.exe"
 
+# ===== 编码器选择（NVENC 可用则硬件加速，否则回退 libx264）=====
+_NVENC_CACHE = None
+
+
+def _nvenc_available():
+    """探测 ffmpeg 是否支持 h264_nvenc（含 GPU 可用性）。结果缓存。
+
+    无 NVENC 时回退 libx264，否则无 GPU 机器整批渲染全 FAILED。
+    """
+    global _NVENC_CACHE
+    if _NVENC_CACHE is not None:
+        return _NVENC_CACHE
+    try:
+        r = subprocess.run(
+            [FFMPEG, "-hide_banner", "-encoders"],
+            capture_output=True, text=True, encoding="utf-8",
+            errors="replace", timeout=30,
+        )
+        ok = r.returncode == 0 and "h264_nvenc" in r.stdout
+    except Exception:
+        ok = False
+    _NVENC_CACHE = ok
+    return ok
+
+
+def video_enc_args(crf=None, preset=None):
+    """按 NVENC 可用性返回 -c:v 及配套编码参数。
+
+    NVENC:    -c:v h264_nvenc -preset p4 -cq 23 -rc vbr（原硬编码，保持提速）
+    回退:     -c:v libx264 -preset <safe> -crf <crf>（crf/preset 形参在此生效，
+              修复「crf/preset 配置失效」：硬编码 nvenc 参数不读形参）
+    """
+    if _nvenc_available():
+        return ["-c:v", "h264_nvenc", "-preset", "p4", "-cq", "23", "-rc", "vbr"]
+    # libx264 回退：preset 用安全默认（nvenc 预设名 p4/p5/p6/p7 对 libx264 非法）
+    _nvenc_presets = {"p4", "p5", "p6", "p7", "slow", "medium", "fast",
+                      "veryfast", "superfast", "ultrafast", "placebo"}
+    p = preset if (preset and preset in _nvenc_presets) else "fast"
+    c = crf if isinstance(crf, (int, float)) else 23
+    return ["-c:v", "libx264", "-preset", p, "-crf", str(c)]
+
 # ===== 默认抗查重参数 =====
 DEFAULT_ANTI_DUP = {
     "speed": 1.05,
@@ -219,7 +260,7 @@ def render_segment(source, start, duration, output, crf, preset):
         "-ss", str(start), "-i", source,
         "-t", str(duration),
         "-vf", "scale=1080:1920:force_original_aspect_ratio=decrease,pad=1080:1920:(ow-iw)/2:(oh-ih)/2:color=black",
-        "-c:v", "h264_nvenc", "-preset", "p4", "-cq", "23", "-rc", "vbr",
+        *video_enc_args(crf, preset),
         "-c:a", "aac", "-b:a", "160k",
         output,
     ]
@@ -241,7 +282,7 @@ def concat_segments(segment_files, output, crf, preset):
         FFMPEG, "-y",
         "-f", "concat", "-safe", "0",
         "-i", concat_list,
-        "-c:v", "h264_nvenc", "-preset", "p4", "-cq", "23", "-rc", "vbr",
+        *video_enc_args(crf, preset),
         "-c:a", "aac", "-b:a", "160k",
         output,
     ]
@@ -257,7 +298,7 @@ def concat_segments(segment_files, output, crf, preset):
         cmd2.extend([
             "-filter_complex", concat_filter(n),
             "-map", "[v]", "-map", "[a]",
-            "-c:v", "h264_nvenc", "-preset", "p4", "-cq", "23", "-rc", "vbr",
+            *video_enc_args(crf, preset),
             "-c:a", "aac", "-b:a", "160k",
             output,
         ])
@@ -274,7 +315,7 @@ def apply_anti_dup(raw, output, ad, crf, preset):
         "-i", raw,
         "-vf", build_vf(ad),
         "-af", build_af(ad),
-        "-c:v", "h264_nvenc", "-preset", "p4", "-cq", "23", "-rc", "vbr",
+        *video_enc_args(crf, preset),
         "-c:a", "aac", "-b:a", "160k",
         "-movflags", "+faststart",
         "-f", "mp4",

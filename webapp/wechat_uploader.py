@@ -1774,22 +1774,25 @@ return (() => {
             self._release_profile_lock(lock)
 
     def check_login(self):
-        """检查登录状态（headless，不弹窗口）。"""
+        """检查登录状态（headless，不弹窗口）。持锁后调用无锁核心。"""
         if not os.path.exists(self.user_data_path):
             logger.error(f"未找到登录目录，请先登录: {self.user_data_path}")
             return False
-
-        # 有登录进程在用 profile 时，headless 去抢会失败/读到半成品状态。
-        if self.is_login_in_progress(self.account_name):
-            logger.warning(f"[{self.account_name}] 登录进行中，暂无法校验")
-            return False
-
-        logger.info(f"[{self.account_name}] 验证登录状态...")
         lock = self._acquire_profile_lock()
         if lock is None:
             logger.warning(f"[{self.account_name}] 登录进行中，暂无法校验")
             return False
+        try:
+            return self._check_login_core()
+        finally:
+            self._release_profile_lock(lock)
 
+    def _check_login_core(self):
+        """无锁登录校验核心——调用方必须已持有 profile 锁。
+
+        check_login 自身加锁，若 upload_to_draft 也加锁再调 check_login 会
+        自锁（文件哨兵不可重入），故拆出本方法供持锁方复用。
+        """
         try:
             co = self._get_browser_options(headless=True)
             try:
@@ -1834,8 +1837,7 @@ return (() => {
             return False
         finally:
             self._quit_page()
-            self._release_profile_lock(lock)
-    
+
     def _handle_alerts(self):
         """处理浏览器弹窗（包括原生弹窗和页面弹窗）"""
         try:
@@ -1925,11 +1927,19 @@ return (() => {
             logger.error(f"找不到视频文件: {abs_file_path}")
             return self._upload_failure(f"找不到视频文件: {abs_file_path}")
         
+        # 全程持有 profile 锁：保护本账号 user_data 目录不被并发 login/上传踢掉。
+        # check_login 自身也加锁（文件哨兵不可重入），故先取锁后走其无锁核心。
+        lock = self._acquire_profile_lock()
+        if lock is None:
+            logger.error(f"[{self.account_name}] 已有登录/上传进程在使用该账号，本次放弃")
+            return self._upload_failure("已有登录/上传进程在使用该账号，请稍后再试")
+
         # 检查登录（复用：10分钟内已验证则跳过重复校验，避免每版重复验证）
         _now = time.time()
         if getattr(self, '_login_verified_at', 0) and _now - self._login_verified_at < 600:
             pass
-        elif not self.check_login():
+        elif not self._check_login_core():
+            self._release_profile_lock(lock)
             logger.error("登录失效，请先登录")
             return self._upload_failure("登录失效，请先登录")
         else:
@@ -2142,6 +2152,8 @@ return (() => {
                 except Exception as e:
                     logger.warning(f'关闭浏览器时出错: {e}')
                 self.page = None
+            # 释放本账号 profile 锁（覆盖成功与所有异常路径）
+            self._release_profile_lock(lock)
     
     def get_next_account(self, accounts, drama_name):
         """

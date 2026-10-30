@@ -11,6 +11,22 @@ from datetime import datetime
 from typing import List, Dict, Optional
 import sqlite3
 
+
+def _connect_db(path):
+    """打开 SQLite 连接并启用 WAL + busy_timeout，降低并发写 'database is locked'。
+
+    WAL 允许读写并发（默认 rollback journal 读写互斥，worker/清理/API 多线程
+    并发写同一 db 时互锁抛 OperationalError）；busy_timeout 让写冲突等待而非
+    立即失败。PRAGMA 不跨连接持久，故每次新建连接都要设置。
+    """
+    conn = sqlite3.connect(path, timeout=5)
+    try:
+        conn.execute("PRAGMA journal_mode=WAL")
+        conn.execute("PRAGMA busy_timeout=5000")
+    except Exception:
+        pass  # WAL 失败不致命（如只读介质），回落默认 rollback journal
+    return conn
+
 # 导入上传模块
 from wechat_uploader import WeChatChannelsUploader
 
@@ -73,7 +89,7 @@ class UploadManager:
         
     def _init_database(self):
         """初始化数据库"""
-        conn = sqlite3.connect(self.db_path)
+        conn = _connect_db(self.db_path)
         cursor = conn.cursor()
         
         # 创建上传记录表
@@ -229,7 +245,7 @@ class UploadManager:
         with self.lock:
             # 检查是否已存在（按 account 去重，两个号可以发同一部剧）
             _account = account or '福桃说剧'
-            with sqlite3.connect(self.db_path) as conn:
+            with _connect_db(self.db_path) as conn:
                 cursor = conn.cursor()
                 cursor.execute('''
                     SELECT id FROM upload_records 
@@ -250,7 +266,7 @@ class UploadManager:
             topics_db = json.dumps(topics_list, ensure_ascii=False)
 
             # 插入数据库
-            with sqlite3.connect(self.db_path) as conn:
+            with _connect_db(self.db_path) as conn:
                 cursor = conn.cursor()
                 cursor.execute('''
                     INSERT INTO upload_records 
@@ -362,7 +378,7 @@ class UploadManager:
                 self.failed.clear()
                 
                 # 清除数据库记录
-                conn = sqlite3.connect(self.db_path)
+                conn = _connect_db(self.db_path)
                 cursor = conn.cursor()
                 cursor.execute('DELETE FROM upload_records')
                 conn.commit()
@@ -381,7 +397,7 @@ class UploadManager:
                     self.queue = [t for t in self.queue if t.get('status') != status]
                 
                 # 更新数据库
-                conn = sqlite3.connect(self.db_path)
+                conn = _connect_db(self.db_path)
                 cursor = conn.cursor()
                 cursor.execute('DELETE FROM upload_records WHERE status=?', (status,))
                 conn.commit()
@@ -410,7 +426,7 @@ class UploadManager:
     
     def get_history(self, limit: int = 100) -> List[Dict]:
         """获取上传历史"""
-        conn = sqlite3.connect(self.db_path)
+        conn = _connect_db(self.db_path)
         conn.row_factory = sqlite3.Row
         cursor = conn.cursor()
         cursor.execute('''
@@ -438,93 +454,97 @@ class UploadManager:
         seen_batches = set()
         my_epoch = self._run_epoch
         my_auto_cleanup = self._run_auto_cleanup
-        while True:
-            # 获取任务（短暂持锁）
-            with self.lock:
-                if not self.queue:
-                    break
-                
-                if self.paused:
-                    # 人工停止：退出循环让 worker 结束，释放线程供下次 start
-                    if self._stopped:
+        try:
+            while True:
+                # 获取任务（短暂持锁）
+                with self.lock:
+                    if not self.queue:
                         break
-                    time.sleep(1)
-                    continue
                 
-                task = self.queue.pop(0)
-                self.current_task = task
-                task['status'] = 'uploading'
-                task['started_at'] = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
-                if task.get('batch_id'):
-                    seen_batches.add(task['batch_id'])
+                    if self.paused:
+                        # 人工停止：退出循环让 worker 结束，释放线程供下次 start
+                        if self._stopped:
+                            break
+                        time.sleep(1)
+                        continue
+                
+                    task = self.queue.pop(0)
+                    self.current_task = task
+                    task['status'] = 'uploading'
+                    task['started_at'] = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+                    if task.get('batch_id'):
+                        seen_batches.add(task['batch_id'])
             
-            # 更新数据库（不持锁）
-            with sqlite3.connect(self.db_path) as conn:
-                cursor = conn.cursor()
-                cursor.execute('''
-                    UPDATE upload_records 
-                    SET status='uploading', started_at=?
-                    WHERE id=?
-                ''', (task['started_at'], task['id']))
+                # 更新数据库（不持锁）
+                with _connect_db(self.db_path) as conn:
+                    cursor = conn.cursor()
+                    cursor.execute('''
+                        UPDATE upload_records 
+                        SET status='uploading', started_at=?
+                        WHERE id=?
+                    ''', (task['started_at'], task['id']))
             
-            self._log('info', f'开始上传：{task["drama_name"]} V{task["version"]}')
+                self._log('info', f'开始上传：{task["drama_name"]} V{task["version"]}')
             
-            # 执行上传（不持锁，避免阻塞其他线程）
-            success = self._execute_upload(task)
+                # 执行上传（不持锁，避免阻塞其他线程）
+                success = self._execute_upload(task)
             
-            # 更新任务状态（短暂持锁）
+                # 更新任务状态（短暂持锁）
+                with self.lock:
+                    if success:
+                        task['status'] = 'completed'
+                        task['completed_at'] = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+                        self.completed.append(task)
+                        self._log('success', f'上传成功：{task["drama_name"]} V{task["version"]}')
+                    else:
+                        task['status'] = 'failed'
+                        task['completed_at'] = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+                        self.failed.append(task)
+                        self._log('error', f'上传失败：{task["drama_name"]} V{task["version"]} - {task.get("error_message")}')
+            
+                # 更新数据库（不持锁）—— 同步实际使用的文案与封面状态，留审计痕迹
+                _topics_db = json.dumps(task.get('topics', []), ensure_ascii=False) if task.get('topics') else None
+                _cover_status = task.get('cover_status', 'not_requested')
+                _draft_saved = 1 if task.get('draft_saved') else 0
+                _draft_verified_at = datetime.now().strftime('%Y-%m-%d %H:%M:%S') if _draft_saved else None
+                with _connect_db(self.db_path) as conn:
+                    cursor = conn.cursor()
+                    cursor.execute('''
+                        UPDATE upload_records 
+                        SET status=?, completed_at=?, error_message=?,
+                            title=?, description=?, topics=?, cover_path=?,
+                            cover_status=?, draft_saved=?, draft_verified_at=?,
+                            source_dir=?, output_dir=?
+                        WHERE id=?
+                    ''', (task['status'], task['completed_at'], task.get('error_message'),
+                          task.get('title'), task.get('description'), _topics_db,
+                          task.get('cover_path'), _cover_status, _draft_saved,
+                          _draft_verified_at, task.get('source_dir'), task.get('output_dir'),
+                          task['id']))
+            
+                # 检查账号切换（短暂持锁）
+                with self.lock:
+                    if self.queue:
+                        next_account = self.queue[0].get('account')
+                        if next_account != self.current_account:
+                            self.current_account = next_account
+                            self._log('info', f'切换账号：{self.current_account}')
+            
+                # 等待间隔（避免风控）
+                time.sleep(2)
+        finally:
             with self.lock:
-                if success:
-                    task['status'] = 'completed'
-                    task['completed_at'] = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
-                    self.completed.append(task)
-                    self._log('success', f'上传成功：{task["drama_name"]} V{task["version"]}')
-                else:
-                    task['status'] = 'failed'
-                    task['completed_at'] = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
-                    self.failed.append(task)
-                    self._log('error', f'上传失败：{task["drama_name"]} V{task["version"]} - {task.get("error_message")}')
-            
-            # 更新数据库（不持锁）—— 同步实际使用的文案与封面状态，留审计痕迹
-            _topics_db = json.dumps(task.get('topics', []), ensure_ascii=False) if task.get('topics') else None
-            _cover_status = task.get('cover_status', 'not_requested')
-            _draft_saved = 1 if task.get('draft_saved') else 0
-            _draft_verified_at = datetime.now().strftime('%Y-%m-%d %H:%M:%S') if _draft_saved else None
-            with sqlite3.connect(self.db_path) as conn:
-                cursor = conn.cursor()
-                cursor.execute('''
-                    UPDATE upload_records 
-                    SET status=?, completed_at=?, error_message=?,
-                        title=?, description=?, topics=?, cover_path=?,
-                        cover_status=?, draft_saved=?, draft_verified_at=?,
-                        source_dir=?, output_dir=?
-                    WHERE id=?
-                ''', (task['status'], task['completed_at'], task.get('error_message'),
-                      task.get('title'), task.get('description'), _topics_db,
-                      task.get('cover_path'), _cover_status, _draft_saved,
-                      _draft_verified_at, task.get('source_dir'), task.get('output_dir'),
-                      task['id']))
-            
-            # 检查账号切换（短暂持锁）
-            with self.lock:
-                if self.queue:
-                    next_account = self.queue[0].get('account')
-                    if next_account != self.current_account:
-                        self.current_account = next_account
-                        self._log('info', f'切换账号：{self.current_account}')
-            
-            # 等待间隔（避免风控）
-            time.sleep(2)
-        
-        with self.lock:
-            self.uploading = False
-            self.current_task = None
-            self._log('info', '上传完成')
-        # 自然结束（本次运行未被人工停止）：标记批次完成并触发后端自动清理。
-        # 用本运行的 epoch/auto_cleanup 快照，不读新运行的全局标志。
-        if self._stop_epoch != my_epoch:
-            self._finalize_batches(seen_batches, auto_cleanup=my_auto_cleanup)
-
+                self.uploading = False
+                self.prechecking = False
+                self.current_task = None
+            self._log('info', '上传线程结束（含异常路径复位）')
+            # 自然结束：标记批次完成并触发后端自动清理。
+            # 异常路径也尝试 finalize（安全：会校验无 pending/uploading 才标记完成）。
+            if self._stop_epoch != my_epoch:
+                try:
+                    self._finalize_batches(seen_batches, auto_cleanup=my_auto_cleanup)
+                except Exception as e:
+                    self._log('error', f'worker结束finalize批次失败: {e}')
     def _finalize_batches(self, batch_ids, auto_cleanup=False):
         """批次自然结束：标记 upload_batches 完成；启用自动清理则触发回调。
 
@@ -533,7 +553,7 @@ class UploadManager:
         """
         for batch_id in batch_ids:
             try:
-                with sqlite3.connect(self.db_path) as conn:
+                with _connect_db(self.db_path) as conn:
                     pending = conn.execute(
                         "SELECT COUNT(*) FROM upload_records "
                         "WHERE batch_id=? AND status IN ('pending','uploading')",
@@ -604,7 +624,7 @@ class UploadManager:
 
             for t in failed_now:
                 try:
-                    with sqlite3.connect(self.db_path) as conn:
+                    with _connect_db(self.db_path) as conn:
                         conn.execute(
                             "UPDATE upload_records SET status='failed', completed_at=?, "
                             "error_message=? WHERE id=?",

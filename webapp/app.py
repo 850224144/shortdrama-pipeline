@@ -282,6 +282,9 @@ def get_logs():
     limit = request.args.get('limit', 100, type=int)
     return jsonify(logger.get_recent_logs(limit))
 
+# 并发上限锁：/api/process 同一时刻只允许一个后台处理任务（避免无界线程）
+_process_start_lock = threading.Lock()
+
 @app.route('/api/process', methods=['POST'])
 def process_message():
     """处理消息"""
@@ -291,9 +294,13 @@ def process_message():
     if not message:
         return jsonify({'status': 'failed', 'error': '消息为空'}), 400
     
-    # 异步处理
-    thread = threading.Thread(target=background_process, args=(message,))
-    thread.start()
+    # 异步处理（并发上限：检查+设标志+启动在同一锁内，堵住竞争窗口）
+    with _process_start_lock:
+        if processing_state['processing']:
+            return jsonify({'status': 'failed', 'error': '已有处理任务进行中，请等待完成'}), 409
+        processing_state['processing'] = True
+        thread = threading.Thread(target=background_process, args=(message,))
+        thread.start()
     
     return jsonify({'status': 'started', 'message': '开始处理'})
 
@@ -307,13 +314,15 @@ def background_process(message):
     # 广播状态更新
     socketio.emit('status_update', processing_state)
     
-    result = processor.process_message(message)
+    try:
+        result = processor.process_message(message)
+    except Exception as e:
+        result = {'status': 'failed', 'error': f'处理异常: {e}'}
     
-    # 更新状态
+    # 更新状态（异常也复位，避免并发上限永久生效）
     processing_state['processing'] = False
     processing_state['progress'] = 100 if result['status'] == 'success' else 0
     processing_state['message'] = f"完成：{result.get('cut', 0)}个成功，{result.get('failed_cuts', 0)}个失败" if result['status'] != 'failed' else result.get('error', '失败')
-    
     # 广播状态更新
     socketio.emit('status_update', processing_state)
     
