@@ -1684,7 +1684,7 @@ class PipelineProcessor:
                     version_hook=hook,
                     plot_summary=f'本剧高光台词参考：{quote}' if quote else '',
                     drama_genre='',
-                    quotes=long_titles[:5]
+                    quotes=long_titles[:5] if long_titles else []
                 )
                 # 标题去重：同剧已用标题则换 hook 重新生成（最多3次），兜底模板
                 if ai_result['title'] in titles:
@@ -1701,7 +1701,7 @@ class PipelineProcessor:
                                 version_hook=dedup_hook,
                                 plot_summary=f'本剧高光台词参考：{quote}' if quote else '',
                                 drama_genre='',
-                                quotes=long_titles[:5]
+                                quotes=long_titles[:5] if long_titles else []
                             )
                             if retry and retry['title'] not in titles:
                                 ai_result = retry
