@@ -83,9 +83,65 @@ class UploadManager:
         self._run_epoch = 0
         self._stop_epoch = -1
 
+        # 服务重启后把未完成记录恢复到内存队列；否则数据库有任务但界面为空，
+        # start_upload 会长期报“队列为空”。正在上传的记录统一降回 pending。
+        self._restore_unfinished_queue()
+
     def set_cleanup_callback(self, cb):
         """注入批次完成回调（batch_id → None）。app.py 绑定 artifact_cleanup。"""
         self._cleanup_callback = cb
+
+    def _restore_unfinished_queue(self):
+        """从 upload_records 恢复 pending/uploading 任务。"""
+        conn = _connect_db(self.db_path)
+        conn.row_factory = sqlite3.Row
+        try:
+            rows = conn.execute(
+                "SELECT * FROM upload_records "
+                "WHERE status IN ('pending','uploading') ORDER BY id"
+            ).fetchall()
+            if not rows:
+                return 0
+            stale_ids = [r['id'] for r in rows if r['status'] == 'uploading']
+            if stale_ids:
+                marks = ','.join('?' for _ in stale_ids)
+                conn.execute(
+                    f"UPDATE upload_records SET status='pending', started_at=NULL, "
+                    f"error_message='服务重启，已恢复到待上传队列' WHERE id IN ({marks})",
+                    stale_ids,
+                )
+                conn.commit()
+
+            for row in rows:
+                try:
+                    topics = json.loads(row['topics']) if row['topics'] else []
+                except (TypeError, ValueError):
+                    topics = []
+                task = {
+                    'id': row['id'],
+                    'drama_name': row['drama_name'],
+                    'version': row['version'],
+                    'video_path': row['video_path'],
+                    'cover_path': row['cover_path'],
+                    'title': row['title'],
+                    'description': row['description'],
+                    'topics': topics,
+                    'account': row['account'],
+                    'status': 'pending',
+                    'retry_count': row['retry_count'] or 0,
+                    'batch_id': row['batch_id'],
+                    'source_dir': row['source_dir'],
+                    'output_dir': row['output_dir'],
+                    'cover_status': row['cover_status'] or 'not_requested',
+                    'draft_saved': bool(row['draft_saved']),
+                    'restored_after_restart': True,
+                }
+                self.queue.append(task)
+            self.current_account = self.queue[0].get('account')
+            self._log('info', f'已恢复 {len(self.queue)} 个未完成上传任务')
+            return len(self.queue)
+        finally:
+            conn.close()
         
     def _init_database(self):
         """初始化数据库"""
@@ -302,6 +358,130 @@ class UploadManager:
             self._log('info', f'添加任务：{drama_name} V{version}')
             
             return {'status': 'success', 'id': record_id}
+
+    def add_batch(self, items: List[Dict], default_expected_versions=None) -> Dict:
+        """原子批量入队（R4）：一次校验 + 一个事务创建整批上传记录。
+
+        解决「前端逐条提交可能产生半批次」：任何一条校验失败（缺字段/文件
+        不存在/重复）都不会把已通过校验的其它条留在队列里——要么整批成功，
+        要么成功条目在一个事务内整体落库。返回结构化明细：
+        {status, accepted, duplicates, missing, rejected, ids}。
+
+        items: 每条至少含 {drama_name, video_path, version}；
+               可选 account/cover_path/title/description/topics/batch_id/
+               source_dir/output_dir/expected_versions。
+        """
+        with self.lock:
+            duplicates, missing, rejected = [], [], []
+            accepted = []  # (item, drama, video_path, version, account, topics_list)
+
+            for idx, item in enumerate(items):
+                drama = (item.get('drama_name') or '').strip()
+                video_path = (item.get('video_path') or '').strip()
+                version = item.get('version')
+                account = (item.get('account') or '福桃说剧').strip()
+                label = f'{drama} V{version}' if drama else f'#{idx + 1}'
+
+                if not drama or not video_path or version is None:
+                    rejected.append({'index': idx, 'drama_name': drama,
+                                     'version': version,
+                                     'reason': '缺少必填字段（drama_name/video_path/version）'})
+                    continue
+
+                if not os.path.isfile(video_path):
+                    missing.append({'index': idx, 'drama_name': drama,
+                                    'version': version, 'video_path': video_path})
+                    continue
+
+                # 重复检查：同账号同剧同版本已在 pending/uploading
+                with _connect_db(self.db_path) as conn:
+                    cur = conn.cursor()
+                    cur.execute('''
+                        SELECT id FROM upload_records
+                        WHERE drama_name=? AND version=? AND account=?
+                          AND status IN ('pending', 'uploading')
+                    ''', (drama, version, account))
+                    if cur.fetchone():
+                        duplicates.append({'index': idx, 'drama_name': drama,
+                                           'version': version, 'account': account})
+                        continue
+
+                # topics 归一化（与 add_to_queue 一致）
+                topics = item.get('topics')
+                if isinstance(topics, str):
+                    topics_list = [t.strip() for t in topics.split(',') if t.strip()]
+                elif isinstance(topics, list):
+                    topics_list = topics
+                else:
+                    topics_list = []
+
+                accepted.append((item, drama, video_path, version, account,
+                                 topics_list))
+
+            if not accepted:
+                return {'status': 'success', 'accepted': 0,
+                        'duplicates': duplicates, 'missing': missing,
+                        'rejected': rejected, 'ids': []}
+
+            # 一个事务插入全部通过校验的记录；任何失败整体回滚，不留半批次
+            ids = []
+            new_tasks = []
+            with _connect_db(self.db_path) as conn:
+                for (item, drama, video_path, version, account,
+                     topics_list) in accepted:
+                    topics_db = json.dumps(topics_list, ensure_ascii=False)
+                    cur = conn.cursor()
+                    cur.execute('''
+                        INSERT INTO upload_records
+                        (drama_name, version, video_path, cover_path, title,
+                         description, topics, account, status,
+                         batch_id, source_dir, output_dir)
+                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?, ?, ?)
+                    ''', (drama, version, video_path, item.get('cover_path'),
+                          item.get('title'), item.get('description'), topics_db,
+                          account, item.get('batch_id'),
+                          item.get('source_dir'), item.get('output_dir')))
+                    record_id = cur.lastrowid
+                    ids.append(record_id)
+
+                    exp_versions = item.get('expected_versions',
+                                            default_expected_versions)
+                    new_tasks.append({
+                        'id': record_id,
+                        'drama_name': drama,
+                        'version': version,
+                        'video_path': video_path,
+                        'cover_path': item.get('cover_path'),
+                        'title': item.get('title'),
+                        'description': item.get('description'),
+                        'topics': topics_list,
+                        'account': account,
+                        'status': 'pending',
+                        'retry_count': 0,
+                        'batch_id': item.get('batch_id'),
+                        'source_dir': item.get('source_dir'),
+                        'output_dir': item.get('output_dir'),
+                        'expected_versions': exp_versions,
+                        'cover_status': 'not_requested',
+                        'draft_saved': 0,
+                    })
+
+            self.queue.extend(new_tasks)
+            self._log('info', f'批量添加 {len(accepted)} 个上传任务')
+
+            accepted_details = [{
+                'drama_name': a[1], 'account': a[4],
+                'source_dir': a[0].get('source_dir'),
+                'output_dir': a[0].get('output_dir'),
+                'batch_id': a[0].get('batch_id'),
+                'expected_versions': a[0].get('expected_versions',
+                                             default_expected_versions),
+            } for a in accepted]
+
+            return {'status': 'success', 'accepted': len(accepted),
+                    'duplicates': duplicates, 'missing': missing,
+                    'rejected': rejected, 'ids': ids,
+                    'accepted_details': accepted_details}
     
     def start_upload(self, auto_cleanup: bool = False):
         """开始上传（先预检登录，全部有效才真正开传）。

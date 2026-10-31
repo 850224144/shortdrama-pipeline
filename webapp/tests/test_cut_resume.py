@@ -84,9 +84,11 @@ class TestReRenderFromConfigs(unittest.TestCase):
         with tempfile.TemporaryDirectory() as d:
             _write_config(d, 1)
             _write_config(d, 2)
-            # 渲染成功：mock subprocess.run 返回 rc=0
+            # 渲染成功：mock subprocess.run 返回 rc=0；R6 质量门禁 mock 通过
             with mock.patch('processor.subprocess.run') as mr, \
-                 mock.patch.object(p, '_update_config_artifacts'):
+                 mock.patch.object(p, '_update_config_artifacts'), \
+                 mock.patch.object(p, '_validate_delivery_media',
+                                   return_value={'ok': True, 'reason': ''}):
                 mr.return_value = mock.MagicMock(returncode=0, stderr='')
                 videos = p._re_render_from_configs('测试剧', d)
             self.assertEqual(len(videos), 2)
@@ -103,7 +105,9 @@ class TestReRenderFromConfigs(unittest.TestCase):
                 m.stderr = 'boom'
                 return m
             with mock.patch('processor.subprocess.run', side_effect=fake_run), \
-                 mock.patch.object(p, '_update_config_artifacts'):
+                 mock.patch.object(p, '_update_config_artifacts'), \
+                 mock.patch.object(p, '_validate_delivery_media',
+                                   return_value={'ok': True, 'reason': ''}):
                 videos = p._re_render_from_configs('测试剧', d)
             self.assertEqual(len(videos), 1, 'V1 失败应跳过，V2 成功')
 

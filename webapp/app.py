@@ -9,6 +9,7 @@ import time
 import threading
 import re
 import tempfile
+import atexit
 from datetime import datetime
 from flask import Flask, request, jsonify, send_from_directory
 from flask_socketio import SocketIO, emit
@@ -19,11 +20,22 @@ from processor import PipelineProcessor, Logger, StateManager, CONFIG
 # 导入上传管理器
 from upload_manager import UploadManager
 
+# 批量切片队列独立于 Flask 初始化，便于隔离测试
+from cut_manager import BatchCutManager
+
+# 主处理任务控制器（真实停止 + 统一资源闸门）
+from process_job import ProcessJobController
+
 # 导入成品清理服务
 from artifact_cleanup import ArtifactCleanup, STRATEGY_NONE, STRATEGY_RECYCLE
 
 # 导入剧级档案（下载/切片状态追踪 + 防重 + 搜索）
 from archive import init_database as _archive_init, search_archive, get_archive, should_download
+
+# 配置环境变量覆盖 + 健康检查（R5）。须在任何组件读 CONFIG 前应用。
+from health import apply_env_overrides, run_health_checks
+
+apply_env_overrides(CONFIG)
 
 app = Flask(__name__, template_folder='templates', static_folder='static')
 socketio = SocketIO(app, cors_allowed_origins="*")
@@ -59,6 +71,7 @@ def unsupported_media_type(error):
 
 # 初始化上传管理器
 upload_manager = UploadManager(CONFIG['data_dir'])
+atexit.register(upload_manager.close_all_draft_boxes)
 
 # 初始化成品清理服务
 artifact_cleanup = ArtifactCleanup(CONFIG['data_dir'])
@@ -69,194 +82,25 @@ upload_manager.set_cleanup_callback(
     lambda batch_id: artifact_cleanup.execute_cleanup(batch_id, strategy=STRATEGY_RECYCLE)
 )
 
-# ===== 批量切片管理器 =====
-class BatchCutManager:
-    """批量切片管理器"""
-    
-    def __init__(self, processor, data_dir):
-        self.processor = processor
-        self.data_dir = data_dir
-        self.queue = []  # 切片队列
-        self.current_task = None  # 当前任务
-        self.cutting = False  # 是否正在切片
-        self.paused = False  # 是否暂停
-        self.completed = []  # 已完成任务
-        self.failed = []  # 失败任务
-        self.lock = threading.Lock()
-        self.cut_thread = None
-        self.logs = []
-    
-    def add_to_queue(self, drama_name, account='小桃追剧中', resume=False):
-        """添加切片任务到队列"""
-        with self.lock:
-            # 检查是否已在队列中
-            for task in self.queue:
-                if task['drama_name'] == drama_name and task['status'] == 'pending':
-                    return {'status': 'failed', 'error': f'{drama_name} 已在队列中'}
-            
-            task = {
-                'id': len(self.queue) + 1,
-                'drama_name': drama_name,
-                'account': account,
-                'resume': bool(resume),
-                'status': 'pending',
-                'created_at': datetime.now().strftime('%Y-%m-%d %H:%M:%S')
-            }
-            self.queue.append(task)
-            self._log('info', f'添加切片任务：{drama_name}{"（续跑）" if resume else ""}')
-            return {'status': 'success', 'id': task['id']}
-    
-    def start_cutting(self):
-        """开始切片"""
-        with self.lock:
-            if self.cutting:
-                return {'status': 'failed', 'error': '已在切片中'}
-            
-            pending = [t for t in self.queue if t['status'] == 'pending']
-            if not pending:
-                return {'status': 'failed', 'error': '队列为空'}
-            
-            self.cutting = True
-            self.paused = False
-            self._log('info', f'开始切片：{len(pending)}个任务')
-            
-            # 启动切片线程
-            self.cut_thread = threading.Thread(target=self._cut_worker, daemon=True)
-            self.cut_thread.start()
-            return {'status': 'success'}
-    
-    def pause_cutting(self):
-        """暂停切片"""
-        with self.lock:
-            if not self.cutting:
-                return {'status': 'failed', 'error': '未在切片'}
-            
-            self.paused = True
-            self._log('info', '切片已暂停')
-            return {'status': 'success'}
-    
-    def resume_cutting(self):
-        """恢复切片"""
-        with self.lock:
-            if not self.cutting:
-                return {'status': 'failed', 'error': '未在切片'}
-            
-            self.paused = False
-            self._log('info', '切片已恢复')
-            return {'status': 'success'}
-    
-    def stop_cutting(self):
-        """停止切片"""
-        with self.lock:
-            if not self.cutting:
-                return {'status': 'failed', 'error': '未在切片'}
-            
-            self.paused = True
-            self.cutting = False
-            self.current_task = None
-            self._log('info', '切片已停止')
-            return {'status': 'success'}
-    
-    def clear_queue(self, status='pending'):
-        """清除队列"""
-        with self.lock:
-            if status == 'all':
-                cleared = len(self.queue)
-                self.queue.clear()
-                self.completed.clear()
-                self.failed.clear()
-            else:
-                cleared = len([t for t in self.queue if t['status'] == status])
-                self.queue = [t for t in self.queue if t['status'] != status]
-            
-            self._log('info', f'清除队列：{cleared}个任务')
-            return {'status': 'success', 'cleared': cleared}
-    
-    def get_status(self):
-        """获取切片状态"""
-        with self.lock:
-            return {
-                'queue_length': len([t for t in self.queue if t['status'] == 'pending']),
-                'cutting': self.cutting,
-                'paused': self.paused,
-                'current_task': self.current_task,
-                'completed_count': len(self.completed),
-                'failed_count': len(self.failed),
-                'logs': self.logs[-50:]
-            }
-    
-    def _cut_worker(self):
-        """切片工作线程"""
-        while True:
-            with self.lock:
-                if not self.cutting or self.paused:
-                    if not self.cutting:
-                        break
-                    time.sleep(0.5)
-                    continue
-                
-                # 获取下一个任务
-                task = next((t for t in self.queue if t['status'] == 'pending'), None)
-                if not task:
-                    self.cutting = False
-                    self._log('info', '切片完成：所有任务已处理')
-                    break
-                
-                task['status'] = 'cutting'
-                task['started_at'] = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
-                self.current_task = task
-                self._log('info', f'开始切片：{task["drama_name"]}')
-            
-            # 执行切片
-            try:
-                result = self.processor.manual_cut(task['drama_name'],
-                                                   resume=task.get('resume', False))
-                
-                if result['status'] == 'success':
-                    task['status'] = 'completed'
-                    task['completed_at'] = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
-                    task['output_dirs'] = result.get('output_dirs', [])
-                    self.completed.append(task['id'])
-                    self._log('info', f'切片完成：{task["drama_name"]} - {result.get("cut", 0)}个版本')
-                else:
-                    task['status'] = 'failed'
-                    task['failed_at'] = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
-                    task['error'] = result.get('error', '未知错误')
-                    self.failed.append(task['id'])
-                    self._log('error', f'切片失败：{task["drama_name"]} - {task["error"]}')
-            except Exception as e:
-                task['status'] = 'failed'
-                task['failed_at'] = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
-                task['error'] = str(e)
-                self.failed.append(task['id'])
-                self._log('error', f'切片异常：{task["drama_name"]} - {str(e)}')
-            
-            with self.lock:
-                self.current_task = None
-    
-    def _log(self, level, message):
-        """记录日志"""
-        log_entry = {
-            'timestamp': datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
-            'level': level,
-            'message': message
-        }
-        self.logs.append(log_entry)
-        # 限制日志数量
-        if len(self.logs) > 100:
-            self.logs = self.logs[-100:]
-
 # 初始化批量切片管理器
-batch_cut_manager = BatchCutManager(processor, CONFIG['data_dir'])
+batch_cut_manager = BatchCutManager(processor, CONFIG['data_dir'],
+                                    output_root=CONFIG['output_dir'])
+# 启动状态对账：恢复中断任务、修复错误 running、标记缺成片/可恢复现场
+def _startup_cut_reconcile():
+    try:
+        report = batch_cut_manager.reconcile()
+        if report['changed']:
+            logger.log('system', 'INFO', f'切片对账：{report}')
+    except Exception as e:
+        logger.log('system', 'ERROR', f'切片对账失败: {e}')
 
-# 全局状态
-processing_state = {
-    'current_task': None,
-    'processing': False,
-    'progress': 0,
-    'message': '',
-    'start_time': None
-}
+
+_reconcile_thread = threading.Thread(target=_startup_cut_reconcile, daemon=True)
+_reconcile_thread.start()
+
+# 主消息处理任务控制器；processing_state 保留为兼容别名。
+process_controller = ProcessJobController(processor, on_status=socketio.emit)
+processing_state = process_controller.state
 
 # ===== API路由 =====
 
@@ -269,12 +113,32 @@ def index():
 def get_status():
     """获取当前状态"""
     state = state_manager.load()
+    current = process_controller.snapshot()
     return jsonify({
-        'current_task': processing_state,
+        'current_task': current,
         'completed_count': len(state.get('completed', [])),
         'failed_count': len(state.get('failed', [])),
-        'processing': processing_state['processing']
+        'processing': current['processing'],
+        'stopping': current['stopping'],
+        'job_id': current['job_id'],
     })
+
+@app.route('/api/health')
+def get_health():
+    """健康检查（R5）：ok/degraded/failed + 每项结果与建议。"""
+    try:
+        result = run_health_checks(CONFIG)
+        from flask import Response
+        import json
+        return Response(json.dumps(result, ensure_ascii=False),
+                        mimetype='application/json')
+    except Exception as e:
+        from flask import Response
+        import json
+        return Response(json.dumps({'status': 'failed',
+                                    'error': f'健康检查异常: {e}'},
+                                   ensure_ascii=False),
+                        mimetype='application/json', status=500)
 
 @app.route('/api/history')
 def get_history():
@@ -288,9 +152,6 @@ def get_logs():
     limit = request.args.get('limit', 100, type=int)
     return jsonify(logger.get_recent_logs(limit))
 
-# 并发上限锁：/api/process 同一时刻只允许一个后台处理任务（避免无界线程）
-_process_start_lock = threading.Lock()
-
 @app.route('/api/process', methods=['POST'])
 def process_message():
     """处理消息"""
@@ -300,40 +161,8 @@ def process_message():
     if not message:
         return jsonify({'status': 'failed', 'error': '消息为空'}), 400
     
-    # 异步处理（并发上限：检查+设标志+启动在同一锁内，堵住竞争窗口）
-    with _process_start_lock:
-        if processing_state['processing']:
-            return jsonify({'status': 'failed', 'error': '已有处理任务进行中，请等待完成'}), 409
-        processing_state['processing'] = True
-        thread = threading.Thread(target=background_process, args=(message,))
-        thread.start()
-    
-    return jsonify({'status': 'started', 'message': '开始处理'})
-
-def background_process(message):
-    """后台处理消息"""
-    processing_state['processing'] = True
-    processing_state['start_time'] = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
-    processing_state['progress'] = 0
-    processing_state['message'] = '开始处理'
-    
-    # 广播状态更新
-    socketio.emit('status_update', processing_state)
-    
-    try:
-        result = processor.process_message(message)
-    except Exception as e:
-        result = {'status': 'failed', 'error': f'处理异常: {e}'}
-    
-    # 更新状态（异常也复位，避免并发上限永久生效）
-    processing_state['processing'] = False
-    processing_state['progress'] = 100 if result['status'] == 'success' else 0
-    processing_state['message'] = f"完成：{result.get('cut', 0)}个成功，{result.get('failed_cuts', 0)}个失败" if result['status'] != 'failed' else result.get('error', '失败')
-    # 广播状态更新
-    socketio.emit('status_update', processing_state)
-    
-    # 广播结果
-    socketio.emit('process_complete', result)
+    body, status_code = process_controller.start(message)
+    return jsonify(body), status_code
 
 @app.route('/api/cleanup-logs', methods=['POST'])
 def cleanup_logs():
@@ -344,9 +173,9 @@ def cleanup_logs():
 
 @app.route('/api/stop', methods=['POST'])
 def stop_processing():
-    """停止处理"""
-    # TODO: 实现停止逻辑
-    return jsonify({'status': 'success', 'message': '停止请求已发送'})
+    """请求停止主处理任务。"""
+    body, status_code = process_controller.stop()
+    return jsonify(body), status_code
 
 @app.route('/api/demo')
 def demo():
@@ -597,7 +426,8 @@ def add_upload_task():
             version=data['version'],
             batch_id=data.get('batch_id'),
             source_dir=data.get('source_dir'),
-            output_dir=data.get('output_dir')
+            output_dir=data.get('output_dir'),
+            expected_versions=data.get('expected_versions'),
         )
         
         # 登记批次（幂等），供清理计划器按 batch_id 聚合
@@ -612,6 +442,46 @@ def add_upload_task():
             )
         
         # 直接返回结果，使用Response对象避免jsonify问题
+        from flask import Response
+        import json
+        return Response(json.dumps(result, ensure_ascii=False), mimetype='application/json')
+    except Exception as e:
+        from flask import Response
+        import json
+        return Response(json.dumps({'status': 'failed', 'error': str(e)}, ensure_ascii=False), mimetype='application/json', status=500)
+
+@app.route('/api/upload/batches', methods=['POST'])
+def add_upload_batch():
+    """原子批量添加上传任务（R4）：一次请求创建整批，无半批次。
+
+    请求体：{items: [{drama_name, video_path, version, account?, ...}], batch_id?}
+    服务端一次校验（必填/文件存在/重复）+ 一个事务创建全部记录；
+    返回 accepted/duplicates/missing/rejected 结构化明细。
+    """
+    try:
+        data = request.get_json(force=True) or {}
+        items = data.get('items')
+        if not isinstance(items, list) or not items:
+            from flask import Response
+            import json
+            return Response(json.dumps({'status': 'failed', 'error': '缺少 items（非空数组）'},
+                                       ensure_ascii=False), mimetype='application/json', status=400)
+
+        result = upload_manager.add_batch(items)
+
+        # 登记批次元数据（幂等，按 batch_id 聚合），供清理计划器使用
+        if result.get('status') == 'success' and result.get('accepted'):
+            for detail in result.get('accepted_details', []):
+                if detail.get('batch_id'):
+                    artifact_cleanup._record_batch(
+                        batch_id=detail['batch_id'],
+                        drama_name=detail['drama_name'],
+                        account=detail.get('account'),
+                        source_dir=detail.get('source_dir'),
+                        output_dir=detail.get('output_dir'),
+                        expected_versions=detail.get('expected_versions'),
+                    )
+
         from flask import Response
         import json
         return Response(json.dumps(result, ensure_ascii=False), mimetype='application/json')
@@ -983,6 +853,39 @@ def retry_cut_task():
         import json
         return Response(json.dumps({'status': 'failed', 'error': str(e)}, ensure_ascii=False), mimetype='application/json', status=500)
 
+@app.route('/api/cut/events')
+def get_cut_events():
+    """查询切片任务持久化事件（R2）。job_id 可选；不带则返回全部（含队列级）。"""
+    try:
+        job_id = request.args.get('job_id') or None
+        try:
+            limit = max(1, min(500, int(request.args.get('limit', 100))))
+        except (TypeError, ValueError):
+            limit = 100
+        from flask import Response
+        import json
+        events = batch_cut_manager.get_events(job_id=job_id, limit=limit)
+        return Response(json.dumps({'events': events}, ensure_ascii=False),
+                        mimetype='application/json')
+    except Exception as e:
+        from flask import Response
+        import json
+        return Response(json.dumps({'status': 'failed', 'error': str(e)}, ensure_ascii=False), mimetype='application/json', status=500)
+
+@app.route('/api/cut/reconcile', methods=['POST'])
+def reconcile_cut_queue():
+    """手动触发切片状态对账（R3），返回对账报告。"""
+    try:
+        from flask import Response
+        import json
+        report = batch_cut_manager.reconcile()
+        return Response(json.dumps({'status': 'success', 'report': report},
+                                   ensure_ascii=False), mimetype='application/json')
+    except Exception as e:
+        from flask import Response
+        import json
+        return Response(json.dumps({'status': 'failed', 'error': str(e)}, ensure_ascii=False), mimetype='application/json', status=500)
+
 # 后台任务
 def cleanup_logs_background():
     """后台清理日志"""
@@ -1004,16 +907,8 @@ def startup_cleanup_sweep():
     同步执行清理，正常不会遗留；仅当进程在「标记完成」与「清理执行」之间崩溃时，
     此补扫在下一次启动时补跑。execute_cleanup 幂等（已回收的路径不会重复移动）。
     """
-    import sqlite3 as _sq
-    _db = os.path.join(CONFIG.get('data_dir', 'data'), 'upload.db')
-    if not os.path.exists(_db):
-        return
     try:
-        with _sq.connect(_db) as conn:
-            rows = conn.execute(
-                "SELECT batch_id FROM upload_batches "
-                "WHERE status='completed' AND auto_cleanup=1").fetchall()
-        for (batch_id,) in rows:
+        for batch_id in artifact_cleanup.list_startup_cleanup_batches():
             try:
                 logger.log('system', 'INFO', f'启动补扫：批次 {batch_id} 补跑自动清理')
                 artifact_cleanup.execute_cleanup(batch_id, strategy=STRATEGY_RECYCLE)

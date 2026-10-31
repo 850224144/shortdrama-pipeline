@@ -1021,9 +1021,9 @@
             const entry = document.createElement('div');
             entry.className = 'log-entry';
             entry.innerHTML = `
-                <span class="log-time">${log.timestamp}</span>
-                <span class="log-level ${log.level}">${log.level}</span>
-                <span class="log-message">${log.message}</span>
+                <span class="log-time">${escapeHtml(log.timestamp)}</span>
+                <span class="log-level ${escapeHtml(log.level)}">${escapeHtml(log.level)}</span>
+                <span class="log-message">${escapeHtml(log.message)}</span>
             `;
             container.insertBefore(entry, container.firstChild);
             
@@ -1102,7 +1102,7 @@
         
         function stateBadge(s) {
             const map = {done: '✅', cutting: '✂️⏳', downloading: '⬇️⏳', failed: '❌', partial: '⚠️', none: '—'};
-            return map[s] || (s ? s : '—');
+            return map[s] || (s ? escapeHtml(s) : '—');
         }
         
         // 加载历史记录
@@ -1126,23 +1126,23 @@
                 container.innerHTML = history.map(item => `
                     <div class="history-item">
                         <div class="history-header">
-                            <span class="history-name">${item.name}</span>
-                            <span class="history-type ${item.type}">${item.type === 'completed' ? '完成' : '失败'}</span>
+                            <span class="history-name">${escapeHtml(item.name)}</span>
+                            <span class="history-type ${escapeHtml(item.type)}">${item.type === 'completed' ? '完成' : '失败'}</span>
                         </div>
-                        <div class="history-time">${item.time}</div>
+                        <div class="history-time">${escapeHtml(item.time)}</div>
                         ${item.details ? `<div class="history-details">${formatDetails(item.details)}</div>` : ''}
                     </div>
                 `).join('');
             } catch (error) {
-                container.innerHTML = `<div class="empty-state">加载失败: ${error.message}</div>`;
+                container.innerHTML = `<div class="empty-state">加载失败: ${escapeHtml(error.message)}</div>`;
             }
         }
         
         function formatDetails(details) {
             if (typeof details === 'object') {
-                return Object.entries(details).map(([k, v]) => `${k}: ${v}`).join(', ');
+                return Object.entries(details).map(([k, v]) => `${escapeHtml(k)}: ${escapeHtml(v)}`).join(', ');
             }
-            return details;
+            return escapeHtml(details);
         }
         
         // 刷新统计
@@ -1392,13 +1392,26 @@
                     return;
                 }
                 
-                container.innerHTML = dramas.map(drama => `
-                    <div class="drama-item" id="drama-${drama.name}">
-                        <input type="checkbox" onchange="toggleDramaSelect('${drama.name}', this.checked)">
-                        <span class="drama-name">${drama.name}</span>
+                container.innerHTML = dramas.map(drama => {
+                    const name = escapeHtml(drama.name);
+                    return `
+                    <div class="drama-item">
+                        <input type="checkbox" class="upload-drama-cb" data-name="${name}">
+                        <span class="drama-name">${name}</span>
                         <span class="version-count">${drama.version_count}个版本</span>
-                    </div>
-                `).join('');
+                    </div>`;
+                }).join('');
+                // 事件委托替代剧名内联 onchange（防剧名含引号/HTML 的 DOM XSS）
+                if (!container.dataset.changeBound) {
+                    container.addEventListener('change', (ev) => {
+                        const cb = ev.target;
+                        if (cb.classList && cb.classList.contains('upload-drama-cb')) {
+                            toggleDramaSelect(cb.dataset.name, cb.checked,
+                                              cb.closest('.drama-item'));
+                        }
+                    });
+                    container.dataset.changeBound = '1';
+                }
                 
                 // 存储剧列表数据
                 window.dramasData = dramas;
@@ -1406,7 +1419,7 @@
                 
                 showNotification('已加载' + dramas.length + '部剧', 'success');
             } catch (error) {
-                container.innerHTML = `<div style="padding: 20px; text-align: center; color: #f44336;">加载失败: ${error.message}</div>`;
+                container.innerHTML = `<div style="padding: 20px; text-align: center; color: #f44336;">加载失败: ${escapeHtml(error.message)}</div>`;
             }
         }
         
@@ -1416,16 +1429,15 @@
         }
         
         // 切换剧选择
-        function toggleDramaSelect(dramaName, checked) {
-            const item = document.getElementById(`drama-${dramaName}`);
+        function toggleDramaSelect(dramaName, checked, item) {
             const drama = window.dramasData?.find(d => d.name === dramaName);
             
             if (checked && drama) {
                 selectedDramas[dramaName] = drama.versions;
-                item.classList.add('selected');
+                if (item) item.classList.add('selected');
             } else {
                 delete selectedDramas[dramaName];
-                item.classList.remove('selected');
+                if (item) item.classList.remove('selected');
             }
         }
         
@@ -1452,16 +1464,14 @@
             // 生成批次 ID（时间戳），供清理计划器按批次聚合
             const batchId = 'batch_' + Date.now() + '_' + Math.floor(Math.random() * 1000);
             
-            // 添加所有选中的剧到队列
-            let addedCount = 0;
+            // 收集全部待上传条目（一次请求整批提交，避免半批次）
+            const items = [];
             for (const [dramaName, versions] of Object.entries(selectedDramas)) {
                 const drama = window.dramasData?.find(d => d.name === dramaName);
                 if (!drama) {
                     console.warn(`剧 ${dramaName} 不在 dramasData 中`);
                     continue;
                 }
-                
-                console.log(`处理剧: ${dramaName}, 版本: ${versions}`);
                 
                 // 扫描实际存在的视频文件
                 const dramaDir = drama.path;
@@ -1470,7 +1480,6 @@
                     const fileResponse = await fetch(`/api/files?dir=${encodeURIComponent(dramaDir)}`);
                     const fileData = await fileResponse.json();
                     files = fileData.files || [];
-                    console.log(`扫描文件: ${files.length}个`);
                 } catch (error) {
                     console.error('扫描文件失败:', error);
                     continue;
@@ -1489,60 +1498,65 @@
                         continue;
                     }
                     
-                    const videoPath = `${dramaDir}/${videoFile}`;
-                    console.log(`添加任务: ${videoPath}`);
-                    
-                    try {
-                        const response = await fetch('/api/upload/add', {
-                            method: 'POST',
-                            headers: { 'Content-Type': 'application/json' },
-                            body: JSON.stringify({
-                                drama_name: dramaName,
-                                video_path: videoPath,
-                                account: account,
-                                version: version,
-                                batch_id: batchId,
-                                output_dir: dramaDir,
-                                expected_versions: versions
-                            })
-                        });
-                        
-                        console.log(`添加任务响应: V${version}`, response.status);
-                        
-                        // 尝试解析JSON
-                        let result = {};
-                        try {
-                            result = await response.json();
-                            console.log(`添加任务结果: V${version}`, result);
-                        } catch (jsonError) {
-                            console.error(`JSON解析失败: V${version}`, jsonError);
-                            // P2-19: 解析失败不静默计成功（任务状态未知，保守计失败）
-                            result = { status: 'unknown', error: `响应解析失败: ${jsonError}` };
-                        }
-                        
-                        // 检查result.status
-                        if (result.status === 'success') {
-                            addedCount++;
-                            console.log(`添加成功: V${version}`);
-                        } else if (result.error && result.error.includes('已在队列中')) {
-                            // 已经在队列中，也算成功
-                            addedCount++;
-                            console.log(`V${version} 已在队列中`);
-                        } else {
-                            console.error(`添加失败: V${version}`, result.error);
-                        }
-                    } catch (error) {
-                        console.error(`添加异常: V${version}`, error);
-                        // P2-19: fetch 异常=请求可能未达服务器，不静默计成功
-                        showNotification(`V${version} 添加失败: ${error}`, 'error');
-                    }
+                    items.push({
+                        drama_name: dramaName,
+                        video_path: `${dramaDir}/${videoFile}`,
+                        account: account,
+                        version: version,
+                        batch_id: batchId,
+                        output_dir: dramaDir,
+                        expected_versions: versions
+                    });
                 }
+            }
+            
+            if (items.length === 0) {
+                showNotification('没有找到可上传的视频文件', 'error');
+                return;
+            }
+            
+            // 一次请求整批提交（R4：原子批量，无半批次）
+            let addedCount = 0;
+            let detailMsg = '';
+            try {
+                const response = await fetch('/api/upload/batches', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ items: items, batch_id: batchId })
+                });
+                
+                let result = {};
+                try {
+                    result = await response.json();
+                } catch (jsonError) {
+                    result = { status: 'unknown', error: `响应解析失败: ${jsonError}` };
+                }
+                
+                if (result.status === 'success') {
+                    addedCount = result.accepted || 0;
+                    const dupN = (result.duplicates || []).length;
+                    const missN = (result.missing || []).length;
+                    const rejN = (result.rejected || []).length;
+                    if (dupN || missN || rejN) {
+                        const parts = [];
+                        if (dupN) parts.push(`${dupN}个重复`);
+                        if (missN) parts.push(`${missN}个文件缺失`);
+                        if (rejN) parts.push(`${rejN}个校验失败`);
+                        detailMsg = `（跳过: ${parts.join('，')}）`;
+                    }
+                } else {
+                    showNotification(result.error || '批量添加失败', 'error');
+                    return;
+                }
+            } catch (error) {
+                showNotification(`批量添加异常: ${error}`, 'error');
+                return;
             }
             
             console.log('总计添加: ' + addedCount + '个任务');
             
             if (addedCount === 0) {
-                showNotification('没有找到可上传的视频文件', 'error');
+                showNotification(`没有可上传的视频文件 ${detailMsg}`.trim(), 'error');
                 return;
             }
             
@@ -1717,14 +1731,14 @@
                 } else {
                     queueContainer.innerHTML = allTasks.map(task => `
                         <div class="queue-item">
-                            <span class="status-badge ${task.status}">${
+                            <span class="status-badge ${escapeHtml(task.status)}">${
                                 task.status === 'pending' ? '待上传' :
                                 task.status === 'uploading' ? '上传中' :
                                 task.status === 'completed' ? '已完成' : '失败'
                             }</span>
                             <div class="queue-info">
-                                <div>${task.drama_name} V${task.version}</div>
-                                ${task.error_message ? `<div class="queue-progress">错误: ${task.error_message}</div>` : ''}
+                                <div>${escapeHtml(task.drama_name)} V${escapeHtml(task.version)}</div>
+                                ${task.error_message ? `<div class="queue-progress">错误: ${escapeHtml(task.error_message)}</div>` : ''}
                             </div>
                         </div>
                     `).join('');
@@ -1735,9 +1749,9 @@
                 if (status.logs && status.logs.length > 0) {
                     logContainer.innerHTML = status.logs.map(log => `
                         <div class="log-entry">
-                            <span class="timestamp">[${log.timestamp}]</span>
-                            <span class="level ${log.level}">${log.level.toUpperCase()}</span>
-                            ${log.message}
+                            <span class="timestamp">[${escapeHtml(log.timestamp)}]</span>
+                            <span class="level ${escapeHtml(log.level)}">${escapeHtml(log.level.toUpperCase())}</span>
+                            ${escapeHtml(log.message)}
                         </div>
                     `).join('');
                 }
@@ -1939,7 +1953,9 @@
             
             if (result.status === 'success') {
                 showNotification('切片已停止', 'info');
-                stopCutPolling();
+                // 再轮询一次，等 worker 完成子进程清理后把当前任务复位。
+                await updateCutUI();
+                startCutPolling();
             } else {
                 showNotification('停止失败: ' + result.error, 'error');
             }
@@ -1975,18 +1991,33 @@
                 document.getElementById('cutCurrentCount').textContent = status.current_task ? 1 : 0;
                 document.getElementById('cutCompletedCount').textContent = status.completed_count;
                 document.getElementById('cutFailedCount').textContent = status.failed_count;
+
+                // 完成/失败状态实时通知（轮询间状态跃迁）
+                if (typeof window._cutLastCompleted === 'number') {
+                    if (status.completed_count > window._cutLastCompleted) {
+                        showNotification(`切片完成：新完成 ${status.completed_count - window._cutLastCompleted} 个任务`, 'success');
+                    }
+                    if (status.failed_count > window._cutLastFailed) {
+                        showNotification(`切片失败：新失败 ${status.failed_count - window._cutLastFailed} 个任务`, 'error');
+                    }
+                }
+                window._cutLastCompleted = status.completed_count;
+                window._cutLastFailed = status.failed_count;
                 
                 // 更新按钮状态
                 const startBtn = document.getElementById('startCutBtn');
                 const pauseBtn = document.getElementById('pauseCutBtn');
                 const stopBtn = document.getElementById('stopCutBtn');
                 
-                if (status.cutting) {
+                if (status.cutting || status.stopping) {
                     startBtn.disabled = true;
-                    pauseBtn.disabled = !status.paused;
-                    stopBtn.disabled = false;
+                    pauseBtn.disabled = status.stopping || !status.paused;
+                    stopBtn.disabled = status.stopping;
                     
-                    if (status.paused) {
+                    if (status.stopping) {
+                        pauseBtn.textContent = '⏸️ 暂停';
+                        pauseBtn.onclick = pauseCutting;
+                    } else if (status.paused) {
                         pauseBtn.textContent = '▶️ 恢复';
                         pauseBtn.onclick = resumeCutting;
                     } else {
@@ -2010,14 +2041,15 @@
                 } else {
                     queueContainer.innerHTML = allTasks.map(task => `
                         <div class="queue-item">
-                            <span class="status-badge ${task.status}">${
+                            <span class="status-badge ${escapeHtml(task.status)}">${
                                 task.status === 'pending' ? '待切片' :
                                 task.status === 'cutting' ? '切片中' :
                                 task.status === 'completed' ? '已完成' : '失败'
                             }</span>
                             <div class="queue-info">
-                                <div>${task.drama_name}</div>
-                                ${task.error ? `<div class="queue-progress">错误: ${task.error}</div>` : ''}
+                                <div>${escapeHtml(task.drama_name)}</div>
+                                ${task.stage ? `<div class="queue-progress">阶段: ${escapeHtml(task.stage)}</div>` : ''}
+                                ${task.error ? `<div class="queue-progress">错误: ${escapeHtml(task.error)}</div>` : ''}
                             </div>
                         </div>
                     `).join('');
@@ -2028,11 +2060,15 @@
                 if (status.logs && status.logs.length > 0) {
                     logContainer.innerHTML = status.logs.map(log => `
                         <div class="log-entry">
-                            <span class="timestamp">[${log.timestamp}]</span>
-                            <span class="level ${log.level}">${log.level.toUpperCase()}</span>
-                            ${log.message}
+                            <span class="timestamp">[${escapeHtml(log.timestamp)}]</span>
+                            <span class="level ${escapeHtml(log.level)}">${escapeHtml(log.level.toUpperCase())}</span>
+                            ${escapeHtml(log.message)}
                         </div>
                     `).join('');
+                }
+
+                if (!status.cutting && !status.stopping && cutPollTimer) {
+                    stopCutPolling();
                 }
             } catch (error) {
                 console.error('更新切片状态失败:', error);
@@ -2066,7 +2102,7 @@
                 document.getElementById('cutFailedCount').textContent = status.failed_count;
                 
                 // 如果正在切片，启动轮询
-                if (status.cutting && !cutPollTimer) {
+                if ((status.cutting || status.stopping) && !cutPollTimer) {
                     startCutPolling();
                 }
             } catch (error) {

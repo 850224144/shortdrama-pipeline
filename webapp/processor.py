@@ -19,6 +19,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 # 导入AI文案生成器
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from ai_copy_generator import AICopyGenerator
+from job_runtime import JobCancelled, execution_gate
 
 # 路径配置
 CONFIG = {
@@ -69,6 +70,11 @@ CONFIG = {
 
 # 标点符号列表
 PUNCTUATIONS = ['，', '。', '？', '！', '、', '：', '；', '“', '”', '（', '）', ' ', '\t']
+
+
+# 兼容现有调用与测试名称；取消语义由 job_runtime 统一提供。
+CutCancelled = JobCancelled
+
 
 # 题材分类规则
 GENRE_RULES = [
@@ -455,8 +461,11 @@ class PipelineProcessor:
             return 8
         return 6
     
-    def process_message(self, message):
+    def process_message(self, message, cancel_event=None):
         """处理消息"""
+        if cancel_event is not None and cancel_event.is_set():
+            return {'status': 'cancelled', 'cancelled': True,
+                    'error': '用户已停止任务'}
         with self.lock:
             if self.processing:
                 return {'status': 'busy', 'message': '正在处理其他任务'}
@@ -474,7 +483,8 @@ class PipelineProcessor:
             # 检查是否是手动切片模式
             for prefix in ('/cut ', '/切片 '):
                 if message.startswith(prefix):
-                    return self.manual_cut(message[len(prefix):].strip())
+                    return self.manual_cut(message[len(prefix):].strip(),
+                                           cancel_event=cancel_event)
             
             # 提取链接
             links = LinkExtractor.extract(message)
@@ -485,7 +495,16 @@ class PipelineProcessor:
             self.logger.log('system', 'INFO', f'找到{len(links)}个链接，开始下载...')
             
             # 下载所有链接
-            download_results = self.download_batch(links)
+            download_results = self.download_batch(links, cancel_event=cancel_event)
+            self._raise_if_cancelled(cancel_event)
+            cancelled_downloads = [r for r in download_results if r.get('cancelled')]
+            if cancelled_downloads:
+                return {
+                    'status': 'cancelled',
+                    'cancelled': True,
+                    'error': '用户已停止任务',
+                    'failed_downloads': len(cancelled_downloads),
+                }
             
             successful_downloads = [r for r in download_results if r['success']]
             failed_downloads = [r for r in download_results if not r['success']]
@@ -501,7 +520,14 @@ class PipelineProcessor:
                 }
             
             # 切片所有剧
-            cut_results = self.cut_batch(successful_downloads)
+            if cancel_event is not None and cancel_event.is_set():
+                return {'status': 'cancelled', 'cancelled': True,
+                        'error': '用户已停止任务'}
+            cut_results = self.cut_batch(successful_downloads,
+                                         cancel_event=cancel_event)
+            if any(r.get('cancelled') for r in cut_results):
+                return {'status': 'cancelled', 'cancelled': True,
+                        'error': '用户已停止任务'}
             
             successful_cuts = [r for r in cut_results if r['success']]
             failed_cuts = [r for r in cut_results if not r['success']]
@@ -530,6 +556,10 @@ class PipelineProcessor:
                 ]
             }
             
+        except CutCancelled:
+            self.logger.log('system', 'INFO', '处理已停止')
+            return {'status': 'cancelled', 'cancelled': True,
+                    'error': '用户已停止任务'}
         except Exception as e:
             self.logger.log('system', 'ERROR', f'处理失败: {str(e)}')
             return {'status': 'failed', 'error': str(e)}
@@ -538,7 +568,7 @@ class PipelineProcessor:
             with self.lock:
                 self.processing = False
     
-    def manual_cut(self, drama_name, resume=False):
+    def manual_cut(self, drama_name, resume=False, cancel_event=None):
         """手动切片 - 从素材目录直接切片
 
         resume=True：失败续跑，只重渲染保留的 edl_config，不重新生成 EDL；
@@ -591,10 +621,36 @@ class PipelineProcessor:
         }
         
         # 切片
-        result = self.cut_batch([download_result], resume=resume)
+        result = self.cut_batch([download_result], resume=resume,
+                                cancel_event=cancel_event)
         
         successful_cuts = [r for r in result if r['success']]
-        failed_cuts = [r for r in result if not r['success']]
+        skipped_cuts = [r for r in result if r.get('skipped')]
+        failed_cuts = [r for r in result
+                       if not r['success'] and not r.get('skipped') and not r.get('cancelled')]
+        cancelled_cuts = [r for r in result if r.get('cancelled')]
+
+        if cancelled_cuts:
+            return {
+                'status': 'cancelled',
+                'cancelled': True,
+                'drama_name': drama_name,
+                'episodes': len(mp4_files),
+                'cut': len(successful_cuts),
+                'failed_cuts': 0,
+                'output_dirs': [r['output_dir'] for r in successful_cuts if r.get('output_dir')],
+                'error': '用户已停止切片',
+            }
+        if skipped_cuts and not successful_cuts and not failed_cuts:
+            return {
+                'status': 'skipped',
+                'reason': 'already_cut',
+                'drama_name': drama_name,
+                'episodes': len(mp4_files),
+                'cut': 0,
+                'failed_cuts': 0,
+                'output_dirs': [r['output_dir'] for r in skipped_cuts if r.get('output_dir')],
+            }
         
         return {
             'status': 'success' if successful_cuts else 'failed',
@@ -602,16 +658,21 @@ class PipelineProcessor:
             'episodes': len(mp4_files),
             'cut': len(successful_cuts),
             'failed_cuts': len(failed_cuts),
-            'output_dirs': [r['output_dir'] for r in successful_cuts]
+            'output_dirs': [r['output_dir'] for r in successful_cuts],
+            'error': None if successful_cuts else next(
+                (r.get('error') for r in failed_cuts if r.get('error')),
+                '切片失败'),
         }
     
-    def download_batch(self, links):
+    def download_batch(self, links, cancel_event=None):
         """并发下载所有链接"""
         results = []
+        self._raise_if_cancelled(cancel_event)
         
         with ThreadPoolExecutor(max_workers=CONFIG['download']['max_workers']) as executor:
             future_to_link = {
-                executor.submit(self._download_with_retry, link_info, CONFIG['download']['max_retries']): link_info
+                executor.submit(self._download_with_retry, link_info,
+                                CONFIG['download']['max_retries'], cancel_event): link_info
                 for link_info in links
             }
             
@@ -620,6 +681,17 @@ class PipelineProcessor:
                 try:
                     result = future.result()
                     results.append(result)
+                except CutCancelled:
+                    results.append({
+                        'link': link_info['link'],
+                        'link_id': link_info['link_id'],
+                        'pwd': link_info['pwd'],
+                        'success': False,
+                        'cancelled': True,
+                        'error': '用户已停止任务',
+                        'downloaded_files': [],
+                        'attempts': 0,
+                    })
                 except Exception as e:
                     results.append({
                         'link': link_info['link'],
@@ -633,16 +705,32 @@ class PipelineProcessor:
         
         return results
     
-    def _download_with_retry(self, link_info, max_retries):
+    def _download_with_retry(self, link_info, max_retries, cancel_event=None):
         """带重试的单次下载"""
         attempts = 0
         last_error = None
+        last_result = None
         
         while attempts < max_retries:
+            if cancel_event is not None and cancel_event.is_set():
+                return {
+                    'link': link_info['link'],
+                    'link_id': link_info['link_id'],
+                    'pwd': link_info['pwd'],
+                    'success': False,
+                    'cancelled': True,
+                    'error': '用户已停止任务',
+                    'downloaded_files': [],
+                    'attempts': attempts,
+                }
             attempts += 1
             
             try:
-                result = self._download_once(link_info)
+                if cancel_event is None:
+                    result = self._download_once(link_info)
+                else:
+                    result = self._download_once(link_info, cancel_event=cancel_event)
+                last_result = result
                 
                 if result['success']:
                     # archive 回填：真实下载/手动素材成功；防重跳过不覆盖历史
@@ -653,6 +741,9 @@ class PipelineProcessor:
                             _mp4s = [f for f in result['downloaded_files'] if f.endswith('.mp4')]
                             _sz = sum(os.path.getsize(f) for f in result['downloaded_files'] if os.path.exists(f))
                             _arch_up(_dn, download_state='done',
+                                     source_url=link_info.get('link'),
+                                     source_passwd=link_info.get('pwd'),
+                                     local_dir=result.get('target_dir'),
                                      episode_count=len(_mp4s),
                                      download_size=_sz // (1024 * 1024),
                                      download_files=len(result['downloaded_files']),
@@ -670,19 +761,55 @@ class PipelineProcessor:
                     }
                 else:
                     last_error = result.get('error', 'Unknown error')
+                    # 单次失败后立即标记 failed，让下一次重试不被旧目录防重挡住；
+                    # 最终成功时会被 done 覆盖。
+                    try:
+                        from archive import upsert_archive as _arch_up
+                        _fail_name = result.get('drama_name') or link_info['link_id']
+                        _arch_up(_fail_name, download_state='failed',
+                                 download_error=str(last_error)[:500])
+                    except Exception as _e:
+                        self.logger.log(link_info['link_id'], 'WARN',
+                                        f'archive 下载重试状态回填失败：{_e}')
             
+            except CutCancelled:
+                return {
+                    'link': link_info['link'],
+                    'link_id': link_info['link_id'],
+                    'pwd': link_info['pwd'],
+                    'success': False,
+                    'cancelled': True,
+                    'error': '用户已停止任务',
+                    'downloaded_files': [],
+                    'attempts': attempts,
+                }
             except Exception as e:
                 last_error = str(e)
             
             # 重试前等待
             if attempts < max_retries:
                 wait_time = 2 ** attempts
-                time.sleep(wait_time)
+                if cancel_event is not None:
+                    if cancel_event.wait(wait_time):
+                        return {
+                            'link': link_info['link'],
+                            'link_id': link_info['link_id'],
+                            'pwd': link_info['pwd'],
+                            'success': False,
+                            'cancelled': True,
+                            'error': '用户已停止任务',
+                            'downloaded_files': [],
+                            'attempts': attempts,
+                        }
+                else:
+                    time.sleep(wait_time)
         
         # archive 标记失败（最终重试失败后）
         try:
             from archive import upsert_archive as _arch_up
-            _fail_name = link_info['link_id'] or link_info['link'].split('/')[-1].split('?')[0]
+            _fail_name = ((last_result or {}).get('drama_name') or
+                          link_info['link_id'] or
+                          link_info['link'].split('/')[-1].split('?')[0])
             _arch_up(_fail_name, download_state='failed',
                      download_error=f'Failed after {max_retries} attempts: {last_error}')
         except Exception as _e:
@@ -697,8 +824,9 @@ class PipelineProcessor:
             'attempts': attempts
         }
     
-    def _download_once(self, link_info):
+    def _download_once(self, link_info, cancel_event=None):
         """单次下载 - 转存到/短剧素材/目录，下载后清理"""
+        self._raise_if_cancelled(cancel_event)
         link = link_info['link']
         link_id = link_info['link_id']
         
@@ -711,7 +839,8 @@ class PipelineProcessor:
             from archive import should_download as _arch_should
             _drama_guess = link_id or link_dir_name
             _local = os.path.join(CONFIG['download_base_dir'], _drama_guess)
-            _ok, _reason = _arch_should(_drama_guess, _local)
+            _ok, _reason = _arch_should(
+                _drama_guess, _local, source_url=link)
             if not _ok:
                 _existing = self._scan_files_recursive(_local) if os.path.isdir(_local) else []
                 self.logger.log(_drama_guess, 'INFO', f'防重跳过下载：{_reason}')
@@ -730,24 +859,34 @@ class PipelineProcessor:
                 existing_files = self._scan_files_recursive(manual_dir)
                 existing_mp4 = [f for f in existing_files if f.endswith('.mp4') and '.downloading' not in f]
                 if len(existing_mp4) >= CONFIG['download']['min_manual_files']:
-                    self.logger.log(name, 'INFO', f'找到手动放置的素材：{len(existing_mp4)}集')
-                    # 检查集数连续性
-                    is_complete, missing_eps, max_ep, continuity_msg = self._check_episode_continuity(manual_dir)
-                    if is_complete:
-                        self.logger.log(name, 'INFO', f'✓ {continuity_msg}')
+                    try:
+                        from archive import get_archive as _arch_get
+                        _prev = _arch_get(name)
+                    except Exception:
+                        _prev = None
+                    if _prev and _prev.get('download_state') == 'failed':
+                        self.logger.log(
+                            name, 'WARN',
+                            '本地存在上次失败下载的残留，本次继续下载而不是按完成跳过')
                     else:
-                        self.logger.log(name, 'WARN', f'⚠ {continuity_msg}')
-                    return {
-                        'success': True,
-                        'downloaded_files': existing_files,
-                        'target_dir': manual_dir,
-                        'drama_name': name,
-                        'error': None,
-                        'transferred': False,
-                        'episode_complete': is_complete,
-                        'missing_episodes': missing_eps,
-                        'total_episodes': max_ep
-                    }
+                        self.logger.log(name, 'INFO', f'找到手动放置的素材：{len(existing_mp4)}集')
+                        # 检查集数连续性
+                        is_complete, missing_eps, max_ep, continuity_msg = self._check_episode_continuity(manual_dir)
+                        if is_complete:
+                            self.logger.log(name, 'INFO', f'✓ {continuity_msg}')
+                        else:
+                            self.logger.log(name, 'WARN', f'⚠ {continuity_msg}')
+                        return {
+                            'success': True,
+                            'downloaded_files': existing_files,
+                            'target_dir': manual_dir,
+                            'drama_name': name,
+                            'error': None,
+                            'transferred': False,
+                            'episode_complete': is_complete,
+                            'missing_episodes': missing_eps,
+                            'total_episodes': max_ep
+                        }
         
         # 2. 转存到网盘（先转存到根目录，再移动到/短剧素材/）
         # 默认密码，如果链接中有密码则使用链接中的
@@ -760,13 +899,11 @@ class PipelineProcessor:
         ]
         
         try:
-            process = subprocess.run(
+            process = self._run_command_cancellable(
                 transfer_cmd,
-                capture_output=True,
-                text=True,
-                encoding="utf-8",
                 timeout=CONFIG['download']['transfer_timeout'],
-                cwd=os.path.dirname(CONFIG['baidupcs_path'])
+                cancel_event=cancel_event,
+                cwd=os.path.dirname(CONFIG['baidupcs_path']),
             )
             
             # 解析转存结果，获取实际目录名
@@ -959,18 +1096,17 @@ class PipelineProcessor:
             )
             monitor_thread.start()
             
-            process = subprocess.run(
-                download_cmd,
-                capture_output=True,
-                text=True,
-                encoding="utf-8",
-                timeout=CONFIG['download']['timeout'],
-                cwd=os.path.dirname(CONFIG['baidupcs_path'])
-            )
-            
-            # 停止监控
-            stop_monitor.set()
-            monitor_thread.join(timeout=5)
+            try:
+                process = self._run_command_cancellable(
+                    download_cmd,
+                    timeout=CONFIG['download']['timeout'],
+                    cancel_event=cancel_event,
+                    cwd=os.path.dirname(CONFIG['baidupcs_path']),
+                )
+            finally:
+                # 取消/超时也必须先停监控，避免后台线程一直轮询目录。
+                stop_monitor.set()
+                monitor_thread.join(timeout=5)
             
             # 6. 扫描下载的文件
             downloaded_files = self._scan_files_recursive(target_dir)
@@ -1050,6 +1186,16 @@ class PipelineProcessor:
                     'transferred': True
                 }
             
+        except CutCancelled:
+            return {
+                'success': False,
+                'cancelled': True,
+                'downloaded_files': [],
+                'target_dir': None,
+                'drama_name': link_dir_name,
+                'error': '用户已停止任务',
+                'transferred': False,
+            }
         except subprocess.TimeoutExpired:
             # 如果已转存，尝试清理网盘
             if 'dir_name' in locals() and dir_name != link_dir_name:
@@ -1258,7 +1404,7 @@ class PipelineProcessor:
                 pass
         return 0
 
-    def cut_batch(self, downloads, resume=False):
+    def cut_batch(self, downloads, resume=False, cancel_event=None):
         """批量切片"""
         results = []
         failed = []
@@ -1272,16 +1418,29 @@ class PipelineProcessor:
         # 第一轮：处理所有
         for d in downloads:
             drama_name = d.get('drama_name') or d.get('link_id', '')
+            if cancel_event is not None and cancel_event.is_set():
+                results.append({
+                    'name': drama_name,
+                    'success': False,
+                    'cancelled': True,
+                    'output_dir': None,
+                    'error': '用户已停止切片',
+                })
+                break
             if drama_name:
                 try:
                     upsert_archive(drama_name, slice_state='cutting')
                 except Exception:
                     pass
-            result = self._cut_once(d, resume=resume)
+            result = self._cut_once(d, resume=resume, cancel_event=cancel_event)
             result['retried'] = False
             if drama_name:
                 try:
-                    if result['success']:
+                    if result.get('cancelled'):
+                        # 停止不是失败；清掉“切片中”并在下次启动时重新处理。
+                        upsert_archive(drama_name, slice_state='none',
+                                       slice_error='用户已停止切片')
+                    elif result['success']:
                         upsert_archive(drama_name, slice_state='done',
                                        slice_version_count=self._count_delivered_versions(result),
                                        sliced_at=datetime.now().strftime('%Y-%m-%d %H:%M:%S'))
@@ -1292,7 +1451,10 @@ class PipelineProcessor:
                 except Exception:
                     pass
             
-            if result['success']:
+            if result.get('cancelled'):
+                results.append(result)
+                break
+            if result['success'] or result.get('skipped'):
                 results.append(result)
             else:
                 error_msg = result.get("error", "未知错误") or "未知错误"
@@ -1303,12 +1465,24 @@ class PipelineProcessor:
         for item in failed:
             d = item['download']
             drama_name = d.get('drama_name') or d.get('link_id', '')
+            if cancel_event is not None and cancel_event.is_set():
+                results.append({
+                    'name': drama_name,
+                    'success': False,
+                    'cancelled': True,
+                    'output_dir': None,
+                    'error': '用户已停止切片',
+                })
+                break
             self.logger.log('system', 'INFO', f'重试切片：{d.get("link_id", "未知")}')
-            result = self._cut_once(d, resume=resume)
+            result = self._cut_once(d, resume=resume, cancel_event=cancel_event)
             result['retried'] = True
             if drama_name:
                 try:
-                    if result['success']:
+                    if result.get('cancelled'):
+                        upsert_archive(drama_name, slice_state='none',
+                                       slice_error='用户已停止切片')
+                    elif result['success']:
                         upsert_archive(drama_name, slice_state='done',
                                        slice_version_count=self._count_delivered_versions(result),
                                        sliced_at=datetime.now().strftime('%Y-%m-%d %H:%M:%S'))
@@ -1317,7 +1491,10 @@ class PipelineProcessor:
                                        slice_error=(result.get('error') or '')[:500])
                 except Exception:
                     pass
-            if result['success']:
+            if result.get('cancelled'):
+                results.append(result)
+                break
+            if result['success'] or result.get('skipped'):
                 results.append(result)
             else:
                 error_msg = result.get("error", "未知错误") or "未知错误"
@@ -1332,10 +1509,18 @@ class PipelineProcessor:
         
         return results
     
-    def _cut_once(self, download_result, resume=False):
+    def _cut_once(self, download_result, resume=False, cancel_event=None):
         """单次切片"""
         # 从下载目录提取实际剧名
         drama_name = download_result.get('drama_name') or download_result.get('link_id', '')
+        if cancel_event is not None and cancel_event.is_set():
+            return {
+                'name': drama_name,
+                'success': False,
+                'cancelled': True,
+                'output_dir': None,
+                'error': '用户已停止切片',
+            }
         src_dir = None
         
         if download_result.get('downloaded_files'):
@@ -1374,7 +1559,8 @@ class PipelineProcessor:
                 'name': drama_name,
                 'success': False,
                 'output_dir': None,
-                'error': f'跳过：{reason}'
+                'error': f'跳过：{reason}',
+                'skipped': True,
             }
         
         # 获取文件锁
@@ -1394,6 +1580,7 @@ class PipelineProcessor:
         try:
             # 更新状态
             self._update_state('processing', drama_name, 0, '开始切片')
+            self._raise_if_cancelled(cancel_event)
 
             # P1-A2/A3：run 开始先清掉历史失败 run 的残留产物。
             # 能走到这里说明本剧未被标记完成（state/已切完/去重闸门都已过），
@@ -1420,7 +1607,9 @@ class PipelineProcessor:
             if resume:
                 ai_videos = []
                 self._update_state('processing', drama_name, 30, '续跑重渲染中')
-                edl_videos = self._re_render_from_configs(drama_name, out_dir)
+                self._raise_if_cancelled(cancel_event)
+                edl_videos = self._re_render_from_configs(
+                    drama_name, out_dir, cancel_event=cancel_event)
                 if not edl_videos:
                     # 无保留 config 或全部渲染失败 → 回退全量重切（重新生成 EDL）
                     self.logger.log(drama_name, 'WARN',
@@ -1429,7 +1618,10 @@ class PipelineProcessor:
             if not resume:
                 # 全量路径：ASR + 重新生成 EDL
                 self._update_state('processing', drama_name, 10, 'ASR转写中')
-                transcript_path = self._run_asr(src_dir, drama_name)
+                self._raise_if_cancelled(cancel_event)
+                transcript_path = self._run_asr(src_dir, drama_name,
+                                                cancel_event=cancel_event)
+                self._raise_if_cancelled(cancel_event)
                 short_titles, long_titles = self._extract_quotes(transcript_path, 10)
                 
                 # 全部素材交给 EDL 切片。
@@ -1450,7 +1642,11 @@ class PipelineProcessor:
                 ai_videos = []
                 edl_count = version_count
                 self._update_state('processing', drama_name, 30, 'EDL切片中')
-                edl_videos = self._generate_edl_versions(drama_name, src_dir, edl_eps, edl_count, out_dir, use_reverse, short_titles, long_titles)
+                self._raise_if_cancelled(cancel_event)
+                edl_videos = self._generate_edl_versions(
+                    drama_name, src_dir, edl_eps, edl_count, out_dir,
+                    use_reverse, short_titles, long_titles,
+                    cancel_event=cancel_event)
             else:
                 use_reverse = False
                 cut_method = '续跑重渲染'
@@ -1458,6 +1654,7 @@ class PipelineProcessor:
                                 f'续跑重渲染完成：{len(edl_videos)}个版本（未重新生成EDL）')
             
             # 合并版本
+            self._raise_if_cancelled(cancel_event)
             all_videos = ai_videos + edl_videos
             
             # 筛选最佳版本
@@ -1467,6 +1664,7 @@ class PipelineProcessor:
             self._update_state('processing', drama_name, 80, '后处理中')
             processed_videos = []
             for i, video in enumerate(best_videos):
+                self._raise_if_cancelled(cancel_event)
                 ok = self._post_process(video['path'], video['final_path'],
                                         src_dir=src_dir, drama_name=drama_name)
                 if ok and os.path.exists(video['final_path']):
@@ -1475,6 +1673,7 @@ class PipelineProcessor:
                     self.logger.log(drama_name, 'WARN',
                         f'V{i+1} 后处理失败，已跳过（不裸发）')
             best_videos = processed_videos
+            self._raise_if_cancelled(cancel_event)
             
             # 清理测试版本
             self._cleanup_test_versions(out_dir)
@@ -1503,9 +1702,11 @@ class PipelineProcessor:
                     f'已保留失败记录可重切')
 
             # 写交付报告
+            self._raise_if_cancelled(cancel_event)
             self._write_report(out_dir, drama_name, best_videos, cut_method)
             
             # 标记完成
+            self._raise_if_cancelled(cancel_event)
             account = self.assign_account(drama_name)
             self.state_manager.add_completed(drama_name, account, {
                 'ai': len(ai_videos),
@@ -1540,6 +1741,21 @@ class PipelineProcessor:
                 'error': None
             }
         
+        except CutCancelled as e:
+            self.logger.log(drama_name, 'INFO', f'切片已停止：{str(e)}')
+            self._update_state('idle', '', 0, '已停止')
+            swept = self._clean_partial_outputs(out_dir, include_configs=False)
+            if swept:
+                self.logger.log(
+                    drama_name, 'INFO',
+                    f'停止清理：已删除{swept}个未交付渲染产物（保留EDL配置可续跑）')
+            return {
+                'name': drama_name,
+                'success': False,
+                'cancelled': True,
+                'output_dir': None,
+                'error': str(e),
+            }
         except Exception as e:
             self.logger.log(drama_name, 'ERROR', f'切片失败：{str(e)}')
             self.state_manager.add_failed(drama_name, str(e))
@@ -1561,7 +1777,82 @@ class PipelineProcessor:
         finally:
             self._release_lock(lock)
     
-    def _run_asr(self, src_dir, drama_name):
+    @staticmethod
+    def _raise_if_cancelled(cancel_event):
+        if cancel_event is not None and cancel_event.is_set():
+            raise CutCancelled('用户已停止切片')
+
+    @staticmethod
+    def _terminate_process_tree(process):
+        """终止进程及其 ffmpeg 等子进程，避免停止后继续写文件。"""
+        if process.poll() is not None:
+            return
+        try:
+            if os.name == 'nt':
+                taskkill = os.path.join(os.environ.get('SystemRoot', r'C:\Windows'),
+                                        'System32', 'taskkill.exe')
+                subprocess.run(
+                    [taskkill, '/PID', str(process.pid), '/T', '/F'],
+                    capture_output=True, timeout=3, check=False)
+            else:
+                process.terminate()
+        except Exception:
+            pass
+        try:
+            process.wait(timeout=1)
+        except Exception:
+            try:
+                process.terminate()
+            except Exception:
+                pass
+            try:
+                process.wait(timeout=1)
+            except Exception:
+                try:
+                    process.kill()
+                    process.wait(timeout=1)
+                except Exception:
+                    pass
+
+    def _run_command_cancellable(self, cmd, timeout, cancel_event=None, cwd=None):
+        """运行子进程；cancel_event 置位时终止整棵进程树。
+
+        未提供取消事件时仍走 subprocess.run，保持已有调用和测试兼容。
+        """
+        self._raise_if_cancelled(cancel_event)
+        if cancel_event is None:
+            return subprocess.run(
+                cmd,
+                capture_output=True,
+                text=True,
+                encoding='utf-8',
+                timeout=timeout,
+                cwd=cwd,
+            )
+
+        process = subprocess.Popen(
+            cmd,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            encoding='utf-8',
+            errors='replace',
+            cwd=cwd,
+        )
+        started_at = time.monotonic()
+        while True:
+            try:
+                stdout, stderr = process.communicate(timeout=0.25)
+                return subprocess.CompletedProcess(cmd, process.returncode, stdout, stderr)
+            except subprocess.TimeoutExpired:
+                if cancel_event.is_set():
+                    self._terminate_process_tree(process)
+                    raise CutCancelled('用户已停止切片')
+                if time.monotonic() - started_at >= timeout:
+                    self._terminate_process_tree(process)
+                    raise subprocess.TimeoutExpired(cmd, timeout)
+
+    def _run_asr(self, src_dir, drama_name, cancel_event=None):
         """运行ASR转写"""
         try:
             self.logger.log(drama_name, 'INFO', '开始ASR转写...')
@@ -1578,14 +1869,9 @@ class PipelineProcessor:
                 src_dir
             ]
             
-            result = subprocess.run(
-                cmd,
-                capture_output=True,
-                text=True,
-                encoding="utf-8",
-                timeout=600,
-                cwd=src_dir
-            )
+            with execution_gate.asr_slot(cancel_event):
+                result = self._run_command_cancellable(
+                    cmd, timeout=600, cancel_event=cancel_event, cwd=src_dir)
             
             if result.returncode == 0:
                 # 检查输出文件
@@ -1600,6 +1886,9 @@ class PipelineProcessor:
                 self.logger.log(drama_name, 'ERROR', f'ASR失败：{result.stderr[:200]}')
                 return None
                 
+        except CutCancelled:
+            self.logger.log(drama_name, 'INFO', 'ASR转写已停止')
+            raise
         except Exception as e:
             self.logger.log(drama_name, 'ERROR', f'ASR异常：{str(e)}')
             return None
@@ -1712,8 +2001,11 @@ class PipelineProcessor:
         episodes.sort()
         return episodes
     
-    def _generate_edl_versions(self, drama_name, src_dir, edl_eps, count, out_dir, use_reverse=False, short_titles=None, long_titles=None):
+    def _generate_edl_versions(self, drama_name, src_dir, edl_eps, count, out_dir,
+                               use_reverse=False, short_titles=None, long_titles=None,
+                               cancel_event=None):
         """生成EDL版本 - 支持倒叙结构和随机结构，使用AI生成文案"""
+        self._raise_if_cancelled(cancel_event)
         self.logger.log(drama_name, 'INFO', f'生成EDL版本（{count}个）')
         
         # 初始化AI文案生成器
@@ -1756,6 +2048,7 @@ class PipelineProcessor:
                 edl_plan = None
         
         for v_idx in range(min(count, len(ep_nums))):
+            self._raise_if_cancelled(cancel_event)
             # 使用AI生成文案
             hook = (edl_plan[v_idx]['angle']
                     if (edl_plan and v_idx < len(edl_plan))
@@ -1853,6 +2146,7 @@ class PipelineProcessor:
         last_fail_cat = None
 
         for v_idx in range(min(count, len(ep_nums))):
+            self._raise_if_cancelled(cancel_event)
             # 根据倒叙或随机生成segments
             if use_reverse:
                 segments = self._generate_reverse_segments(edl_eps, v_idx,
@@ -1911,7 +2205,9 @@ class PipelineProcessor:
                                                  f'规划合计{sum(s["duration"] for s in segments):.0f}s')
             
             # 调用render_generic.py（公共渲染方法，失败续跑也复用）
-            video, fail_cat = self._run_render_one(drama_name, out_dir, v_idx, config_path)
+            video, fail_cat = self._run_render_one(
+                drama_name, out_dir, v_idx, config_path,
+                cancel_event=cancel_event)
             if video:
                 videos.append(video)
                 consecutive_fail = 0
@@ -1976,7 +2272,8 @@ class PipelineProcessor:
             return 'encode'
         return 'other'
 
-    def _run_render_one(self, drama_name, out_dir, v_idx, config_path):
+    def _run_render_one(self, drama_name, out_dir, v_idx, config_path,
+                        cancel_event=None):
         """对单个 edl_config_v*.json 调 render_generic.py 渲染。
 
         公共方法：_generate_edl_versions（全量生成）与 _re_render_from_configs
@@ -1985,11 +2282,12 @@ class PipelineProcessor:
         Returns: video dict（path/final_path/filename/type）或 None（失败）。
         """
         try:
-            result = subprocess.run(
-                [sys.executable, os.path.join(CONFIG['scripts_dir'], "render_generic.py"), config_path],
-                capture_output=True, text=True, encoding="utf-8", timeout=600,
-                cwd=os.path.dirname(CONFIG['scripts_dir'])
-            )
+            with execution_gate.render_slot(cancel_event):
+                result = self._run_command_cancellable(
+                    [sys.executable, os.path.join(CONFIG['scripts_dir'], "render_generic.py"), config_path],
+                    timeout=600, cancel_event=cancel_event,
+                    cwd=os.path.dirname(CONFIG['scripts_dir']),
+                )
 
             if result.returncode == 0:
                 self.logger.log(drama_name, 'INFO', f'V{v_idx+1} EDL渲染成功')
@@ -2006,6 +2304,14 @@ class PipelineProcessor:
                         'filename': output_file,
                         'type': 'edl'
                     }
+                    # R6 媒体质量门禁：拒收 0 字节/无视频流/无音轨/时长异常产物
+                    quality = self._validate_delivery_media(video['path'])
+                    if not quality.get('ok'):
+                        self.logger.log(
+                            drama_name, 'ERROR',
+                            f'V{v_idx+1} 交付质量拒收（{quality.get("reason", "未知")}）：'
+                            f'{output_file}')
+                        return None, 'quality'
                     # 回写实际 video_path 到 artifacts（钩子可能与预判不同）
                     self._update_config_artifacts(
                         out_dir, v_idx + 1, 'video_path',
@@ -2017,13 +2323,16 @@ class PipelineProcessor:
                                 f'V{v_idx+1} EDL渲染失败（{fail_cat}）：{result.stderr[:200]}')
                 return None, fail_cat
 
+        except CutCancelled:
+            self.logger.log(drama_name, 'INFO', f'V{v_idx+1} 渲染已停止')
+            raise
         except Exception as e:
             fail_cat = self._classify_render_failure('', e)
             self.logger.log(drama_name, 'ERROR',
                             f'V{v_idx+1} EDL异常（{fail_cat}）：{str(e)}')
             return None, fail_cat
 
-    def _re_render_from_configs(self, drama_name, out_dir):
+    def _re_render_from_configs(self, drama_name, out_dir, cancel_event=None):
         """失败续跑：读 out_dir 里保留的 edl_config_v*.json，只重渲染，不重新生成 EDL。
 
         前提：失败路径不再删除 edl_config（_clean_partial_outputs include_configs=False），
@@ -2043,6 +2352,7 @@ class PipelineProcessor:
         consecutive_fail = 0
         last_fail_cat = None
         for config_path in config_paths:
+            self._raise_if_cancelled(cancel_event)
             m = re.search(r'edl_config_v(\d+)\.json$', config_path)
             v_idx = (int(m.group(1)) - 1) if m else len(videos)
             try:
@@ -2053,7 +2363,9 @@ class PipelineProcessor:
                                 f'续跑 V{v_idx+1}：{seg_count}个片段，配置 {os.path.basename(config_path)}')
             except Exception as e:
                 self.logger.log(drama_name, 'WARN', f'续跑读取配置失败 {os.path.basename(config_path)}: {e}')
-            video, fail_cat = self._run_render_one(drama_name, out_dir, v_idx, config_path)
+            video, fail_cat = self._run_render_one(
+                drama_name, out_dir, v_idx, config_path,
+                cancel_event=cancel_event)
             if video:
                 videos.append(video)
                 consecutive_fail = 0
@@ -2720,6 +3032,24 @@ class PipelineProcessor:
             return float(result.stdout.strip())
         except Exception:
             return 0
+
+    def _validate_delivery_media(self, video_path):
+        """R6 媒体质量门禁：拒收 0 字节/无视频流/无音轨/时长异常的产物。
+
+        Returns: {'ok': bool, 'reason': str, ...}（见 delivery_quality.validate_media）。
+        """
+        try:
+            from delivery_quality import validate_media
+            return validate_media(
+                video_path,
+                ffprobe_path=CONFIG.get('ffprobe_path') or
+                os.path.join(CONFIG.get('ffmpeg_dir', ''), 'ffprobe.exe'),
+                min_duration=CONFIG.get('quality', {}).get('min_duration'),
+                max_duration=CONFIG.get('quality', {}).get('max_duration'),
+            )
+        except Exception:
+            # 门禁自身异常不阻断交付（避免误杀），但记录原因
+            return {'ok': True, 'reason': '门禁异常，跳过校验'}
 
     def _episode_real_duration(self, ep_file, raw):
         """单集真实时长：probe 权威（与渲染端 render_generic 一致），

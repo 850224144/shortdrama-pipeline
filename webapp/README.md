@@ -80,6 +80,63 @@ curl -X POST http://localhost:8765/api/cleanup-logs \
   -d '{"days": 30}'
 ```
 
+### GET /api/health
+
+启动健康检查：目录、ffmpeg/ffprobe、BaiduPCS-Go、ASR 脚本、磁盘空间、NVENC 探测、AI 密钥。返回 `ok/degraded/failed` 与逐项 `{name, level, detail, suggestion}`。
+
+```bash
+curl http://localhost:8765/api/health
+```
+
+### 切片队列（持久化）
+
+| 方法 | 路径 | 说明 |
+|---|---|---|
+| GET | `/api/cut/status` | 队列/当前任务/统计/日志 |
+| POST | `/api/cut/start` | 启动切片（恢复 pending/cutting） |
+| POST | `/api/cut/stop` | 停止当前（取消信号，任务回到 pending） |
+| POST | `/api/cut/pause` / `/api/cut/resume` | 暂停 / 恢复 |
+| POST | `/api/cut/clear` | 清队列（`status: all/pending/...`） |
+| POST | `/api/cut/retry` | 失败任务重新入队（续跑保留 EDL 现场） |
+| POST | `/api/cut/reconcile` | 状态对账（僵死归位/缺成片标失败/可恢复标记） |
+| GET | `/api/cut/events?job_id=&limit=` | 任务级/队列级持久化事件（含阶段耗时） |
+
+任务持久化于 `data/jobs.db`（表 `jobs` + `job_events`，WAL），服务重启自动恢复；`cutting`（崩溃现场）归位 `pending`，停止任务保持 `pending` 可续跑。终态事件携带 `metadata.duration_seconds`（阶段指标）。
+
+### 上传队列（原子批处理）
+
+| 方法 | 路径 | 说明 |
+|---|---|---|
+| POST | `/api/upload/batches` | 一次请求整批建任务（重复/缺失/校验失败结构化明细，无半批次） |
+| GET | `/api/upload/dramas?account=` | 可上传剧集列表 |
+| POST | `/api/upload/start` / `/api/upload/resume` | 开始 / 恢复上传 |
+| POST | `/api/upload/open-draft` | 打开视频号草稿箱 |
+
+### 其他
+
+| 方法 | 路径 | 说明 |
+|---|---|---|
+| GET | `/api/archive/search?q=&download_state=&slice_state=&upload_state=` | 剧级档案（下载/切片/上传状态） |
+
+## 环境变量覆盖
+
+配置可被 `SHORTDRAMA_*` 环境变量进程内覆盖（启动时 `apply_env_overrides(CONFIG)`，优先于配置文件）：
+
+| 环境变量 | 覆盖 CONFIG 键 |
+|---|---|
+| `SHORTDRAMA_FFMPEG` | `ffmpeg_path`（未显式覆盖 `SHORTDRAMA_FFPROBE` 时由 `ffmpeg_dir` 推导 `ffprobe.exe`） |
+| `SHORTDRAMA_DOWNLOAD_DIR` | `download_base_dir` |
+| `SHORTDRAMA_OUTPUT_DIR` | `output_dir` |
+| `SHORTDRAMA_DATA_DIR` | `data_dir` |
+| `SHORTDRAMA_LOG_DIR` | `log_dir` |
+| `SHORTDRAMA_BAIDUPCS` | `baidupcs_path` |
+| `SHORTDRAMA_ASR_SCRIPT` | `asr_script` |
+| `SHORTDRAMA_SCRIPTS_DIR` | `scripts_dir` |
+
+## 媒体质量门禁
+
+渲染产物进入交付前经 `delivery_quality.validate_media`：拒收 文件不存在/0 字节/无视频流/无音轨/时长为 0/时长过短/时长过长；ffprobe 失败保守拒收。不达标成片记为 `quality` 失败，不进入交付/上传。
+
 ## 配置文件
 
 ### CONFIG (processor.py)
@@ -131,14 +188,23 @@ CONFIG = {
 
 ```
 D:\短剧工坊\webapp\
-├── app.py              # Web服务主文件
-├── processor.py        # 流水线处理器
+├── app.py              # Web服务主文件（/api/status|health|cut|upload|archive ...）
+├── processor.py        # 流水线处理器（下载/ASR/EDL/后处理/交付）
+├── job_runtime.py      # 任务上下文、取消信号、资源闸门（R1）
+├── process_job.py      # 单任务控制器（/api/stop 真实取消）
+├── cut_manager.py      # 批量切片状态机（持久化队列 + 心跳 + 对账）
+├── job_store.py        # 任务/事件持久化（data/jobs.db，WAL）
+├── upload_manager.py   # 上传队列（add_batch 原子整批）
+├── delivery_quality.py # 媒体质量门禁（0 字节/无音轨/无视频流/时长异常拒收）
+├── health.py           # 启动健康检查 + SHORTDRAMA_* 环境变量覆盖
+├── artifact_cleanup.py # 交付产物自动清理
 ├── requirements.txt    # Python依赖
 ├── start.bat           # Windows启动脚本
 ├── README.md           # 说明文档
 ├── templates\
-│   └── dashboard.html  # 仪表盘页面
+│   └── dashboard.html  # 仪表盘页面（DOM XSS 转义 + 阶段/通知实时展示）
 ├── data\
+│   ├── jobs.db         # 切片任务/事件库（WAL）
 │   ├── pipeline_state.json  # 状态文件
 │   └── dramaid_cache.json   # CPS缓存
 ├── output\             # 输出目录
@@ -174,8 +240,9 @@ D:\短剧工坊\webapp\
 
 ### 5. 质量检查
 
-- 时长检查（110-130秒）
-- 文件大小检查（至少10MB）
+- 交付质量门禁（`delivery_quality.validate_media`）：时长/音视频流/文件大小检查
+- 渲染端 `verify_output`：时长 ≥60s、1080x1920、含音视频流、≥1MB
+- 0 字节 / 无音轨 / 无视频流 / 时长异常产物被拒收，不进入交付与上传
 
 ### 6. 日志管理
 
@@ -207,7 +274,7 @@ D:\短剧工坊\webapp\
 1. **BaiduPCS-Go** 需要提前登录SVIP6账号
 2. **ffmpeg** 需要安装在指定路径
 3. **磁盘空间** 至少需要100GB
-4. **Python版本** 需要3.8+
+4. **Python版本** 需要3.11（SQLite 3.45+ 支持 UPSERT；`data/jobs.db` 任务持久化）
 
 ## 企业微信集成（后期）
 
