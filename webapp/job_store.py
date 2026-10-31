@@ -54,7 +54,9 @@ class JobStore:
 
     # ── 连接 ───────────────────────────────────────────────
     def _connect(self):
-        conn = sqlite3.connect(self.db_path, timeout=5)
+        # check_same_thread=False：':memory:' 共享单连接会在 worker/心跳/请求等
+        # 多个线程间复用（_mem_lock 串行化）；文件库每操作新建连接，不受影响。
+        conn = sqlite3.connect(self.db_path, timeout=5, check_same_thread=False)
         conn.row_factory = sqlite3.Row
         try:
             conn.execute('PRAGMA journal_mode=WAL')

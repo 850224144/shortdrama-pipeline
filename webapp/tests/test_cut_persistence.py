@@ -11,6 +11,7 @@ import os
 import sys
 import tempfile
 import threading
+import time
 import unittest
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -178,6 +179,23 @@ class CutPersistenceTests(unittest.TestCase):
         fmeta = failed[0].get('metadata') or {}
         self.assertIn('duration_seconds', fmeta, '失败事件必须带阶段耗时')
 
+    def test_stopped_event_carries_real_duration(self):
+        """审查闭环：cut_stopped 事件带真实阶段耗时（回归：此前恒为 0）。"""
+        proc = BlockingProcessor(result_status='cancelled')
+        m = BatchCutManager(proc, data_dir=self._tmp.name)
+        m.add_to_queue('停止剧')
+        self.assertEqual(m.start_cutting()['status'], 'success')
+        self.assertTrue(proc.started.wait(1), '任务应已进入切片')
+        time.sleep(1.2)  # 让 elapsed 有意义，非恒 0
+        self.assertEqual(m.stop_cutting()['status'], 'success')
+        m.cut_thread.join(3)
+        stopped = [e for e in m.get_events() if e['event'] == 'cut_stopped']
+        self.assertEqual(len(stopped), 1, '应有且仅有一个停止事件')
+        meta = stopped[0].get('metadata') or {}
+        self.assertIn('duration_seconds', meta, '停止事件必须带阶段耗时')
+        self.assertGreater(meta['duration_seconds'], 0, '停止事件耗时不能恒为 0')
+        self.assertEqual(meta['stage'], 'cut')
+
     def test_clear_queue_deletes_persisted_jobs(self):
         m1 = BatchCutManager(BlockingProcessor(), data_dir=self._tmp.name)
         m1.add_to_queue('待清剧')
@@ -193,6 +211,25 @@ class CutPersistenceTests(unittest.TestCase):
         dup = m2.add_to_queue('去重剧')
         self.assertEqual(dup['status'], 'failed')
         self.assertIn('已在队列中', dup['error'])
+
+    def test_memory_store_usable_across_threads(self):
+        """审查闭环：':memory:' 共享连接跨线程可用（check_same_thread=False）。"""
+        store = JobStore(':memory:')
+        out = []
+
+        def worker():
+            try:
+                store.put({'id': '1', 'job_type': 'cut', 'status': 'pending',
+                           'params': {'drama': '跨线程剧'}})
+                out.append(('ok', len(store.list('cut'))))
+            except Exception as e:  # noqa: BLE001
+                out.append(('err', repr(e)))
+
+        t = threading.Thread(target=worker)
+        t.start()
+        t.join(2)
+        self.assertFalse(t.is_alive(), 'worker 不应阻塞/死锁')
+        self.assertEqual(out, [('ok', 1)], f':memory: 跨线程读写应成功: {out}')
 
 
 if __name__ == '__main__':

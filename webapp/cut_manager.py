@@ -490,6 +490,7 @@ class BatchCutManager:
 
                     with self.lock:
                         if cancelled:
+                            duration_seconds = self._elapsed_seconds(task.get('started_at'))
                             task['status'] = 'pending'
                             task.pop('started_at', None)
                             task['stopped_at'] = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
@@ -500,7 +501,7 @@ class BatchCutManager:
                                 self.store.add_event(
                                     task['id'], 'info', 'cut_stopped',
                                     f'切片已停止：{task["drama_name"]}',
-                                    metadata={'duration_seconds': self._elapsed_seconds(task.get('started_at')),
+                                    metadata={'duration_seconds': duration_seconds,
                                               'stage': 'cut'})
                             except Exception:
                                 pass
@@ -546,6 +547,7 @@ class BatchCutManager:
                     cancelled = bool(cancel_event is not None and cancel_event.is_set())
                     with self.lock:
                         if cancelled:
+                            duration_seconds = self._elapsed_seconds(task.get('started_at'))
                             task['status'] = 'pending'
                             task.pop('started_at', None)
                             task['stopped_at'] = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
@@ -556,7 +558,7 @@ class BatchCutManager:
                                 self.store.add_event(
                                     task['id'], 'info', 'cut_stopped',
                                     f'切片已停止：{task["drama_name"]}',
-                                    metadata={'duration_seconds': self._elapsed_seconds(task.get('started_at')),
+                                    metadata={'duration_seconds': duration_seconds,
                                               'stage': 'cut'})
                             except Exception:
                                 pass
