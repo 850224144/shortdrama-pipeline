@@ -1659,7 +1659,13 @@ class PipelineProcessor:
             
             # 筛选最佳版本
             best_videos = self._select_best_videos(all_videos)
-            
+
+            # 内容级去重（R9）：版本间感知哈希相似度 → 剔除高重复版本，
+            # 规避"成片重复度很高"被平台判重。剔除只在交付集内进行，
+            # 被剔除文件保留在 out_dir 供人工核查。
+            best_videos, dedup_report = self._dedup_versions_by_content(
+                best_videos, drama_name, out_dir, src_dir)
+
             # 后处理
             self._update_state('processing', drama_name, 80, '后处理中')
             processed_videos = []
@@ -1703,7 +1709,8 @@ class PipelineProcessor:
 
             # 写交付报告
             self._raise_if_cancelled(cancel_event)
-            self._write_report(out_dir, drama_name, best_videos, cut_method)
+            self._write_report(out_dir, drama_name, best_videos, cut_method,
+                               dedup_report=dedup_report)
             
             # 标记完成
             self._raise_if_cancelled(cancel_event)
@@ -3022,6 +3029,155 @@ class PipelineProcessor:
         
         return valid_videos[:8]
     
+    def _parse_version_from_filename(self, fname):
+        """从交付文件名解析版本号：{drama}_{n}_{主题}_去重版.mp4 或 V{n}。"""
+        if not fname:
+            return None
+        m = re.search(r'_(\d+)_[^_]*_去重版\.mp4$', fname)
+        if m:
+            return int(m.group(1))
+        m = re.search(r'V(\d+)', fname)
+        return int(m.group(1)) if m else None
+
+    def _dedup_versions_by_content(self, best_videos, drama_name, out_dir,
+                                   src_dir=None):
+        """内容级去重（设计 2.3①）：版本间感知哈希相似度检测。
+
+        在 _select_best_videos 之后、_post_process 之前调用。对 best_videos
+        两两算内容相似度：> hard 剔除差异化弱者；soft~hard 保留但告警；
+        剔除后保底 MIN_DELIVER 个版本。指纹计算失败保守放行（不剔除）。
+
+        Returns: (kept_videos, report_dict)  report_dict 供 _write_report。
+        """
+        try:
+            from content_fingerprint import (video_fingerprint, similarity,
+                                             internal_duplicate,
+                                             FingerprintStore,
+                                             dedup_thresholds)
+        except Exception as e:
+            self.logger.log('system', 'WARN',
+                            f'内容去重模块不可用，跳过：{e}')
+            return best_videos, {'error': str(e)}
+
+        th = dedup_thresholds(CONFIG)
+        hard, soft = th['hard'], th['soft']
+        min_deliver = int(CONFIG.get('content_dedup', {}).get('min_deliver', 3))
+
+        store = None
+        try:
+            store = FingerprintStore(
+                os.path.join(CONFIG.get('data_dir', 'data'), 'upload.db'))
+        except Exception as e:
+            self.logger.log('system', 'WARN',
+                            f'指纹库不可用（仅检测不剔除）：{e}')
+
+        # 1. 逐版本算指纹 + 存库（重切覆盖）
+        fps = {}
+        account = self.assign_account(drama_name)
+        for v in best_videos:
+            fname = v.get('filename', '')
+            path = v.get('path') or v.get('final_path')
+            if not path or not os.path.isfile(path):
+                fps[fname] = None
+                continue
+            try:
+                seq = video_fingerprint(path)
+            except Exception as e:
+                self.logger.log(drama_name, 'WARN',
+                                f'V{fname} 指纹计算失败（放行）：{e}')
+                seq = None
+            fps[fname] = seq
+            if seq and store:
+                try:
+                    dur = v.get('duration') or self._get_video_duration(path)
+                    store.upsert(
+                        drama_name, path, seq,
+                        version=self._parse_version_from_filename(fname),
+                        account=account, filename=fname,
+                        duration=dur, size_bytes=os.path.getsize(path),
+                        source='cut')
+                except Exception as e:
+                    self.logger.log('system', 'WARN',
+                                    f'V{fname} 指纹存库失败：{e}')
+
+        # 2. 成片内部重复（告警，不拦截——短剧剧情合法回环）
+        internal_dups = []
+        for v in best_videos:
+            seq = fps.get(v.get('filename', ''))
+            if not seq:
+                continue
+            try:
+                for d in internal_duplicate(seq):
+                    internal_dups.append({
+                        'filename': v.get('filename', ''),
+                        'start_a': d['start_a'], 'start_b': d['start_b'],
+                        'similarity': d['similarity'],
+                    })
+            except Exception:
+                pass
+        if internal_dups:
+            self.logger.log(
+                drama_name, 'WARN',
+                f'内容检测：{len(internal_dups)}处成片内部重复片段（{internal_dups[:3]}）')
+
+        # 3. 版本间相似度（剔除硬重复，告警疑似）
+        kept = list(best_videos)
+        removed = []
+        warnings = []
+
+        pairs = []
+        for i in range(len(kept)):
+            for j in range(i + 1, len(kept)):
+                a = fps.get(kept[i].get('filename', ''))
+                b = fps.get(kept[j].get('filename', ''))
+                if not a or not b:
+                    continue
+                try:
+                    s = similarity(a, b)
+                except Exception:
+                    continue
+                if s >= hard:
+                    pairs.append((i, j, s))
+                elif s >= soft:
+                    warnings.append(
+                        f'V{i + 1}与V{j + 1}疑似重复（相似度{s:.2f}），已保留待人工复核')
+        # 剔除：相似度降序；保底 min_deliver；保留索引更小者（_select_best_videos
+        # 已把 210-300s 时长合格者排前，即列表靠前更优）
+        pairs.sort(key=lambda x: -x[2])
+        dropped = set()
+        for (i, j, s) in pairs:
+            if len(kept) - len(dropped) <= min_deliver:
+                break
+            if i in dropped or j in dropped:
+                continue
+            victim = max(i, j)
+            keep = min(i, j)
+            dropped.add(victim)
+            removed.append({
+                'filename': kept[victim].get('filename', ''),
+                'version': self._parse_version_from_filename(
+                    kept[victim].get('filename', '')),
+                'vs_filename': kept[keep].get('filename', ''),
+                'similarity': round(s, 3),
+                'reason': 'content_duplicate',
+            })
+            self.logger.log(
+                drama_name, 'WARN',
+                f'内容去重：剔除 {kept[victim].get("filename")}（与'
+                f'{kept[keep].get("filename")} 相似度 {s:.2f} ≥ {hard}）')
+        kept = [v for idx, v in enumerate(kept) if idx not in dropped]
+
+        report = {
+            'hard': hard, 'soft': soft, 'min_deliver': min_deliver,
+            'removed': removed, 'warnings': warnings,
+            'internal_duplicates': internal_dups,
+        }
+        if removed:
+            self.logger.log(drama_name, 'INFO',
+                            f'内容去重完成：剔除{len(removed)}个高重复版本，'
+                            f'交付{len(kept)}个')
+        return kept, report
+
     def _get_video_duration(self, video_path):
         """获取视频时长"""
         try:
@@ -3308,13 +3464,16 @@ class PipelineProcessor:
         except Exception as e:
             self.logger.log('system', 'WARN', f'清理测试版本失败：{str(e)}')
     
-    def _write_report(self, out_dir, drama_name, best_videos, cut_method='未知'):
+    def _write_report(self, out_dir, drama_name, best_videos, cut_method='未知',
+                      dedup_report=None):
         """写交付报告 - 从 edl_config_v{i}.json 读取实际文案
 
         只列交付集 best_videos（真实交付），不再扫磁盘：交付清理发生在
         写报告之后，磁盘此刻仍含未交付/被剔除的渲染产物，按磁盘最大编号
         会把未交付版本误报为已交付。版本号从文件名解析（新命名
         {drama}_{n}_{主题}_去重版.mp4；旧命名 V{n} 兜底）。
+
+        dedup_report（可选）：R9 内容去重检测结果，非空时追加"内容去重"节。
         """
         try:
             # 交付集：版本号 -> 文件名（以实际交付为准，不扫磁盘）
@@ -3386,6 +3545,34 @@ class PipelineProcessor:
                     report += f"**文件：** {fname}\n"
                     report += f"**封面：** " + (f"covers/{os.path.splitext(fname)[0]}_封面.jpg" if fname != '（本版未产出）' else "（本版未产出）") + "\n"
                     self.logger.log('system', 'WARN', f'读取V{vno}配置失败：{str(e)}')
+
+            # R9：内容去重检测结果（写入交付报告，便于溯源）
+            if dedup_report:
+                report += "\n## 内容去重\n"
+                if dedup_report.get('error'):
+                    report += f"- 检测不可用：{dedup_report['error']}\n"
+                elif not (dedup_report.get('removed')
+                          or dedup_report.get('warnings')
+                          or dedup_report.get('internal_duplicates')):
+                    report += "- 未发现内容重复（版本间相似度均低于阈值）\n"
+                if dedup_report.get('removed'):
+                    report += (f"- 剔除高重复版本（硬阈值 "
+                               f"{dedup_report.get('hard')}）：\n")
+                    for r in dedup_report['removed']:
+                        report += (f"  - {r['filename']}（与{r['vs_filename']} "
+                                   f"相似度 {r['similarity']}，"
+                                   f"{r.get('reason')}）\n")
+                if dedup_report.get('warnings'):
+                    report += (f"- 疑似重复（软阈值 "
+                               f"{dedup_report.get('soft')}），已保留待人工复核：\n")
+                    for w in dedup_report['warnings']:
+                        report += f"  - {w}\n"
+                if dedup_report.get('internal_duplicates'):
+                    report += (f"- 成片内部重复片段："
+                               f"{len(dedup_report['internal_duplicates'])}处\n")
+                    for d in dedup_report['internal_duplicates'][:5]:
+                        report += (f"  - {d['filename']} {d['start_a']}s↔"
+                                   f"{d['start_b']}s（{d['similarity']}）\n")
 
             with open(os.path.join(out_dir, f"{drama_name}_交付报告.md"), "w", encoding="utf-8") as f:
                 f.write(report)

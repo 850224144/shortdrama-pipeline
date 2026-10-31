@@ -287,6 +287,43 @@ class UploadManager:
         conn.close()
 
         
+    def _check_content_duplicate(self, video_path, account):
+        """R9 上传前内容查重：同账号已上传/已入队的内容相似成片 → 冲突 dict。
+
+        跨剧同样命中（堵同素材被多剧复用 / 同一作品重传）。指纹计算失败
+        返回 None（保守放行，不因检测故障阻塞上传）。
+        """
+        if not video_path or not os.path.isfile(video_path):
+            return None
+        try:
+            from content_fingerprint import (video_fingerprint,
+                                             FingerprintStore,
+                                             dedup_thresholds)
+            seq = video_fingerprint(video_path)
+            if not seq:
+                return None
+            th = dedup_thresholds(CONFIG)
+            store = FingerprintStore(
+                os.path.join(CONFIG.get('data_dir', 'data'), 'upload.db'))
+            hits = store.find_similar(account, seq, th['upload'],
+                                      exclude_path=video_path,
+                                      include_pending=True)
+            if hits:
+                return hits[0]
+        except Exception as e:
+            self._log('warn', f'内容查重异常，放行：{e}')
+        return None
+
+    def _mark_fingerprint_uploaded(self, video_path):
+        """R9 上传成功后登记指纹 uploaded=1（失败不阻断流程）。"""
+        try:
+            from content_fingerprint import FingerprintStore
+            FingerprintStore(
+                os.path.join(CONFIG.get('data_dir', 'data'),
+                             'upload.db')).mark_uploaded(video_path)
+        except Exception:
+            pass
+
     def add_to_queue(self, drama_name: str, video_path: str, cover_path: str = None,
                      title: str = None, description: str = None, topics: str = None,
                      account: str = None, version: int = 1,
@@ -311,7 +348,17 @@ class UploadManager:
             
             if existing:
                 return {'status': 'failed', 'error': f'[{_account}] V{version}已在队列中'}
-            
+
+            # R9 内容级查重：同账号已传/已入队内容相似成片 → 拒绝（防平台判重）
+            cdup = self._check_content_duplicate(video_path, _account)
+            if cdup:
+                up_th = CONFIG.get('content_dedup', {}).get('upload', 0.6)
+                return {'status': 'failed',
+                        'error': (f'内容查重拒绝：与已传/已入队的'
+                                  f'[{cdup["drama_name"]} V{cdup["version"]}] '
+                                  f'相似度 {cdup["similarity"]} ≥ {up_th}，'
+                                  f'拒绝重复上传（宁可少传不可封号）')}
+
             # topics 统一成 list 存内存，db 里 json.dumps 存（避免 list 被 str 化成 "[...]"）
             if isinstance(topics, str):
                 topics_list = [t.strip() for t in topics.split(',') if t.strip()]
@@ -405,6 +452,24 @@ class UploadManager:
                         duplicates.append({'index': idx, 'drama_name': drama,
                                            'version': version, 'account': account})
                         continue
+
+                # R9 内容级查重：同账号已传/已入队内容相似 → 拒收（宁可少传不可封号）
+                cdup = self._check_content_duplicate(video_path, account)
+                if cdup:
+                    up_th = CONFIG.get('content_dedup', {}).get('upload', 0.6)
+                    duplicates.append({
+                        'index': idx, 'drama_name': drama,
+                        'version': version, 'account': account,
+                        'reason': 'content_duplicate',
+                        'conflict': f'{cdup["drama_name"]} V{cdup["version"]}',
+                        'similarity': cdup['similarity'],
+                        'threshold': up_th,
+                    })
+                    self._log('warn',
+                              f'内容查重拒收：{drama} V{version} 与 '
+                              f'{cdup["drama_name"]} V{cdup["version"]} '
+                              f'相似度 {cdup["similarity"]} ≥ {up_th}')
+                    continue
 
                 # topics 归一化（与 add_to_queue 一致）
                 topics = item.get('topics')
@@ -708,6 +773,8 @@ class UploadManager:
                         task['completed_at'] = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
                         self.completed.append(task)
                         self._log('success', f'上传成功：{task["drama_name"]} V{task["version"]}')
+                        # R9：上传成功后登记内容指纹 uploaded=1（跨批/跨剧查重依据）
+                        self._mark_fingerprint_uploaded(task.get('video_path'))
                     else:
                         task['status'] = 'failed'
                         task['completed_at'] = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
