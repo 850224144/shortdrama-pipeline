@@ -55,7 +55,16 @@ CONFIG = {
         'retry': 2,
         'segment_duration': [30, 75]
     },
-    
+
+    # A1 镜头边界吸附：切点若落在镜头中间（半帧切/转写 start 带前镜头），
+    # 吸附到最近的真实镜头边界（ffmpeg scene 检测）。enabled=False 或检测
+    # 失败 → 保守放行（不吸附），绝不因吸附故障阻塞切片。
+    'scene_snap': {
+        'enabled': True,
+        'threshold': 0.30,   # scene 阈值（0-1，越大越不敏感）
+        'tol': 0.15,         # 吸附容差（秒）：距边界 > tol 不吸附
+    },
+
     'quality': {
         'min_duration': 180,
         'max_duration': 300,
@@ -1711,6 +1720,11 @@ class PipelineProcessor:
             self._raise_if_cancelled(cancel_event)
             self._write_report(out_dir, drama_name, best_videos, cut_method,
                                dedup_report=dedup_report)
+
+            # A7 QC 报告：blackdetect/响度/词中切断（审计非门禁）
+            self._raise_if_cancelled(cancel_event)
+            self._generate_qc_report(best_videos, out_dir, drama_name,
+                                     src_dir=src_dir)
             
             # 标记完成
             self._raise_if_cancelled(cancel_event)
@@ -2425,13 +2439,14 @@ class PipelineProcessor:
         "你是短剧高光剪辑师。下面是《{drama}》第{ep}集的台词转写（带时间轴）。\n"
         "判断这一集值不值得被剪进 2-4 分钟的推广成片，并给出这一集里最值得剪的"
         "1-3 个互不重叠的高光窗口。\n\n"
-        "台词（[起-止] 秒）：\n{lines}\n\n"
+        "台词（[句号] [起-止] 秒）：\n{lines}\n\n"
         "只输出一个 JSON 对象，不要解释、不要 markdown 代码块：\n"
         '{{"windows": ['
         '{{"score": 0到10的整数, "reason": "不超过40字，说清这个窗口真实发生了什么", '
-        '"start": 窗口起点秒, "end": 窗口终点秒, "hook_type": "类型"}}, '
+        '"seg_idx": 高光句的句号（0-based，必须对应上方台词行的 [i]）, '
+        '"hook_type": "类型"}}, '
         '{{"score": 0到10的整数, "reason": "不超过40字", '
-        '"start": 窗口起点秒, "end": 窗口终点秒, "hook_type": "类型"}}]}}\n\n'
+        '"seg_idx": 高光句的句号, "hook_type": "类型"}}]}}\n\n'
         "评分标准：\n"
         "9-10 强烈冲突爆发或关键反转，能当开头钩子\n"
         "7-8  明确冲突或对峙\n"
@@ -2443,7 +2458,8 @@ class PipelineProcessor:
         "必须互不重叠（间隔 ≥5s），各自覆盖完整一轮冲突\n"
         "- 只有 1 个爆点就只给 1 个；没有可剪的就给空数组 windows: []\n"
         "- hook_type 只能是：逆袭、打脸、真相、反转、高潮、泪目、平淡 七选一\n"
-        "- start/end 必须落在台词时间范围内，窗口 12 到 40 秒\n"
+        "- seg_idx 必须指向真实存在的台词行（[i] 里的 i），禁止编造句号；"
+        "窗口以该句为高光核心，前后范围由系统按句号映射，不要自己算秒数\n"
         "- reason 只描述台词里真实发生的事，不要脑补剧情\n"
         "- 没冲突就老实给低分，不要为了好看而拔高"
     )
@@ -2470,6 +2486,31 @@ class PipelineProcessor:
         "  flashback（开头钩子→前因闪回→顺叙）、forward（顺叙全片）之一\n"
         "- 每版叙事必须连贯（先钩子后因果，别跨时间线乱跳）\n"
     )
+
+    # A3 Reviewer 审稿：对导演方案 5 维打分（钩子/结构/反转/节奏/情绪），
+    # score < REVIEW_SCORE_MIN 带 feedback 反馈 Director 重试（max_retries=2）。
+    _REVIEW_PROMPT = (
+        "你是短剧审稿人。下面是《{drama}》的 {count} 个版本方案（开头集/角度/"
+        "叙事顺序）与各集高光摘要。请从 5 个维度打分，各 0-1：\n"
+        "- 钩子强度：开头钩子是否真的炸（高分集、真冲突，不是平淡集）\n"
+        "- 结构连贯：版本叙事是否因果连贯、不跳戏\n"
+        "- 反转清晰：是否包含关键反转/真相揭示\n"
+        "- 节奏适配：片段节奏是否匹配推广成片（钩子→升级→高潮）\n"
+        "- 情绪张力：整体情绪曲线是否先抑后扬、够抓人\n\n"
+        "版本方案：\n{plan_summary}\n\n"
+        "集摘要：\n{eps_summary}\n\n"
+        "只输出一个 JSON 对象：\n"
+        '{{"score": 0到1的小数, "feedback": "不超过60字，指出最弱 1-2 个维度的问题与修正方向"}}\n\n'
+        "要求：\n"
+        "- score 是 5 维平均（钩子/结构/反转/节奏/情绪）\n"
+        "- feedback 必须具体可执行（如'版本2 开头集平淡，换到第12集反转'）\n"
+        "- 无重大问题的给 score ≥ 0.75；只有明显缺陷才给 <0.65\n"
+    )
+
+    # A3 审稿通过线（5 维均分）。低于此反馈 Director 重试。
+    REVIEW_SCORE_MIN = 0.65
+    # A3 审稿重试上限（首版评审 + 最多 2 次带反馈重试）
+    REVIEW_MAX_RETRY = 2
 
     def _keyword_cands(self, raw, ep_dur):
         """兜底打分：冲突/悬念词命中 + 4s 内相邻高分句合并成连续窗口。
@@ -2516,8 +2557,9 @@ class PipelineProcessor:
         用同一个高光段。LLM 无效返回 []，由调用方回退关键词。
         """
         lines = "\n".join(
-            f"[{float(s.get('start', 0)):.1f}-{float(s.get('end', 0)):.1f}] "
-            f"{s.get('text', '')}" for s in raw)
+            f"[{i}] [{float(s.get('start', 0)):.1f}-"
+            f"{float(s.get('end', 0)):.1f}] "
+            f"{s.get('text', '')}" for i, s in enumerate(raw))
         if len(lines) > 3000:      # 防御：超长截断，避免撞上下文上限
             lines = lines[:3000]
         content = ai.chat_json(self._HIGHLIGHT_PROMPT.format(
@@ -2536,7 +2578,8 @@ class PipelineProcessor:
             except json.JSONDecodeError:
                 return []
         # 兼容旧格式：LLM 返回单窗口 {score,...} 而非 {windows:[...]}
-        if isinstance(data, dict) and 'score' in data and 'start' in data:
+        if isinstance(data, dict) and 'score' in data and ('start' in data
+                                                           or 'seg_idx' in data):
             data = {'windows': [data]}
         windows = data.get('windows') if isinstance(data, dict) else None
         if not isinstance(windows, list) or not windows:
@@ -2545,8 +2588,19 @@ class PipelineProcessor:
         for w in windows[:3]:
             try:
                 score = max(0, min(10, int(round(float(w['score'])))))
-                start = float(w['start'])
-                end = float(w['end'])
+                # A5 词索引防漂移：优先用 seg_idx 映射该句时间戳（LLM 不编秒数）；
+                # 无 seg_idx 回退旧格式秒数（兼容旧缓存/旧 LLM）。
+                seg_idx = None
+                try:
+                    seg_idx = int(w['seg_idx'])
+                except (KeyError, TypeError, ValueError):
+                    seg_idx = None
+                if seg_idx is not None and 0 <= seg_idx < len(raw):
+                    start = float(raw[seg_idx].get('start', 0))
+                    end = float(raw[seg_idx].get('end', start))
+                else:
+                    start = float(w['start'])
+                    end = float(w['end'])
             except (KeyError, TypeError, ValueError):
                 continue
             # 窗口必须落在本集时间轴内，否则 LLM 在编时间码
@@ -2705,6 +2759,74 @@ class PipelineProcessor:
                             "dur": ep_dur, "cands": cands})
         return out
 
+    def _generate_versions_via_llm(self, ai, eps_summary, count, drama_name,
+                                   eps_hl, feedback=None):
+        """Director GLM 生成版本方案（带可选审稿 feedback 修正重试）。
+
+        失败/无效 → None（调用方回退默认方案）。feedback 非空时把评审
+        反馈追加进 prompt，要求 Director 按反馈修正（A3 重试闭环）。
+        """
+        try:
+            prompt = self._ARC_PROMPT.format(
+                drama=drama_name or "", count=count, eps_summary=eps_summary)
+            if feedback:
+                prompt += ("\n\n评审反馈（上一版方案未通过，必须按此修正）：\n"
+                           + feedback)
+            content = ai.chat_json(prompt)
+            if not content:
+                return None
+            try:
+                data = json.loads(content)
+            except json.JSONDecodeError:
+                i, j = content.find('{'), content.rfind('}')
+                if i < 0 or j <= i:
+                    return None
+                try:
+                    data = json.loads(content[i:j + 1])
+                except json.JSONDecodeError:
+                    return None
+            versions = self._validate_arc_plan(data, eps_hl, count)
+            return versions if versions and len(versions) >= count else None
+        except Exception:
+            return None
+
+    def _review_arc_plan(self, ai, versions, eps_hl, drama_name):
+        """Reviewer GLM 5 维审稿（钩子/结构/反转/节奏/情绪）。
+
+        Returns: (score 0-1, feedback str)；失败/无效 → (None, None)（放行
+        不重试——宁可接受首版也不让审稿故障阻塞切片）。
+        """
+        try:
+            plan_summary = "\n".join(
+                f"V{i + 1}: 第{v['opening_ep']}集/{v['angle']}/"
+                f"{v['order_type']}" for i, v in enumerate(versions))
+            eps_summary = "\n".join(
+                f"第{e['episode']}集：{e['cands'][0]['score']}分 "
+                f"[{e['cands'][0].get('hook_type', '')}] "
+                f"{e['cands'][0].get('reason', '')}" for e in eps_hl)
+            if len(eps_summary) > 4000:
+                eps_summary = eps_summary[:4000]
+            content = ai.chat_json(self._REVIEW_PROMPT.format(
+                drama=drama_name or "", count=len(versions),
+                plan_summary=plan_summary, eps_summary=eps_summary))
+            if not content:
+                return None, None
+            try:
+                data = json.loads(content)
+            except json.JSONDecodeError:
+                i, j = content.find('{'), content.rfind('}')
+                if i < 0 or j <= i:
+                    return None, None
+                try:
+                    data = json.loads(content[i:j + 1])
+                except json.JSONDecodeError:
+                    return None, None
+            score = max(0.0, min(1.0, float(data['score'])))
+            feedback = str(data.get('feedback', ''))[:60]
+            return score, feedback
+        except Exception:
+            return None, None
+
     def _analyze_drama_arc(self, eps_hl, count, drama_name=None):
         """导演/编剧 GLM：读各集高光摘要 → 设计 count 个差异化叙事版本方案。
 
@@ -2757,36 +2879,57 @@ class PipelineProcessor:
         if len(eps_summary) > 4000:
             eps_summary = eps_summary[:4000]
         try:
-            content = ai.chat_json(self._ARC_PROMPT.format(
-                drama=drama_name or "", count=count, eps_summary=eps_summary))
-            if content:
-                try:
-                    data = json.loads(content)
-                except json.JSONDecodeError:
-                    i, j = content.find('{'), content.rfind('}')
-                    if i < 0 or j <= i:
-                        data = None
-                    else:
-                        try:
-                            data = json.loads(content[i:j + 1])
-                        except json.JSONDecodeError:
-                            data = None
-                versions = self._validate_arc_plan(data, eps_hl, count)
-                if versions and len(versions) >= count:
-                    try:
-                        os.makedirs(os.path.dirname(cache_path), exist_ok=True)
-                        tmp = cache_path + ".tmp"
-                        with open(tmp, 'w', encoding='utf-8') as f:
-                            json.dump({'versions': versions}, f,
-                                      ensure_ascii=False, indent=1)
-                        os.replace(tmp, cache_path)
-                    except Exception:
-                        pass
+            versions = self._generate_versions_via_llm(
+                ai, eps_summary, count, drama_name, eps_hl)
+            if versions:
+                # A3 Reviewer 审稿-重试闭环：5 维打分 < REVIEW_SCORE_MIN
+                # → 带 feedback 反馈 Director 重试（最多 REVIEW_MAX_RETRY 次）。
+                # 审稿失败（None）保守放行——不因审稿故障阻塞切片。
+                score = None
+                for attempt in range(self.REVIEW_MAX_RETRY + 1):
+                    score, feedback = self._review_arc_plan(
+                        ai, versions, eps_hl, drama_name)
+                    if score is None or score >= self.REVIEW_SCORE_MIN:
+                        break
+                    if attempt >= self.REVIEW_MAX_RETRY:
+                        # 已耗尽重试次数（REVIEW_MAX_RETRY=2 → 初始+2 重试），
+                        # 接受当前方案，不再发起重试。
+                        break
+                    self.logger.log(
+                        'system', 'WARN',
+                        f'审稿未过（{score:.2f} < {self.REVIEW_SCORE_MIN}），'
+                        f'Director 重试 {attempt + 1}：{feedback}')
+                    versions = self._generate_versions_via_llm(
+                        ai, eps_summary, count, drama_name, eps_hl,
+                        feedback=feedback)
+                    if not versions:
+                        break
+                if score is None:
+                    self.logger.log(
+                        'system', 'WARN', '审稿 GLM 失败，接受当前方案（放行）')
+                elif score < self.REVIEW_SCORE_MIN:
+                    self.logger.log(
+                        'system', 'WARN',
+                        f'审稿重试耗尽，接受当前方案（{score:.2f} < '
+                        f'{self.REVIEW_SCORE_MIN}，宁可放行不阻塞）')
+                else:
                     self.logger.log(
                         'system', 'INFO',
-                        f'导演弧线方案生成：{len(versions)}版 '
-                        f'（开头集 {[v["opening_ep"] for v in versions]}）')
-                    return versions
+                        f'审稿通过（{score:.2f} ≥ {self.REVIEW_SCORE_MIN}）')
+                try:
+                    os.makedirs(os.path.dirname(cache_path), exist_ok=True)
+                    tmp = cache_path + ".tmp"
+                    with open(tmp, 'w', encoding='utf-8') as f:
+                        json.dump({'versions': versions}, f,
+                                  ensure_ascii=False, indent=1)
+                    os.replace(tmp, cache_path)
+                except Exception:
+                    pass
+                self.logger.log(
+                    'system', 'INFO',
+                    f'导演弧线方案生成：{len(versions)}版 '
+                    f'（开头集 {[v["opening_ep"] for v in versions]}）')
+                return versions
         except Exception as e:
             self.logger.log('system', 'WARN',
                             f'导演弧线方案 GLM 失败，走默认方案：{e}')
@@ -2838,6 +2981,87 @@ class PipelineProcessor:
             return head + before + after
         return head + list(reversed(before)) + after
 
+    # A1 场景边界缓存：key=(绝对路径, mtime) → 边界列表；失败/禁用 → []
+    # 类属性（可变 dict）跨实例共享，key 含 mtime，无陈旧风险。
+    _SCENE_CACHE = {}
+
+    def _scene_boundaries(self, src_path):
+        """ffmpeg scene 检测镜头边界（A1）。返回边界时间列表（秒）。
+
+        跨版本缓存（同一源文件只检测一次）。失败或禁用 → []（放行不吸附），
+        绝不因吸附故障阻塞切片。
+        """
+        snap = CONFIG.get('scene_snap', {})
+        if not snap.get('enabled', True):
+            return []
+        if not src_path or not os.path.exists(src_path):
+            return []
+        try:
+            key = (os.path.abspath(src_path),
+                   os.path.getmtime(src_path))
+            if key in self._SCENE_CACHE:
+                return self._SCENE_CACHE[key]
+            cmd = [
+                CONFIG['ffmpeg_path'], '-hide_banner', '-i', src_path,
+                '-vf', "select='gt(scene,{})',showinfo".format(
+                    float(snap.get('threshold', 0.30))),
+                '-f', 'null', '-',
+            ]
+            r = subprocess.run(cmd, capture_output=True, text=True,
+                               encoding='utf-8', errors='replace',
+                               timeout=180)
+            boundaries = []
+            for line in (r.stderr or '').splitlines():
+                m = re.search(r'pts_time:(\d+(?:\.\d+)?)', line)
+                if m:
+                    t = float(m.group(1))
+                    if t > 0.05:      # 忽略 t≈0 的伪边界
+                        boundaries.append(round(t, 2))
+            self._SCENE_CACHE[key] = boundaries
+            return boundaries
+        except Exception:
+            return []
+
+    def _snap_scene_start(self, start, dur, total, boundaries, tol=None):
+        """把切点 start 吸附到最近镜头边界（A1），clamp 保证 end ≤ 源时长。
+
+        吸附方向优先就近；若向后吸附会超界（end > total），只允许向前
+        （不超界），向前也无候选则保持原值。boundaries 空 → 原值。
+        """
+        if tol is None:
+            tol = float(CONFIG.get('scene_snap', {}).get('tol', 0.15))
+        if not boundaries or not total or start is None:
+            return start
+        best, best_d = None, None
+        for b in boundaries:
+            d = abs(b - start)
+            if d <= tol and (best_d is None or d < best_d):
+                best, best_d = b, d
+        if best is None:
+            return start
+        # clamp：向后吸附会超源时长 → 只允许向前；向前无候选则保持原值
+        if best + dur > total - 0.05:
+            prev = [b for b in boundaries
+                    if b <= start and b + dur <= total - 0.05]
+            return round(max(prev), 2) if prev else start
+        # 边界已 round(t,2)（2 位精度）；吸附结果保留 2 位，绝不再降 1 位：
+        # round(2.05,1) 因浮点表示（2.04999...）会舍成 2.0，把吸附抹掉。
+        return round(best, 2)
+
+    def _snap_segment_start(self, ep_num, start, dur, eps_hl):
+        """按源文件 scene 边界吸附切点（A1）。eps_hl 提供 path/dur。
+
+        检测失败或禁用 → 原值。返回吸附后的 start。
+        """
+        e = next((x for x in eps_hl if x['episode'] == ep_num), None)
+        if e is None or not e.get('path'):
+            return start
+        boundaries = self._scene_boundaries(e['path'])
+        if not boundaries:
+            return start
+        return self._snap_scene_start(start, dur, e.get('dur', 0),
+                                      boundaries)
+
     def _generate_reverse_segments(self, edl_eps, v_idx, drama_name=None, plan=None):
         """倒叙结构：开头上钩子，随后按叙事顺序铺开每集的高能窗口。
 
@@ -2864,9 +3088,13 @@ class PipelineProcessor:
             d = round(min(dur, left), 1)
             if d < self.MIN_SEG_DUR:
                 return False
+            s = round(max(0.0, start), 1)
+            # A1 镜头边界吸附：转写 start 是音频起点，常带 1-3s 前一镜头；
+            # 吸附到最近 scene 边界修复半帧切。检测失败保守放行（不吸附）。
+            s = self._snap_segment_start(ep_num, s, d, eps_hl)
             segments.append({
                 "episode": ep_num,
-                "start": round(max(0.0, start), 1),
+                "start": s,
                 "duration": d,
             })
             return True
@@ -2974,9 +3202,15 @@ class PipelineProcessor:
                 seg_duration = round(min(random.uniform(30, 75), remaining, left), 1)
                 if seg_duration < 15:
                     break
+                # A1 镜头边界吸附（随机模式无转写，直接用源文件 scene 边界）
+                s = start
+                boundaries = self._scene_boundaries(ep_file)
+                if boundaries:
+                    s = self._snap_scene_start(start, seg_duration, duration,
+                                               boundaries)
                 segments.append({
                     "episode": self._get_episode_num(ep_file),
-                    "start": round(start, 1),
+                    "start": round(s, 1),
                     "duration": round(seg_duration, 1)
                 })
                 start += seg_duration + random.uniform(1, 3)
@@ -3255,7 +3489,8 @@ class PipelineProcessor:
                 f"x={pos[0]}:y={pos[1]}"
             )
             af = "atempo=1.05,equalizer=f=3000:t=h:width=1000:g=3," \
-                 "equalizer=f=100:t=h:width=50:g=-2"
+                 "equalizer=f=100:t=h:width=50:g=-2," \
+                 "loudnorm=I=-14:TP=-1:LRA=11"
             
             # 输入输出同路径会让ffmpeg边读边写导致失败/损坏，先写临时文件再原子替换
             tmp_path = output_path + ".post.tmp.mp4"
@@ -3464,6 +3699,114 @@ class PipelineProcessor:
         except Exception as e:
             self.logger.log('system', 'WARN', f'清理测试版本失败：{str(e)}')
     
+    def _generate_qc_report(self, best_videos, out_dir, drama_name,
+                            src_dir=None):
+        """A7 QC 报告：每交付版本 blackdetect/响度/词中切断 → {剧}_QC报告.md。
+
+        审计报告非门禁：QC 模块/转写/ffmpeg 任一不可用都跳过对应项，
+        绝不阻塞交付。segments 从保留的 edl_config_v{n}.json 读取。
+        """
+        try:
+            from qc_report import generate_qc
+        except Exception as e:
+            self.logger.log('system', 'WARN',
+                            f'QC 模块不可用，跳过 QC 报告：{e}')
+            return
+
+        def load_transcripts():
+            """按集加载转写 {ep: [{start,end,text}]}；缺失返回 {}。"""
+            if not src_dir:
+                return {}
+            hi_dir = os.path.join(src_dir, 'transcribe')
+            if not os.path.isdir(hi_dir):
+                return {}
+            out = {}
+            for jp in glob.glob(os.path.join(hi_dir, 'EP*.json')):
+                base = os.path.basename(jp)
+                ep = self._get_episode_num(base[2:] if base.startswith('EP')
+                                           else base)
+                if ep is None or ep in out:
+                    continue
+                try:
+                    with open(jp, 'r', encoding='utf-8') as f:
+                        raw = json.load(f)
+                    if isinstance(raw, list) and raw:
+                        out[ep] = raw
+                except Exception:
+                    continue
+            return out
+
+        def load_segments(vid):
+            """读该版本 EDL config 的 segments；缺失返回 None。"""
+            try:
+                cfg_path = os.path.join(out_dir, f'edl_config_v{vid}.json')
+                if not os.path.exists(cfg_path):
+                    return None
+                with open(cfg_path, 'r', encoding='utf-8') as f:
+                    config = json.load(f)
+                videos = config.get('videos') or []
+                if videos and videos[0].get('segments'):
+                    return videos[0]['segments']
+            except Exception:
+                pass
+            return None
+
+        transcripts = load_transcripts()
+        lines = [f"# {drama_name} QC 报告\n",
+                 f"- 生成时间：{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n",
+                 f"- 检查项：黑帧（blackdetect）、响度（EBU R128 -14 LUFS）、"
+                 f"词中切断（切点落在转写句中间）\n"]
+        try:
+            for v in best_videos:
+                vid = self._parse_version_from_filename(v.get('filename', ''))
+                vid = vid or 1
+                segments = load_segments(vid)
+                qc = generate_qc(v.get('path', ''), CONFIG['ffmpeg_path'],
+                                 segments=segments,
+                                 transcripts=transcripts if segments else None)
+                lines.append(f"\n### V{vid}: {v.get('filename', '')}\n")
+                # 黑帧
+                bs = qc.get('black_segments') or []
+                if bs:
+                    fmt = '、'.join(f"{b['start']:.1f}-{b['end']:.1f}s"
+                                    for b in bs)
+                    lines.append(f"- ⚠️ 黑帧段：{fmt}（{len(bs)}处）\n")
+                else:
+                    lines.append("- ✅ 无黑帧段\n")
+                # 响度
+                ln = qc.get('loudness')
+                if ln and ln.get('i') is not None:
+                    dev = abs(ln['i'] + 14.0)
+                    flag = '⚠️' if dev > 2.0 else '✅'
+                    tp = f" / 真峰值 {ln['tp']} dBTP" if ln.get('tp') is not None else ""
+                    lines.append(
+                        f"- {flag} 综合响度 {ln['i']:.1f} LUFS{tp}"
+                        f"（目标 -14，偏差 {dev:.1f}）\n")
+                else:
+                    lines.append("- ⚠️ 响度测量失败\n")
+                # 词中切断
+                mc = qc.get('mid_word_cuts') or []
+                if mc:
+                    fmt = '、'.join(
+                        f"Ep{c['episode']} {c['t']}s「{c['text']}」"
+                        f"(余量{c['margin']}s)" for c in mc)
+                    lines.append(f"- ⚠️ 词中切断：{fmt}（{len(mc)}处）\n")
+                else:
+                    lines.append("- ✅ 无词中切断\n")
+        except Exception as e:
+            self.logger.log('system', 'WARN',
+                            f'QC 报告生成中断（保留已生成部分）：{e}')
+        try:
+            report_path = os.path.join(out_dir, f'{drama_name}_QC报告.md')
+            tmp = report_path + '.tmp'
+            with open(tmp, 'w', encoding='utf-8') as f:
+                f.writelines(lines)
+            os.replace(tmp, report_path)
+            self.logger.log('system', 'INFO',
+                            f'QC 报告生成：{report_path}')
+        except Exception as e:
+            self.logger.log('system', 'WARN', f'QC 报告写入失败：{e}')
+
     def _write_report(self, out_dir, drama_name, best_videos, cut_method='未知',
                       dedup_report=None):
         """写交付报告 - 从 edl_config_v{i}.json 读取实际文案

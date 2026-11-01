@@ -18,6 +18,10 @@ import subprocess
 import shutil
 import time
 
+# beat_sync.py 与 render_generic.py 同目录（scripts/）；运行时 cwd 可能是
+# 项目根，须把本文件目录加入 sys.path 才能 import beat_sync（A6 音乐卡点）。
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+
 # ===== 路径配置 =====
 FFMPEG = r"D:\ffmpeg-master-latest-win64-gpl-shared\bin\ffmpeg.exe"
 FFPROBE = r"D:\ffmpeg-master-latest-win64-gpl-shared\bin\ffprobe.exe"
@@ -80,6 +84,15 @@ DEFAULT_ANTI_DUP = {
     "watermark_alpha": 0.3,
     "watermark_fontsize": 36,
     "watermark_font": r"C:\Windows\Fonts\msyh.ttc",
+    # A4 响度标准化（EBU R128 -14 LUFS，平台默认响度目标）：加到音频链尾。
+    # enabled=False 或 config 未传 loudness 时……注意：ad.get('loudness') 为
+    # None 时 build_af 用默认 enabled=True（发布视频默认达标）。
+    "loudness": {
+        "enabled": True,
+        "target_i": -14.0,   # 目标综合响度（LUFS）
+        "target_tp": -1.0,   # 真峰值上限（dBTP）
+        "lra": 11.0,         # 响度范围（LU）
+    },
 }
 
 DEFAULT_SETTINGS = {
@@ -241,11 +254,19 @@ def build_vf(ad):
 
 
 def build_af(ad):
-    return (
+    chain = (
         f"atempo={ad['atempo']},"
         f"equalizer=f={ad['eq_h']['f']}:width={ad['eq_h']['width']}:t=h:g={ad['eq_h']['g']},"
         f"equalizer=f={ad['eq_l']['f']}:width={ad['eq_l']['width']}:t=h:g={ad['eq_l']['g']}"
     )
+    # A4 响度标准化：loudnorm 单遍（dynamic）到 -14 LUFS，放链尾。
+    # ad['loudness'] 缺省 → enabled=True（发布视频默认达标）；显式 False 关闭。
+    ln = ad.get('loudness') or {}
+    if ln.get('enabled', True):
+        chain += (f",loudnorm=I={ln.get('target_i', -14.0)}:"
+                  f"TP={ln.get('target_tp', -1.0)}:"
+                  f"LRA={ln.get('lra', 11.0)}")
+    return chain
 
 
 def concat_filter(n):
@@ -384,11 +405,13 @@ def process_video(video, config, tmp_base):
 
     # 1. 验证
     log(f"  🔍 验证 {len(segs)} 个片段...")
+    seg_totals = {}
     for i, seg in enumerate(segs):
         ep = seg["episode"]
         src = os.path.join(src_dir, src_pat.format(name=drama, ep=ep))
         try:
             total = validate_source(src, seg["start"], seg["duration"])
+            seg_totals[i] = total
             log(f"    [{i+1}] Ep{ep} [{seg['start']:.1f}s-{seg['start']+seg['duration']:.1f}s] / {total:.1f}s ✓")
         except Exception as e:
             # 错误同时写 stderr，供上层 processor 日志显示（否则 stderr 为空，
@@ -396,6 +419,31 @@ def process_video(video, config, tmp_base):
             import sys
             print(f"验证失败: {e}", file=sys.stderr, flush=True)
             return {"id": vid, "kw": kw, "status": "FAILED", "detail": f"验证失败: {e}"}
+
+    # A6 音乐卡点：config 提供 bgm 字段时，把切点吸附到 BGM 节拍（仅引流切片
+    # 等需要卡点的场景；无 bgm / 节拍检测失败 → 放行原切点，不阻塞渲染）。
+    bgm = config.get("bgm") if isinstance(config, dict) else None
+    if bgm and bgm.get("path"):
+        try:
+            from beat_sync import detect_beats, snap_to_beat
+            beats = detect_beats(bgm["path"])
+            if beats:
+                tol = float(bgm.get("beat_tol", 0.2))
+                snapped = 0
+                for i, seg in enumerate(segs):
+                    orig = seg["start"]
+                    seg["start"] = snap_to_beat(orig, beats, tol)
+                    # 吸附后 end 不能超源时长（±tol 移动）；超界回退原切点
+                    if (seg["start"] + seg["duration"]
+                            > seg_totals.get(i, orig + seg["duration"]) + 0.1):
+                        seg["start"] = orig
+                    else:
+                        snapped += 1
+                log(f"  🎵 BGM 节拍卡点：{len(beats)} 拍，吸附 {snapped}/{len(segs)} 段")
+            else:
+                log("  ⚠️ BGM 节拍检测无结果，放行原切点")
+        except Exception as e:
+            log(f"  ⚠️ 节拍卡点失败（放行原切点）：{e}")
 
     seg_files = []
     try:
