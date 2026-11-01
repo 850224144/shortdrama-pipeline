@@ -2607,8 +2607,10 @@ class PipelineProcessor:
             if not (0 <= start < end <= ep_dur + 0.5):
                 continue
             # LLM 常按精确台词边界给短窗口（5-9s）。短是它判断得准，不该丢弃——
-            # 往外扩到至少 12s（前铺垫+后反应），扩不动才放弃。
-            MIN_WIN = 12.0
+            # 往外扩到至少 MIN_SEG_DUR（前铺垫+后反应），扩不动才放弃。
+            # A5 词索引防漂移后候选来自转写句（短），必须扩到 ≥ 剪辑最短段，
+            # 否则 dur<MIN_SEG_DUR 全被 add() 拒 → segments 空 → 无成片。
+            MIN_WIN = max(12.0, self.MIN_SEG_DUR)
             need = MIN_WIN - (end - start)
             if need > 0:
                 add_l = min(need, start)

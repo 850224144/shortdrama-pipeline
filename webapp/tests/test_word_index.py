@@ -47,9 +47,9 @@ class WordIndexTests(unittest.TestCase):
         cands = self._score(json.dumps(data))
         self.assertEqual(len(cands), 1)
         c = cands[0]
-        # 该句 5-12s（7s），扩到 12s：前 5s（0-5）+ 句（5-12）→ 0-12s
+        # 该句 5-12s（7s），扩到 15s（MIN_SEG_DUR）：前 5s（0-5）+ 句（5-12）+ 后 3s（12-15）→ 0-15s
         self.assertEqual(c['start'], 0.0)
-        self.assertEqual(c['end'], 12.0)
+        self.assertEqual(c['end'], 15.0)
         self.assertEqual(c['score'], 9)
         self.assertEqual(c['hook_type'], '高潮')
 
@@ -58,8 +58,8 @@ class WordIndexTests(unittest.TestCase):
                              'reason': '对峙', 'hook_type': '打脸'}]}
         cands = self._score(json.dumps(data))
         self.assertEqual(len(cands), 1)
-        # 14s ≥ MIN_WIN → 不扩展，秒数原样
-        self.assertEqual(cands[0]['start'], 6.0)
+        # 14s < MIN_WIN(15) → 扩到 15s：前 1s（6→5）+ 原窗口 → 5-20s
+        self.assertEqual(cands[0]['start'], 5.0)
         self.assertEqual(cands[0]['end'], 20.0)
 
     def test_seg_idx_out_of_range_rejected(self):
