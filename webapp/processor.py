@@ -2060,7 +2060,8 @@ class PipelineProcessor:
         descriptions = []
         hashtags_list = []
         
-        keywords = ["逆袭", "打脸", "真相", "反转", "高潮", "泪目"]
+        # 钩子主题库：无导演方案时按 v_idx 轮换（与 ARC_ANGLES 同源，保证回退也丰富）
+        keywords = list(self.ARC_ANGLES)
         videos = []
         
         # 导演/编剧弧线方案：每版独立主线（不同开头集/切入角度/叙事顺序），
@@ -2453,6 +2454,22 @@ class PipelineProcessor:
 
     # LLM 高光打分提示词。业界共识（字节 agentkit 短剧高光、DramaClip）是
     # 「输出时间窗 + 分数 + 理由」，理由必须可审计。score 用整数便于跨集比较。
+    # 丰富叙事切入角度库：导演方案的 angle / 高光 hook_type 共用。
+    # 4 类 32 个真实短剧叙事主题，每版取不同角度 → 版本主题/文案/钩子差异化。
+    # GLM 按各集实际剧情匹配角度，不硬套；校验白名单与 prompt 选项同源。
+    ARC_ANGLES = [
+        # ① 冲突逆袭（核心爆点，保留基础六类）
+        "逆袭", "打脸", "真相", "反转", "高潮", "泪目",
+        # ② 情感关系
+        "甜宠", "虐恋", "误会", "破镜重圆", "替身", "契约婚姻",
+        "闪婚", "追妻", "团宠",
+        # ③ 身份觉醒
+        "重生", "复仇", "觉醒", "扮猪吃虎", "双强", "马甲",
+        "隐藏身份", "千金归来", "弃女", "赘婿",
+        # ④ 题材类型
+        "悬疑", "惊险", "商战", "职场逆袭", "神医", "战神", "救赎",
+    ]
+
     _HIGHLIGHT_PROMPT = (
         "你是短剧高光剪辑师。下面是《{drama}》第{ep}集的台词转写（带时间轴）。\n"
         "判断这一集值不值得被剪进 2-4 分钟的推广成片，并给出这一集里最值得剪的"
@@ -2475,7 +2492,7 @@ class PipelineProcessor:
         "- windows 是数组，按 score 从高到低排序，最多 3 个；同一集内各窗口"
         "必须互不重叠（间隔 ≥5s），各自覆盖完整一轮冲突\n"
         "- 只有 1 个爆点就只给 1 个；没有可剪的就给空数组 windows: []\n"
-        "- hook_type 只能是：逆袭、打脸、真相、反转、高潮、泪目、平淡 七选一\n"
+        "- hook_type 只能是：逆袭、打脸、真相、反转、高潮、泪目、甜宠、虐恋、误会、破镜重圆、替身、契约婚姻、闪婚、追妻、团宠、重生、复仇、觉醒、扮猪吃虎、双强、马甲、隐藏身份、千金归来、弃女、赘婿、悬疑、惊险、商战、职场逆袭、神医、战神、救赎、平淡 之一（按本集真实剧情选最贴切，不得硬套）\n"
         "- seg_idx 必须指向真实存在的台词行（[i] 里的 i），禁止编造句号；"
         "窗口以该句为高光核心，前后范围由系统按句号映射，不要自己算秒数\n"
         "- reason 只描述台词里真实发生的事，不要脑补剧情\n"
@@ -2498,8 +2515,8 @@ class PipelineProcessor:
         "- versions 是数组，长度 {count}，每版一个，叙事上彼此独立\n"
         "- 每版 opening_ep 必须不同（不同集做开头钩子 → 开头差异化）\n"
         "- opening_ep 优先选高光分 ≥7 的爆点集（真相/高潮/反转/打脸集），别选平淡集\n"
-        "- angle 是这一版的叙事切入角度：逆袭/打脸/真相/反转/高潮/泪目 之一，\n"
-        "  与 opening_ep 的剧情类型一致（决定这一版讲哪条故事线）\n"
+        "- angle 是这一版的叙事切入角度：逆袭、打脸、真相、反转、高潮、泪目、甜宠、虐恋、误会、破镜重圆、替身、契约婚姻、闪婚、追妻、团宠、重生、复仇、觉醒、扮猪吃虎、双强、马甲、隐藏身份、千金归来、弃女、赘婿、悬疑、惊险、商战、职场逆袭、神医、战神、救赎 之一，\n"
+        "  与 opening_ep 的剧情类型一致（决定这一版讲哪条故事线）；同一方案内各版 angle 必须互不相同（角度差异化）\n"
         "- order_type 只能是：reverse（开头钩子→闪回前因→顺叙到结局）、\n"
         "  flashback（开头钩子→前因闪回→顺叙）、forward（顺叙全片）之一\n"
         "- 每版叙事必须连贯（先钩子后因果，别跨时间线乱跳）\n"
@@ -2866,7 +2883,7 @@ class PipelineProcessor:
 
         返回 versions 列表，每项 {opening_ep, angle, order_type}：
         - opening_ep：本版开头钩子所在集（不同版不同集 → 开头差异化）
-        - angle：本版叙事切入角度（逆袭/打脸/真相/反转/高潮/泪目）
+        - angle：本版叙事切入角度（32 类丰富主题，见 ARC_ANGLES）
         - order_type：叙事顺序（reverse/flashback/forward）
 
         GLM 失败或未配置 → 默认方案（按高光分降序 top-count 集轮换做开头，
@@ -2879,12 +2896,21 @@ class PipelineProcessor:
         def default_plan():
             ordered = sorted(eps_hl, key=lambda e: -e['cands'][0]['score'])
             versions = []
+            used_angles = set()
+            orders = ['reverse', 'flashback', 'forward']
+            valid = set(self.ARC_ANGLES)
             for i in range(min(count, len(ordered))):
                 c = ordered[i]['cands'][0]
+                angle = c.get('hook_type') or ''
+                # 候选类型合法且未用 → 直接用；否则从角度库取一个未用的（保证差异化）
+                if angle not in valid or angle in used_angles:
+                    angle = next((a for a in self.ARC_ANGLES
+                                  if a not in used_angles), '高潮')
+                used_angles.add(angle)
                 versions.append({
                     "opening_ep": ordered[i]['episode'],
-                    "angle": c.get('hook_type') or '高潮',
-                    "order_type": 'reverse',
+                    "angle": angle,
+                    "order_type": orders[i % len(orders)],
                 })
             return versions
 
@@ -2974,7 +3000,7 @@ class PipelineProcessor:
         if not isinstance(data, dict) or not isinstance(data.get('versions'), list):
             return None
         valid_eps = {e['episode'] for e in eps_hl}
-        angles = {'逆袭', '打脸', '真相', '反转', '高潮', '泪目', '平淡'}
+        angles = set(self.ARC_ANGLES) | {'平淡'}
         orders = {'reverse', 'flashback', 'forward'}
         versions = []
         used = set()

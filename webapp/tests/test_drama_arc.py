@@ -295,5 +295,55 @@ class TestReverseSegmentsVersionDiffer(unittest.TestCase):
                          '无方案回退集号逆序')
 
 
+class TestArcAngleRichness(unittest.TestCase):
+    """角度丰富化（用户：导演方案角度要多丰富，不能只有基本几类）。"""
+
+    def test_arc_angles_rich_and_distinct(self):
+        p, _ = _mk()
+        self.assertGreaterEqual(len(p.ARC_ANGLES), 20,
+                                '角度库应≥20个，保证版本差异化充足')
+        self.assertEqual(len(p.ARC_ANGLES), len(set(p.ARC_ANGLES)),
+                         '角度库不得有重复')
+        # 必须保留基础六类（向后兼容旧缓存/旧LLM）
+        for base in ('逆袭', '打脸', '真相', '反转', '高潮', '泪目'):
+            self.assertIn(base, p.ARC_ANGLES)
+
+    def test_validate_arc_plan_accepts_rich_angles(self):
+        """校验必须放行新角度（甜宠/神医/赘婿），不再兜底成高潮。"""
+        p, _ = _mk()
+        eps = _eps_hl()
+        plan = {"versions": [
+            {"opening_ep": 20, "angle": "甜宠", "order_type": "reverse"},
+            {"opening_ep": 10, "angle": "神医", "order_type": "flashback"},
+        ]}
+        v = p._validate_arc_plan(plan, eps, 2)
+        self.assertIsNotNone(v)
+        self.assertEqual(v[0]['angle'], '甜宠', '丰富角度必须放行')
+        self.assertEqual(v[1]['angle'], '神医', '丰富角度必须放行')
+
+    def test_default_plan_diversifies_angles_and_orders(self):
+        """GLM 禁用 → 默认方案角度互不相同 + order_type 轮换（不再全 reverse）。"""
+        p, _ = _mk()
+        eps = _eps_hl()
+        with mock.patch.object(processor, 'AICopyGenerator') as AG:
+            AG.return_value.enabled = False
+            plan = p._analyze_drama_arc(eps, 3, drama_name='测试剧')
+        self.assertIsNotNone(plan)
+        plan = plan or []
+        self.assertEqual(len(plan), 3)
+        angles = [v['angle'] for v in plan]
+        self.assertEqual(len(set(angles)), len(angles),
+                         '每版角度必须互不相同')
+        orders = [v['order_type'] for v in plan]
+        self.assertEqual(len(set(orders)), len(orders),
+                         'order_type 应轮换，不得全同')
+
+    def test_keywords_fallback_uses_rich_angles(self):
+        """_generate_edl_versions 兜底 keywords 与 ARC_ANGLES 同源（无导演方案也丰富）。"""
+        p, _ = _mk()
+        self.assertEqual(p.ARC_ANGLES[:6],
+                         ['逆袭', '打脸', '真相', '反转', '高潮', '泪目'])
+
+
 if __name__ == '__main__':
     unittest.main()

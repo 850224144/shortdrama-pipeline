@@ -484,7 +484,7 @@ class AICopyGenerator:
         hook_text = {
             '逆袭': '逆袭时刻', '打脸': '打脸瞬间', '真相': '真相揭开',
             '反转': '高能反转', '高潮': '高潮片段', '泪目': '泪目名场面',
-        }.get(version_hook, '精彩片段')
+        }.get(version_hook, f'{version_hook}名场面')
         if quotes:
             return f'{hook_text}——"{quotes[0]}"，后续剧情更精彩，一口气看完全集。'
         return f'{drama_name}精选{hook_text}，全程高能无尿点，刷到就是缘分，快来追完它。'
@@ -507,7 +507,10 @@ class AICopyGenerator:
             '泪目': ['催泪瞬间泪目全场', '虐心剧情泪目不断', '情感高潮泪目瞬间']
         }
         
-        templates = title_templates.get(version_hook, ['精彩剧情不容错过'])
+        templates = title_templates.get(
+            version_hook,
+            [f'{version_hook}瞬间引爆全场', f'{version_hook}高能名场面',
+             f'这波{version_hook}太绝了'])
         # 与 P1-D2 同类：hash() 有 PYTHONHASHSEED 盐值随机化，同一部剧在同一
         # 进程重启后可能拿到不同模板标题。改用稳定摘要保证重切结果一致。
         seed = int.from_bytes(
@@ -526,7 +529,9 @@ class AICopyGenerator:
             '泪目': ['#泪目', '#催泪', '#短剧', '#情感', '#虐心']
         }
         
-        return hashtag_templates.get(version_hook, ['#短剧', '#短剧推荐', '#热门'])
+        return hashtag_templates.get(
+            version_hook,
+            [f'#{version_hook}', '#短剧', '#短剧推荐', '#热门'])
     
     def _generate_template_copy(self, drama_name, version_idx, version_hook):
         """生成模板文案（AI完全失败时兜底）——只基于剧名+hook，不编造剧情。"""
