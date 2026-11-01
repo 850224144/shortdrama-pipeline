@@ -67,9 +67,9 @@ class TestScoreEpisodeLlmMultiCand(unittest.TestCase):
         self.assertEqual(len(cands), 3, '应返回 3 个候选')
         self.assertEqual([c['score'] for c in cands], [9, 7, 5],
                          '候选应按 score 降序')
-        # 短窗口外扩到 >=12s
+        # 短窗口外扩到可观看的 30s
         for c in cands:
-            self.assertGreaterEqual(c['end'] - c['start'], 12.0)
+            self.assertGreaterEqual(c['end'] - c['start'], 30.0)
 
     def test_legacy_single_window_compat(self):
         """旧格式 LLM 返回单窗口 {score,...} → 兼容为 1 候选"""
@@ -118,8 +118,11 @@ class TestLoadHighlightsCacheCompat(unittest.TestCase):
             out = p._load_episode_highlights([ep], drama_name='测试剧')
         self.assertEqual(len(out), 1)
         self.assertEqual(len(out[0]['cands']), 2, '新缓存应还原 2 候选')
-        self.assertEqual(out[0]['cands'][0]['start'], 10.0)
-        self.assertEqual(out[0]['cands'][1]['start'], 40.0)
+        self.assertEqual(out[0]['cands'][0]['start'], 0.0,
+                         '旧 12s 窗口应向前补齐到 30s')
+        self.assertEqual(out[0]['cands'][0]['dur'], 30.0)
+        self.assertEqual(out[0]['cands'][1]['start'], 25.0)
+        self.assertEqual(out[0]['cands'][1]['dur'], 30.0)
 
     def test_legacy_single_cand_cache(self):
         """旧缓存单候选 dict（有 score 无 cands）→ 兼容为 1 候选"""
@@ -132,6 +135,23 @@ class TestLoadHighlightsCacheCompat(unittest.TestCase):
         self.assertEqual(len(out[0]['cands']), 1)
         self.assertEqual(out[0]['cands'][0]['score'], 7)
         self.assertEqual(out[0]['cands'][0]['src'], 'llm')
+
+    def test_stale_short_cache_still_produces_reverse_segments(self):
+        """真实素材回归：旧缓存 0-12s 必须兼容，倒叙不能 8 版全空。"""
+        p, _ = _mk()
+        d, ep = self._setup({'1': {'cands': [
+            {"score": 9, "reason": "开头冲突", "start": 0.0,
+             "end": 12.0, "hook_type": "打脸"}], 'src': 'llm'}})
+        with mock.patch.object(p, '_episode_real_duration', return_value=69.0):
+            out = p._load_episode_highlights([ep], drama_name='测试剧')
+        self.assertEqual(out[0]['cands'][0]['start'], 0.0)
+        self.assertEqual(out[0]['cands'][0]['dur'], 30.0)
+        plan = [{"opening_ep": 1, "angle": "打脸", "order_type": "reverse"}]
+        with mock.patch.object(p, '_load_episode_highlights', return_value=out):
+            segs = p._generate_reverse_segments([], 0, plan=plan)
+        self.assertTrue(segs, '旧短缓存归一化后必须能生成倒叙片段')
+        self.assertEqual(segs[0]['episode'], 1)
+        self.assertGreaterEqual(segs[0]['duration'], p.MIN_SEG_DUR)
 
 
 class TestValidateArcPlan(unittest.TestCase):

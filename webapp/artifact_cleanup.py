@@ -820,6 +820,21 @@ class ArtifactCleanup:
             logger.debug(f'更新清理任务状态失败: {e}')
 
     # ── 查询 ──────────────────────────────────────────────────
+    def list_startup_cleanup_batches(self) -> List[str]:
+        """返回启动补扫应处理的批次。
+
+        只补跑尚未得到 success 的批次；历史已成功批次不得在每次服务启动时
+        重复执行，否则用户重新生成/恢复同路径文件后会被再次移入回收站。
+        """
+        with self._connect() as conn:
+            rows = conn.execute(
+                "SELECT batch_id FROM upload_batches "
+                "WHERE status='completed' AND auto_cleanup=1 "
+                "AND COALESCE(cleanup_status,'') <> 'success' "
+                "ORDER BY completed_at, created_at"
+            ).fetchall()
+        return [r['batch_id'] for r in rows]
+
     def list_jobs(self, batch_id: str = None) -> List[Dict]:
         with self._connect() as conn:
             if batch_id:

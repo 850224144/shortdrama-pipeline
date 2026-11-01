@@ -104,6 +104,7 @@ class ValidateMediaTests(unittest.TestCase):
         with mock.patch.object(dq, 'probe_media', return_value=None):
             r = dq.validate_media(p)
         self.assertFalse(r['ok'])
+        self.assertEqual(r['status'], 'unknown')
         self.assertIn('无法解析', r['reason'])
 
 
@@ -141,6 +142,15 @@ class MediaGateIntegrationTests(unittest.TestCase):
             self.assertIsNone(fail_cat)
             self.assertIsNotNone(video)
             self.assertEqual(video['filename'], '测试剧_1_打脸_去重版.mp4')
+
+    def test_gate_exception_fails_closed_as_unknown(self):
+        p = _mk()
+        with mock.patch.object(dq, 'validate_media',
+                               side_effect=RuntimeError('probe exploded')):
+            result = p._validate_delivery_media('x.mp4')
+        self.assertFalse(result['ok'])
+        self.assertEqual(result['status'], 'unknown')
+        self.assertIn('无法验证', result['reason'])
 
 
 if __name__ == '__main__':

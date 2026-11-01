@@ -1934,24 +1934,26 @@ return (() => {
             logger.error(f"[{self.account_name}] 已有登录/上传进程在使用该账号，本次放弃")
             return self._upload_failure("已有登录/上传进程在使用该账号，请稍后再试")
 
-        # 检查登录（复用：10分钟内已验证则跳过重复校验，避免每版重复验证）
-        _now = time.time()
-        if getattr(self, '_login_verified_at', 0) and _now - self._login_verified_at < 600:
-            pass
-        elif not self._check_login_core():
-            self._release_profile_lock(lock)
-            logger.error("登录失效，请先登录")
-            return self._upload_failure("登录失效，请先登录")
-        else:
-            self._login_verified_at = time.time()
-        
-        # 启动浏览器
-        co = self._get_browser_options(headless=False)
         try:
+            # 检查登录（复用：10分钟内已验证则跳过重复校验，避免每版重复验证）
+            _now = time.time()
+            if getattr(self, '_login_verified_at', 0) and _now - self._login_verified_at < 600:
+                pass
+            elif not self._check_login_core():
+                self._release_profile_lock(lock)
+                logger.error("登录失效，请先登录")
+                return self._upload_failure("登录失效，请先登录")
+            else:
+                self._login_verified_at = time.time()
+
+            # 启动浏览器。任何启动期异常都必须在这里释放 profile 锁，
+            # 否则后续登录/上传会永久被同账号哨兵锁拒绝。
+            co = self._get_browser_options(headless=False)
             self.page = self._new_page(co)
         except Exception as e:
-            logger.error(f"浏览器启动失败: {e}")
-            return self._upload_failure(f"浏览器启动失败: {e}")
+            self._release_profile_lock(lock)
+            logger.error(f"上传准备或浏览器启动失败: {e}")
+            return self._upload_failure(f"上传准备或浏览器启动失败: {e}")
         
         try:
             # 打开发布页面

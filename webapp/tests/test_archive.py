@@ -3,6 +3,7 @@
 import os
 import sys
 import tempfile
+import sqlite3
 import unittest
 from unittest import mock
 
@@ -61,10 +62,55 @@ class TestArchive(unittest.TestCase):
         ok, reason = archive.should_download('新剧', os.path.join(tempfile.mkdtemp(), 'nope'))
         self.assertTrue(ok)
 
+    def test_should_download_failed_state_allows_retry_with_existing_dir(self):
+        """上次失败留下目录时仍应允许重试，不能被防重误杀。"""
+        local = tempfile.mkdtemp()
+        archive.upsert_archive('失败重试剧', download_state='failed')
+        ok, reason = archive.should_download('失败重试剧', local)
+        self.assertTrue(ok)
+        self.assertIn('失败', reason)
+
+    def test_should_download_same_source_done_blocks(self):
+        archive.upsert_archive('来源剧', download_state='done',
+                               source_url='https://pan.baidu.com/s/abc')
+        ok, reason = archive.should_download(
+            '另一名字', os.path.join(tempfile.mkdtemp(), 'nope'),
+            source_url='https://pan.baidu.com/s/abc')
+        self.assertFalse(ok)
+        self.assertIn('同一来源', reason)
+
     def test_aggregate_upload_none(self):
         """upload_records 表未建 → none。"""
         state, ok, bad = archive.aggregate_upload_state('剧')
         self.assertEqual(state, 'none')
+
+    def test_aggregate_upload_uses_completed_status(self):
+        with sqlite3.connect(self.db) as conn:
+            conn.execute(
+                'CREATE TABLE upload_records '
+                '(id INTEGER PRIMARY KEY, drama_name TEXT, account TEXT, '
+                'version INTEGER, status TEXT)')
+            conn.execute(
+                "INSERT INTO upload_records (drama_name, account, version, status) "
+                "VALUES ('完成剧', 'A', 1, 'completed'), "
+                "('完成剧', 'A', 2, 'completed')")
+        self.assertEqual(archive.aggregate_upload_state('完成剧'),
+                         ('done', 2, 0))
+
+    def test_aggregate_upload_latest_retry_supersedes_failure(self):
+        with sqlite3.connect(self.db) as conn:
+            conn.execute(
+                'CREATE TABLE upload_records '
+                '(id INTEGER PRIMARY KEY, drama_name TEXT, account TEXT, '
+                'version INTEGER, status TEXT)')
+            conn.execute(
+                "INSERT INTO upload_records (drama_name, account, version, status) "
+                "VALUES ('重传剧', 'A', 1, 'failed')")
+            conn.execute(
+                "INSERT INTO upload_records (drama_name, account, version, status) "
+                "VALUES ('重传剧', 'A', 1, 'completed')")
+        self.assertEqual(archive.aggregate_upload_state('重传剧'),
+                         ('done', 1, 0))
 
     def test_search_and_filter(self):
         archive.upsert_archive('测试剧A', download_state='done', slice_state='done')
@@ -83,6 +129,43 @@ class TestArchive(unittest.TestCase):
         archive.upsert_archive('未上传剧', download_state='done')
         res = archive.search_archive(q='未上传', upload_state='none')
         self.assertEqual(len(res), 1)
+
+    def test_search_upload_filter_applies_before_limit(self):
+        """命中的上传状态在 50 条之后时也不能被 LIMIT 提前截掉。"""
+        with sqlite3.connect(self.db) as conn:
+            conn.execute(
+                'CREATE TABLE upload_records '
+                '(id INTEGER PRIMARY KEY, drama_name TEXT, account TEXT, '
+                'version INTEGER, status TEXT)')
+            conn.execute(
+                "INSERT INTO upload_records (drama_name, account, version, status) "
+                "VALUES ('最老目标剧', 'A', 1, 'completed')")
+        archive.upsert_archive('最老目标剧', download_state='done')
+        for i in range(55):
+            archive.upsert_archive(f'填充剧{i:02d}', download_state='done')
+        with sqlite3.connect(self.db) as conn:
+            conn.execute(
+                "UPDATE drama_archive SET updated_at='2020-01-01 00:00:00' "
+                "WHERE drama_name='最老目标剧'")
+        res = archive.search_archive(upload_state='done', limit=1)
+        self.assertEqual([r['drama_name'] for r in res], ['最老目标剧'])
+
+    def test_legacy_archive_migration(self):
+        legacy = os.path.join(self.tmp, 'legacy.db')
+        target = os.path.join(self.tmp, 'target.db')
+        old_path = archive.DB_PATH
+        try:
+            archive.DB_PATH = legacy
+            archive.init_database()
+            archive.upsert_archive('迁移剧', download_state='done')
+            archive.DB_PATH = target
+            archive.init_database()
+            moved = archive.migrate_legacy_archive(target, legacy)
+            migrated = archive.get_archive('迁移剧')
+        finally:
+            archive.DB_PATH = old_path
+        self.assertEqual(moved, 1)
+        self.assertIsNotNone(migrated)
 
 
 if __name__ == '__main__':

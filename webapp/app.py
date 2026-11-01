@@ -8,6 +8,7 @@ import sys
 import time
 import threading
 import re
+import json
 import tempfile
 import atexit
 from datetime import datetime
@@ -31,6 +32,9 @@ from artifact_cleanup import ArtifactCleanup, STRATEGY_NONE, STRATEGY_RECYCLE
 
 # 导入剧级档案（下载/切片状态追踪 + 防重 + 搜索）
 from archive import init_database as _archive_init, search_archive, get_archive, should_download
+
+# 只读切片方案预览（不触发渲染/上传）
+from cut_preview import build_cut_preview
 
 # 配置环境变量覆盖 + 健康检查（R5）。须在任何组件读 CONFIG 前应用。
 from health import apply_env_overrides, run_health_checks
@@ -747,6 +751,25 @@ def get_cuttable_dramas():
         return jsonify({'dramas': dramas})
     except Exception as e:
         return jsonify({'dramas': [], 'error': str(e)}), 500
+
+
+@app.route('/api/cut/preview')
+def get_cut_preview():
+    """读取已写入 EDL 的版本方案；纯只读，不启动切片/渲染/上传。"""
+    drama_name = request.args.get('drama_name', '')
+    try:
+        preview = build_cut_preview(
+            CONFIG['output_dir'], drama_name,
+            source_root=CONFIG.get('download_base_dir'))
+    except ValueError as exc:
+        return jsonify({'status': 'failed', 'error': str(exc)}), 400
+    except Exception as exc:
+        return jsonify({'status': 'failed', 'error': str(exc)}), 500
+    if preview is None:
+        return jsonify({'status': 'not_found', 'error': '尚无切片方案'}), 404
+    from flask import Response
+    return Response(json.dumps(preview, ensure_ascii=False),
+                    mimetype='application/json')
 
 @app.route('/api/cut/add', methods=['POST'])
 def add_cut_task():

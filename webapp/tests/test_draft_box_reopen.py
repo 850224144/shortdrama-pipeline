@@ -9,6 +9,8 @@ Chrome 后，draft_pages 里残留的是已断连的死 page 对象——第二�
 """
 import os
 import sys
+import shutil
+import tempfile
 import unittest
 from unittest import mock
 
@@ -39,10 +41,14 @@ class FakePage:
 
 class DraftBoxReopenTest(unittest.TestCase):
     def setUp(self):
-        self.mgr = UploadManager()
+        self.tmp = tempfile.mkdtemp(prefix='draft_reopen_')
+        self.mgr = UploadManager(self.tmp)
         self.mgr.draft_pages = {}
         self.mgr.uploading = False
         self.mgr.current_account = None
+
+    def tearDown(self):
+        shutil.rmtree(self.tmp, ignore_errors=True)
 
     def test_alive_page_short_circuits(self):
         """存活页面：直接返回已打开，不重开。"""

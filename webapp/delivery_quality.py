@@ -34,28 +34,32 @@ def probe_media(file_path, ffprobe_path):
 
 def validate_media(file_path, ffprobe_path=None, min_duration=None,
                    max_duration=None):
-    """校验单个媒体文件。返回 {ok, reason, size, duration, has_video, has_audio}。
+    """校验单个媒体文件。
+
+    返回 {ok, status, reason, size, duration, has_video, has_audio}。
 
     - 无音轨/无视频流/0 字节/时长异常（0、低于下限、超过上限）→ ok=False。
-    - ffprobe 缺失或解析失败 → ok=False（无法证明文件完好，保守拒收）。
+    - ffprobe 缺失或解析失败 → ok=False/status=unknown（无法证明文件完好，
+      保守拒收，且明确区别于已确认的媒体异常）。
     """
     base = {
-        'ok': True, 'reason': '', 'size': 0, 'duration': None,
+        'ok': True, 'status': 'pass', 'reason': '', 'size': 0, 'duration': None,
         'has_video': False, 'has_audio': False,
     }
     if not file_path or not os.path.isfile(file_path):
-        base.update(ok=False, reason='文件不存在')
+        base.update(ok=False, status='warning', reason='文件不存在')
         return base
 
     size = os.path.getsize(file_path)
     base['size'] = size
     if size == 0:
-        base.update(ok=False, reason='0 字节')
+        base.update(ok=False, status='warning', reason='0 字节')
         return base
 
     info = probe_media(file_path, ffprobe_path)
     if info is None:
-        base.update(ok=False, reason='无法解析媒体流（ffprobe 失败/缺失）')
+        base.update(ok=False, status='unknown',
+                    reason='无法解析媒体流（ffprobe 失败/缺失）')
         return base
 
     streams = info.get('streams') or []
@@ -69,18 +73,20 @@ def validate_media(file_path, ffprobe_path=None, min_duration=None,
     base['duration'] = duration
 
     if not base['has_video']:
-        base.update(ok=False, reason='无视频流')
+        base.update(ok=False, status='warning', reason='无视频流')
         return base
     if not base['has_audio']:
-        base.update(ok=False, reason='无音轨')
+        base.update(ok=False, status='warning', reason='无音轨')
         return base
     if duration <= 0:
-        base.update(ok=False, reason='时长为 0')
+        base.update(ok=False, status='warning', reason='时长为 0')
         return base
     if min_duration is not None and duration < min_duration:
-        base.update(ok=False, reason=f'时长过短（{duration:.1f}s < {min_duration}s）')
+        base.update(ok=False, status='warning',
+                    reason=f'时长过短（{duration:.1f}s < {min_duration}s）')
         return base
     if max_duration is not None and duration > max_duration:
-        base.update(ok=False, reason=f'时长过长（{duration:.1f}s > {max_duration}s）')
+        base.update(ok=False, status='warning',
+                    reason=f'时长过长（{duration:.1f}s > {max_duration}s）')
         return base
     return base

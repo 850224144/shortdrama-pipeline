@@ -84,6 +84,16 @@ class ProcessorCancelTests(unittest.TestCase):
         timer.cancel()
         self.assertLess(time.monotonic() - started_at, 5)
 
+    def test_child_process_uses_utf8_environment(self):
+        completed = mock.MagicMock(returncode=0, stdout='', stderr='')
+        with mock.patch('processor.subprocess.run', return_value=completed) as run:
+            self.processor._run_command_cancellable(
+                [sys.executable, '-c', 'print("ok")'], timeout=5)
+        env = run.call_args.kwargs['env']
+        self.assertEqual(env['PYTHONUTF8'], '1')
+        self.assertEqual(env['PYTHONIOENCODING'], 'utf-8')
+        self.assertEqual(run.call_args.kwargs['errors'], 'replace')
+
     def test_cut_batch_does_not_retry_after_cancel(self):
         event = threading.Event()
         self.processor._cut_once = mock.Mock(return_value={

@@ -526,6 +526,97 @@
             color: #666;
             font-size: 12px;
         }
+
+        .cut-preview {
+            margin-top: 15px;
+            border: 1px solid #d9dee8;
+            border-radius: 8px;
+            background: #fff;
+            padding: 14px;
+        }
+
+        .cut-preview[hidden] {
+            display: none;
+        }
+
+        .cut-preview-head {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            gap: 12px;
+            margin-bottom: 12px;
+        }
+
+        .cut-preview-head h3 {
+            color: #333;
+            font-size: 16px;
+            margin: 0;
+        }
+
+        .cut-preview-version {
+            border-top: 1px solid #edf0f5;
+            padding: 12px 0 4px;
+        }
+
+        .cut-preview-version:first-child {
+            border-top: 0;
+            padding-top: 0;
+        }
+
+        .cut-preview-summary {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 8px 16px;
+            color: #555;
+            font-size: 13px;
+            margin-bottom: 8px;
+        }
+
+        .cut-preview-title {
+            color: #222;
+            font-weight: 600;
+            margin-bottom: 4px;
+        }
+
+        .cut-preview-table {
+            width: 100%;
+            border-collapse: collapse;
+            font-size: 12px;
+        }
+
+        .cut-preview-table th,
+        .cut-preview-table td {
+            text-align: left;
+            vertical-align: top;
+            padding: 6px 8px;
+            border-bottom: 1px solid #f0f2f5;
+        }
+
+        .cut-preview-table th {
+            color: #666;
+            font-weight: 600;
+            white-space: nowrap;
+        }
+
+        .cut-preview-reason {
+            color: #555;
+            min-width: 180px;
+        }
+
+        .queue-actions {
+            margin-left: auto;
+            padding-left: 10px;
+        }
+
+        @media (max-width: 720px) {
+            .cut-preview {
+                overflow-x: auto;
+            }
+
+            .cut-preview-table {
+                min-width: 560px;
+            }
+        }
         
         .upload-status {
             background: #f8f9fa;
@@ -815,6 +906,8 @@
                         <button class="btn btn-secondary" id="pauseCutBtn" onclick="pauseCutting()" disabled>⏸️ 暂停</button>
                         <button class="btn btn-danger" id="stopCutBtn" onclick="stopCutting()" disabled>⏹️ 停止</button>
                         <button class="btn btn-secondary" onclick="clearCutQueue()">🧹 清除队列</button>
+                        <input type="text" id="cutPreviewDrama" placeholder="输入剧名查看方案" style="flex:1;min-width:180px;padding:9px 12px;border:1px solid #d8dce5;border-radius:6px;">
+                        <button class="btn btn-secondary" onclick="previewCutByName()">🔍 查看方案</button>
                     </div>
                     
                     <div class="drama-selector">
@@ -847,6 +940,14 @@
                     
                     <div class="upload-queue" id="cutQueue">
                         <div style="padding: 20px; text-align: center; color: #666;">队列为空</div>
+                    </div>
+
+                    <div class="cut-preview" id="cutPreviewPanel" hidden>
+                        <div class="cut-preview-head">
+                            <h3 id="cutPreviewHeading">方案预览</h3>
+                            <button class="btn btn-secondary btn-small" onclick="closeCutPreview()">关闭</button>
+                        </div>
+                        <div id="cutPreviewBody"></div>
                     </div>
                     
                     <div style="margin-top: 15px;">
@@ -1870,6 +1971,71 @@
                 selectedCutDramas.delete(dramaName);
             }
         }
+
+        function previewCutByName() {
+            const name = document.getElementById('cutPreviewDrama').value.trim();
+            if (!name) {
+                showNotification('请输入剧名', 'error');
+                return;
+            }
+            previewCutDrama(name);
+        }
+
+        function closeCutPreview() {
+            const panel = document.getElementById('cutPreviewPanel');
+            panel.hidden = true;
+            document.getElementById('cutPreviewBody').innerHTML = '';
+        }
+
+        async function previewCutDrama(dramaName) {
+            const panel = document.getElementById('cutPreviewPanel');
+            const body = document.getElementById('cutPreviewBody');
+            const heading = document.getElementById('cutPreviewHeading');
+            heading.textContent = `${dramaName} · 方案预览`;
+            panel.hidden = false;
+            body.innerHTML = '<div style="padding:14px;color:#666;">读取中...</div>';
+            try {
+                const response = await fetch(`/api/cut/preview?drama_name=${encodeURIComponent(dramaName)}`);
+                const data = await response.json();
+                if (!response.ok) {
+                    body.innerHTML = `<div style="padding:14px;color:#666;">${escapeHtml(data.error || '暂无切片方案')}</div>`;
+                    return;
+                }
+                if (!data.versions || data.versions.length === 0) {
+                    body.innerHTML = '<div style="padding:14px;color:#666;">暂无 EDL 方案</div>';
+                    return;
+                }
+                body.innerHTML = data.versions.map(version => {
+                    const status = version.video_exists ? '已有成片' : '待渲染';
+                    const rows = (version.segments || []).map(segment => `
+                        <tr>
+                            <td>${escapeHtml(segment.index)}</td>
+                            <td>第${escapeHtml(segment.episode)}集</td>
+                            <td>${Number(segment.start).toFixed(1)}–${Number(segment.end).toFixed(1)}s</td>
+                            <td>${Number(segment.duration).toFixed(1)}s</td>
+                            <td>${escapeHtml(segment.hook_type || '')}</td>
+                            <td class="cut-preview-reason">${escapeHtml(segment.reason || '')}</td>
+                        </tr>
+                    `).join('');
+                    return `
+                        <section class="cut-preview-version">
+                            <div class="cut-preview-title">V${escapeHtml(version.version)} · ${escapeHtml(version.title || version.hook || '')}</div>
+                            <div class="cut-preview-summary">
+                                <span>${escapeHtml(version.hook || '')}</span>
+                                <span>${Number(version.planned_duration || 0).toFixed(1)}s</span>
+                                <span>${escapeHtml(version.segment_count || 0)}段</span>
+                                <span>${escapeHtml(status)}</span>
+                            </div>
+                            <table class="cut-preview-table">
+                                <thead><tr><th>#</th><th>来源</th><th>入出点</th><th>时长</th><th>钩子</th><th>选段理由</th></tr></thead>
+                                <tbody>${rows}</tbody>
+                            </table>
+                        </section>`;
+                }).join('');
+            } catch (error) {
+                body.innerHTML = `<div style="padding:14px;color:#b42318;">${escapeHtml(error.message)}</div>`;
+            }
+        }
         
         // 开始切片
         async function startCutting() {
@@ -2050,6 +2216,9 @@
                                 <div>${escapeHtml(task.drama_name)}</div>
                                 ${task.stage ? `<div class="queue-progress">阶段: ${escapeHtml(task.stage)}</div>` : ''}
                                 ${task.error ? `<div class="queue-progress">错误: ${escapeHtml(task.error)}</div>` : ''}
+                            </div>
+                            <div class="queue-actions">
+                                <button class="btn btn-secondary btn-small" data-drama-name="${escapeHtml(task.drama_name)}" onclick="previewCutDrama(this.dataset.dramaName)">方案</button>
                             </div>
                         </div>
                     `).join('');

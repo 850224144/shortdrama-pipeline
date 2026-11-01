@@ -124,7 +124,8 @@ def main():
         sys.exit(1)
 
     # 防重检查
-    ok, reason = archive.should_download(drama_name, local_dir)
+    ok, reason = archive.should_download(
+        drama_name, local_dir, source_url=share_url)
     if not ok:
         print(f'防重：{reason}')
         print('不下载（本地已有 或 历史已下载成功）。')

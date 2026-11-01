@@ -100,6 +100,7 @@ curl http://localhost:8765/api/health
 | POST | `/api/cut/retry` | 失败任务重新入队（续跑保留 EDL 现场） |
 | POST | `/api/cut/reconcile` | 状态对账（僵死归位/缺成片标失败/可恢复标记） |
 | GET | `/api/cut/events?job_id=&limit=` | 任务级/队列级持久化事件（含阶段耗时） |
+| GET | `/api/cut/preview?drama_name=` | 只读方案预览（版本/来源片段/入出点/理由/产物状态） |
 
 任务持久化于 `data/jobs.db`（表 `jobs` + `job_events`，WAL），服务重启自动恢复；`cutting`（崩溃现场）归位 `pending`，停止任务保持 `pending` 可续跑。终态事件携带 `metadata.duration_seconds`（阶段指标）。
 
@@ -135,7 +136,9 @@ curl http://localhost:8765/api/health
 
 ## 媒体质量门禁
 
-渲染产物进入交付前经 `delivery_quality.validate_media`：拒收 文件不存在/0 字节/无视频流/无音轨/时长为 0/时长过短/时长过长；ffprobe 失败保守拒收。不达标成片记为 `quality` 失败，不进入交付/上传。
+渲染产物进入交付前经 `delivery_quality.validate_media`：拒收 文件不存在/0 字节/无视频流/无音轨/时长为 0/时长过短/时长过长；ffprobe 失败或门禁自身异常返回 `unknown` 并保守拒收。不达标成片记为 `quality` 失败，不进入交付/上传。
+
+QC 报告将黑帧、响度和词中切断分别标记为 `pass / warning / unknown`；检测失败或缺少转写不会显示为通过。
 
 ## 配置文件
 
@@ -193,6 +196,7 @@ D:\短剧工坊\webapp\
 ├── job_runtime.py      # 任务上下文、取消信号、资源闸门（R1）
 ├── process_job.py      # 单任务控制器（/api/stop 真实取消）
 ├── cut_manager.py      # 批量切片状态机（持久化队列 + 心跳 + 对账）
+├── cut_preview.py      # 只读方案预览（EDL + 选段理由 + 产物状态）
 ├── job_store.py        # 任务/事件持久化（data/jobs.db，WAL）
 ├── upload_manager.py   # 上传队列（add_batch 原子整批）
 ├── delivery_quality.py # 媒体质量门禁（0 字节/无音轨/无视频流/时长异常拒收）

@@ -431,16 +431,17 @@ class PipelineProcessor:
     def get_watermark_name(self, account):
         """根据账号获取水印名称（也是输出目录的子目录名）"""
         # 账号 → 水印名称 → 输出目录
-        # 福桃追剧 → 福桃说剧 → output/福桃说剧/
-        # 小桃追剧中 → 小桃追剧中 → output/小桃追剧中/
-        if account == "福桃追剧":
+        # 发布账号：福桃追剧/福桃说剧 → 福桃说剧 → output/福桃说剧/
+        # 切片账号：小桃追剧中 → 小桃追剧中 → output/小桃追剧中/
+        if account in ("福桃追剧", "福桃说剧"):
             return "福桃说剧"
         return "小桃追剧中"
     
     def get_output_subdir(self, drama_name, submit_order=None):
-        """获取输出目录的子目录（按水印分类）"""
-        account = self.assign_account(drama_name, submit_order)
-        return self.get_watermark_name(account)
+        """获取输出目录的子目录（按发布账号分类，产出直接放上传账号目录）"""
+        # 选择A：水印=发布账号=福桃说剧，产出目录也应=福桃说剧（上传账号目录）才一致
+        upload_account = CONFIG.get('upload_account', '福桃说剧')
+        return self.get_watermark_name(upload_account)
     
     def check_drama_id(self, drama_name):
         """检查CPS ID"""
@@ -1636,15 +1637,17 @@ class PipelineProcessor:
                 # 全部素材交给 EDL 切片。
                 # AI 高光智剪已移除：它依赖火山引擎 mediakit-cli 的认证，项目未配置该 key，
                 # 每次运行都会白等一次 doctor + 最长 20 分钟任务轮询然后空转。
-                # 版本差异化由 EDL 的倒叙/随机结构 + 钩子主题 + ASR 高光台词保证。
+                # 版本差异化由导演叙事结构 + 钩子主题 + ASR 高光台词保证。
                 edl_eps = all_eps
                 
                 self.logger.log(drama_name, 'INFO',
                                f'EDL素材：{len(edl_eps)}集（全量）')
                 
-                # 随机选择切法：倒叙或随机
-                use_reverse = random.random() < 0.5
-                cut_method = '倒叙结构' if use_reverse else '随机结构'
+                # 生产路径统一走导演叙事（钩子→前因→发展→结局）。
+                # 只有高光/转写全缺时，_generate_reverse_segments 才回落随机兜底，
+                # 避免正式成片随机跨集跳切、剧情无法理解。
+                use_reverse = True
+                cut_method = '导演叙事结构'
                 self.logger.log(drama_name, 'INFO', f'使用切法：{cut_method}')
                 
                 # EDL手动切片（AI 高光已移除，ai_videos 恒为空，保留变量以兼容报告/状态字段）
@@ -1841,14 +1844,17 @@ class PipelineProcessor:
         未提供取消事件时仍走 subprocess.run，保持已有调用和测试兼容。
         """
         self._raise_if_cancelled(cancel_event)
+        child_env = self._child_process_env()
         if cancel_event is None:
             return subprocess.run(
                 cmd,
                 capture_output=True,
                 text=True,
                 encoding='utf-8',
+                errors='replace',
                 timeout=timeout,
                 cwd=cwd,
+                env=child_env,
             )
 
         process = subprocess.Popen(
@@ -1859,6 +1865,7 @@ class PipelineProcessor:
             encoding='utf-8',
             errors='replace',
             cwd=cwd,
+            env=child_env,
         )
         started_at = time.monotonic()
         while True:
@@ -1872,6 +1879,14 @@ class PipelineProcessor:
                 if time.monotonic() - started_at >= timeout:
                     self._terminate_process_tree(process)
                     raise subprocess.TimeoutExpired(cmd, timeout)
+
+    @staticmethod
+    def _child_process_env():
+        """强制 Python 子进程使用 UTF-8，避免 Windows GBK 日志编码崩溃。"""
+        env = os.environ.copy()
+        env['PYTHONUTF8'] = '1'
+        env['PYTHONIOENCODING'] = 'utf-8'
+        return env
 
     def _run_asr(self, src_dir, drama_name, cancel_event=None):
         """运行ASR转写"""
@@ -2025,7 +2040,7 @@ class PipelineProcessor:
     def _generate_edl_versions(self, drama_name, src_dir, edl_eps, count, out_dir,
                                use_reverse=False, short_titles=None, long_titles=None,
                                cancel_event=None):
-        """生成EDL版本 - 支持倒叙结构和随机结构，使用AI生成文案"""
+        """生成EDL版本 - 优先导演叙事结构，高光缺失时随机兜底。"""
         self._raise_if_cancelled(cancel_event)
         self.logger.log(drama_name, 'INFO', f'生成EDL版本（{count}个）')
         
@@ -2420,6 +2435,9 @@ class PipelineProcessor:
     PLANNED_SEGS_MIN = 230.0
     PLANNED_SEGS_MAX = 285.0
     MIN_SEG_DUR = 15.0
+    # 高光候选的编辑窗口。只扩到 MIN_SEG_DUR 虽能出片，但 4 分钟会塞入
+    # 18 个 15s 碎段；30s 更接近“前铺垫+完整冲突+后反应”的可观看单元。
+    HIGHLIGHT_WINDOW_MIN = 30.0
 
     def _seg_budget_left(self, segments):
         """规划总时长预算还剩多少秒（相对 PLANNED_SEGS_MAX）。"""
@@ -2606,11 +2624,9 @@ class PipelineProcessor:
             # 窗口必须落在本集时间轴内，否则 LLM 在编时间码
             if not (0 <= start < end <= ep_dur + 0.5):
                 continue
-            # LLM 常按精确台词边界给短窗口（5-9s）。短是它判断得准，不该丢弃——
-            # 往外扩到至少 MIN_SEG_DUR（前铺垫+后反应），扩不动才放弃。
-            # A5 词索引防漂移后候选来自转写句（短），必须扩到 ≥ 剪辑最短段，
-            # 否则 dur<MIN_SEG_DUR 全被 add() 拒 → segments 空 → 无成片。
-            MIN_WIN = max(12.0, self.MIN_SEG_DUR)
+            # LLM 常按精确台词边界给短窗口（5-12s）。对外扩成可观看的完整
+            # 冲突单元；否则 4 分钟会出现十几个 15s 碎段。
+            MIN_WIN = max(self.HIGHLIGHT_WINDOW_MIN, self.MIN_SEG_DUR)
             need = MIN_WIN - (end - start)
             if need > 0:
                 add_l = min(need, start)
@@ -2738,19 +2754,35 @@ class PipelineProcessor:
                     raw_cands = []
                     src = 'llm'
                 for c in raw_cands:
-                    if 'dur' in c:                       # 关键词格式
-                        st = c.get('start', 0.0)
-                        dur = c['dur']
-                    elif 'end' in c and 'start' in c:    # LLM 格式
-                        st = c['start']
-                        dur = c['end'] - c['start']
-                    else:
+                    try:
+                        if 'dur' in c:                   # 关键词格式
+                            st = float(c.get('start', 0.0))
+                            en = st + float(c['dur'])
+                        elif 'end' in c and 'start' in c:  # LLM 格式
+                            st = float(c['start'])
+                            en = float(c['end'])
+                        else:
+                            continue
+                    except (TypeError, ValueError):
                         continue
-                    dur = min(dur, max(0.0, ep_dur - st))
-                    if dur < 8.0:
+                    st = max(0.0, min(st, ep_dur))
+                    en = max(st, min(en, ep_dur))
+
+                    # 旧缓存可能保存 A5 修复前的 5-12s 短句窗口。A5 新打分
+                    # 会在写入前扩到 HIGHLIGHT_WINDOW_MIN，但缓存命中不会重打分；这里
+                    # 再做一次兼容归一化，否则短候选仍会被 add() 全部拒绝。
+                    target_min = max(self.HIGHLIGHT_WINDOW_MIN,
+                                     self.MIN_SEG_DUR)
+                    need = max(0.0, target_min - (en - st))
+                    if need > 0:
+                        add_l = min(need, st)
+                        add_r = min(need - add_l, max(0.0, ep_dur - en))
+                        st -= add_l
+                        en += add_r
+                    if en - st < 8.0:
                         continue
                     cands.append({"score": c['score'], "start": round(st, 1),
-                                  "dur": round(dur, 1),
+                                  "dur": round(en - st, 1),
                                   "src": c.get('src', src),
                                   "hook_type": c.get("hook_type", ""),
                                   "reason": c.get("reason", "")})
@@ -3439,9 +3471,13 @@ class PipelineProcessor:
                 min_duration=CONFIG.get('quality', {}).get('min_duration'),
                 max_duration=CONFIG.get('quality', {}).get('max_duration'),
             )
-        except Exception:
-            # 门禁自身异常不阻断交付（避免误杀），但记录原因
-            return {'ok': True, 'reason': '门禁异常，跳过校验'}
+        except Exception as exc:
+            # 自动化链路没有人工确认环节：无法验证时必须拒收，不能把未知当通过。
+            return {
+                'ok': False,
+                'status': 'unknown',
+                'reason': f'门禁异常，无法验证：{exc}',
+            }
 
     def _episode_real_duration(self, ep_file, raw):
         """单集真实时长：probe 权威（与渲染端 render_generic 一致），
@@ -3757,7 +3793,8 @@ class PipelineProcessor:
         lines = [f"# {drama_name} QC 报告\n",
                  f"- 生成时间：{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n",
                  f"- 检查项：黑帧（blackdetect）、响度（EBU R128 -14 LUFS）、"
-                 f"词中切断（切点落在转写句中间）\n"]
+                 f"词中切断（切点落在转写句中间）\n",
+                 "- 状态口径：通过 / 异常 / 未检测；未检测不会计为通过\n"]
         try:
             for v in best_videos:
                 vid = self._parse_version_from_filename(v.get('filename', ''))
@@ -3769,7 +3806,11 @@ class PipelineProcessor:
                 lines.append(f"\n### V{vid}: {v.get('filename', '')}\n")
                 # 黑帧
                 bs = qc.get('black_segments') or []
-                if bs:
+                black_status = qc.get('black_status') or 'unknown'
+                if black_status == 'unknown':
+                    reason = qc.get('black_error') or '原因未知'
+                    lines.append(f"- ⚪ 黑帧检测未完成：{reason}\n")
+                elif bs:
                     fmt = '、'.join(f"{b['start']:.1f}-{b['end']:.1f}s"
                                     for b in bs)
                     lines.append(f"- ⚠️ 黑帧段：{fmt}（{len(bs)}处）\n")
@@ -3777,24 +3818,37 @@ class PipelineProcessor:
                     lines.append("- ✅ 无黑帧段\n")
                 # 响度
                 ln = qc.get('loudness')
-                if ln and ln.get('i') is not None:
+                loudness_status = qc.get('loudness_status') or 'unknown'
+                if loudness_status == 'unknown':
+                    reason = qc.get('loudness_error') or '原因未知'
+                    lines.append(f"- ⚪ 响度测量未完成：{reason}\n")
+                elif ln and ln.get('i') is not None:
                     dev = abs(ln['i'] + 14.0)
-                    flag = '⚠️' if dev > 2.0 else '✅'
+                    flag = '⚠️' if loudness_status == 'warning' else '✅'
                     tp = f" / 真峰值 {ln['tp']} dBTP" if ln.get('tp') is not None else ""
                     lines.append(
                         f"- {flag} 综合响度 {ln['i']:.1f} LUFS{tp}"
                         f"（目标 -14，偏差 {dev:.1f}）\n")
                 else:
-                    lines.append("- ⚠️ 响度测量失败\n")
+                    lines.append("- ⚪ 响度测量未完成\n")
                 # 词中切断
                 mc = qc.get('mid_word_cuts') or []
-                if mc:
+                mid_word_status = qc.get('mid_word_cuts_status') or 'unknown'
+                if mid_word_status == 'unknown':
+                    reason = qc.get('mid_word_cuts_error') or '原因未知'
+                    lines.append(f"- ⚪ 词中切断检测未完成：{reason}\n")
+                elif mc:
                     fmt = '、'.join(
                         f"Ep{c['episode']} {c['t']}s「{c['text']}」"
                         f"(余量{c['margin']}s)" for c in mc)
                     lines.append(f"- ⚠️ 词中切断：{fmt}（{len(mc)}处）\n")
                 else:
                     lines.append("- ✅ 无词中切断\n")
+                overall = qc.get('overall_status') or 'unknown'
+                overall_label = {'pass': '✅ 通过', 'warning': '⚠️ 有异常',
+                                 'unknown': '⚪ 有未检测项'}.get(
+                                     overall, '⚪ 有未检测项')
+                lines.append(f"- {overall_label}\n")
         except Exception as e:
             self.logger.log('system', 'WARN',
                             f'QC 报告生成中断（保留已生成部分）：{e}')

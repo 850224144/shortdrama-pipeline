@@ -41,15 +41,15 @@ class WordIndexTests(unittest.TestCase):
                                             raw or _raw(), ep_dur)
 
     def test_seg_idx_maps_to_sentence(self):
-        # LLM 给句号 1（5-12s 冲突句），窗口锚定该句并扩到 12s
+        # LLM 给句号 1（5-12s 冲突句），窗口锚定该句并扩到 30s
         data = {'windows': [{'score': 9, 'seg_idx': 1,
                              'reason': '冲突爆发', 'hook_type': '高潮'}]}
         cands = self._score(json.dumps(data))
         self.assertEqual(len(cands), 1)
         c = cands[0]
-        # 该句 5-12s（7s），扩到 15s（MIN_SEG_DUR）：前 5s（0-5）+ 句（5-12）+ 后 3s（12-15）→ 0-15s
+        # 该句 5-12s（7s），扩到 30s：前 5s + 句 + 后 18s → 0-30s
         self.assertEqual(c['start'], 0.0)
-        self.assertEqual(c['end'], 15.0)
+        self.assertEqual(c['end'], 30.0)
         self.assertEqual(c['score'], 9)
         self.assertEqual(c['hook_type'], '高潮')
 
@@ -58,9 +58,9 @@ class WordIndexTests(unittest.TestCase):
                              'reason': '对峙', 'hook_type': '打脸'}]}
         cands = self._score(json.dumps(data))
         self.assertEqual(len(cands), 1)
-        # 14s < MIN_WIN(15) → 扩到 15s：前 1s（6→5）+ 原窗口 → 5-20s
-        self.assertEqual(cands[0]['start'], 5.0)
-        self.assertEqual(cands[0]['end'], 20.0)
+        # 14s < MIN_WIN(30) → 前补 6s + 后补 10s → 0-30s
+        self.assertEqual(cands[0]['start'], 0.0)
+        self.assertEqual(cands[0]['end'], 30.0)
 
     def test_seg_idx_out_of_range_rejected(self):
         data = {'windows': [{'score': 9, 'seg_idx': 99,

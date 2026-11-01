@@ -64,6 +64,30 @@ class CleanupTriggerTests(unittest.TestCase):
             status = conn.execute("SELECT status FROM upload_batches WHERE batch_id='B2'").fetchone()[0]
         self.assertEqual(status, 'completed')
 
+    def test_startup_sweep_skips_success_and_running_batches(self):
+        """启动补扫只处理未完成/失败的自动清理，不能每次重启重删。"""
+        from artifact_cleanup import ArtifactCleanup
+        self.make_manager()
+        with sqlite3.connect(self.tmp_db()) as conn:
+            conn.executemany(
+                "INSERT INTO upload_batches "
+                "(batch_id, drama_name, status, auto_cleanup, cleanup_status) "
+                "VALUES (?, '测试剧', ?, 1, ?)",
+                [
+                    ('S_OK', 'completed', 'success'),
+                    ('S_NEW', 'completed', None),
+                    ('S_FAIL', 'completed', 'failed'),
+                    ('S_PART', 'completed', 'partial'),
+                    ('S_RUN', 'running', None),
+                    ('S_OFF', 'completed', 'success'),
+                ],
+            )
+            conn.execute(
+                "UPDATE upload_batches SET auto_cleanup=0 WHERE batch_id='S_OFF'")
+            conn.commit()
+        candidates = set(ArtifactCleanup(self.tmp).list_startup_cleanup_batches())
+        self.assertEqual(candidates, {'S_NEW', 'S_FAIL', 'S_PART'})
+
     def test_pending_records_block_complete(self):
         m = self.make_manager()
         self._seed_batch(m, 'B3', 2, ('completed', 'pending'))

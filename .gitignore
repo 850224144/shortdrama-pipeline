@@ -10,6 +10,8 @@ logs/
 # ===== 业务数据/状态 =====
 data/*.json
 data/*.db
+data/*.db-wal
+data/*.db-shm
 data/*.csv
 
 # ===== 浏览器登录态（493MB cookie，绝不能传）=====
@@ -39,4 +41,6 @@ archive/
 # ===== 诊断/探测产物（不入库）=====
 webapp/shell_probe.txt
 webapp/upload_records.db
+webapp/upload_records.db-wal
+webapp/upload_records.db-shm
 test_upload_probe.mp4

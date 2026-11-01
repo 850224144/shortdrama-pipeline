@@ -108,6 +108,25 @@ class WeChatUploaderTests(unittest.TestCase):
         self.assertNotIn('--headless=new', options.arguments)
         self.assertIn('--start-maximized', options.arguments)
 
+    def test_browser_start_failure_releases_profile_lock(self):
+        """获取锁后浏览器启动失败也必须释放，否则同账号永久被锁。"""
+        import os
+        import tempfile
+        uploader = self.make_uploader()
+        fd, video = tempfile.mkstemp(suffix='.mp4')
+        os.close(fd)
+        try:
+            uploader._acquire_profile_lock = Mock(return_value='profile.lock')
+            uploader._release_profile_lock = Mock()
+            uploader._check_login_core = Mock(return_value=True)
+            uploader._get_browser_options = Mock(return_value=object())
+            uploader._new_page = Mock(side_effect=RuntimeError('browser boom'))
+            result = uploader.upload_to_draft(video, '测试标题', [], '描述')
+        finally:
+            os.remove(video)
+        self.assertEqual(result['status'], 'failed')
+        uploader._release_profile_lock.assert_called_once_with('profile.lock')
+
     def test_visible_text_lookup_skips_hidden_matches_and_prefers_exact(self):
         hidden = FakeElement('保存草稿', visible=False)
         partial = FakeElement('保存草稿并退出')
