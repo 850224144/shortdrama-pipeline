@@ -592,11 +592,25 @@ class UploadManager:
     def resume_upload(self):
         """恢复上传"""
         with self.lock:
-            if not self.uploading:
-                return {'status': 'failed', 'error': '未在上传'}
-            
+            if self.uploading:
+                self.paused = False
+                self._log('info', '上传已恢复')
+                return {'status': 'success'}
+            # 服务重启后：queue 已从 DB 恢复但 worker 线程未启动（uploading=False）。
+            # 此时 resume 应重新启动 worker 处理剩余队列，而不是报"未在上传"。
+            if self.upload_thread is not None and self.upload_thread.is_alive():
+                return {'status': 'failed', 'error': '上传 worker 仍在运行，请稍后再试'}
+            if not self.queue:
+                return {'status': 'failed', 'error': '队列为空'}
+            self.uploading = True
+            self.prechecking = True
             self.paused = False
-            self._log('info', '上传已恢复')
+            self._stopped = False
+            self._run_epoch += 1
+            self.current_account = self.queue[0].get('account')
+            self.upload_thread = threading.Thread(target=self._upload_worker, daemon=True)
+            self.upload_thread.start()
+            self._log('info', f'恢复上传：{len(self.queue)}个任务（重启后恢复）')
             return {'status': 'success'}
     
     def stop_upload(self):
@@ -1120,6 +1134,10 @@ class UploadManager:
             
             # 初始化上传器
             uploader = WeChatChannelsUploader(task['account'])
+            # 上传进度日志转发到 status.logs（前端 uploadLog 可见）。
+            # 必须在 check_login/upload_to_draft 之前设置，否则浏览器启动/
+            # 视频上传等进度只走 stderr，用户看不到上传进展。
+            uploader.set_log_hook(self._log)
 
             # 检查登录状态
             if not uploader.check_login():

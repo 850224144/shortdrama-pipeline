@@ -25,6 +25,24 @@ logging.basicConfig(
 )
 logger = logging.getLogger('WeChatUploader')
 
+
+class _LogHookHandler(logging.Handler):
+    """把 WeChatUploader 的日志转发到外部回调（如 upload_manager._log），
+    使上传进度（打开发布页/视频上传/封面/草稿保存）实时进入 status.logs，
+    前端 uploadLog 面板可见——否则这些日志只走 stderr，用户看不到上传进展。
+    """
+    def __init__(self, hook):
+        super().__init__()
+        self.hook = hook
+        self.setFormatter(logging.Formatter('%(message)s'))
+
+    def emit(self, record):
+        try:
+            if self.hook:
+                self.hook(record.levelname.lower(), self.format(record))
+        except Exception:
+            pass
+
 COVER_EDITOR_OPEN_JS = r'''
 (() => {
     const normalize = v => (v || '').replace(/\s+/g, ' ').trim();
@@ -399,6 +417,18 @@ class WeChatChannelsUploader:
         self.account_name = account_name
         self.user_data_path = os.path.join(USER_DATA_BASE, account_name)
         self.page = None
+        self.log_hook = None
+
+    def set_log_hook(self, hook):
+        """把本上传器的进度日志转发到 hook(level, message)。
+        hook 通常是 upload_manager._log，让上传进度实时进入 status.logs，
+        前端 uploadLog 面板可见（否则只走 stderr，用户看不到进展）。
+        """
+        self.log_hook = hook
+        # 每个账号实例只挂一次转发 handler（模块级 logger 去重）
+        existing = [h for h in logger.handlers if isinstance(h, _LogHookHandler)]
+        if not existing:
+            logger.addHandler(_LogHookHandler(hook))
     
     def _get_browser_options(self, headless=False):
         """配置浏览器选项"""
