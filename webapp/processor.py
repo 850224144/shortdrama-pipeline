@@ -8,6 +8,7 @@ import re
 import json
 import glob
 import time
+import math
 import shutil
 import subprocess
 import sys
@@ -58,7 +59,16 @@ CONFIG = {
         'max_duration': 300,
         'count': 5,
         'retry': 2,
-        'segment_duration': [30, 75]
+        'segment_duration': [30, 75],
+        # 方案B（用户确认）：非重叠分段 + 跨版本 (集,起点) 去重 + 素材容量版本数。
+        # 每集按 segment_dur 切互不重叠段（36集×~45s → 63段），跨版本禁止复用同一
+        # (集,起点)，版本数 = 素材段数 // 每版段数（clamp[min_versions,max_versions]）。
+        'non_overlap': True,      # 每集切互不重叠段（替代 LLM 重叠窗口）
+        'dedup_segments': True,   # 跨版本禁止复用同一 (集,起点)
+        'segment_dur': 20.0,      # 非重叠段长（s）
+        'target_dur': 200.0,      # 每版目标时长（s）→ 6版×200s 零复用（3分20s）
+        'min_versions': 4,
+        'max_versions': 8,
     },
 
     # A1 镜头边界吸附：切点若落在镜头中间（半帧切/转写 start 带前镜头），
@@ -1929,6 +1939,17 @@ class PipelineProcessor:
                 
                 self.logger.log(drama_name, 'INFO',
                                f'EDL素材：{len(edl_eps)}集（全量）')
+                # 方案B：素材容量决定版本数（非重叠段总数 // 每版段数，零复用前提）。
+                # 覆盖 determine_version_count 的集数判定（>=30→8），避免版本数超过
+                # 素材容量导致被迫复用同一素材片段。
+                if CONFIG['edl'].get('non_overlap'):
+                    try:
+                        version_count = self._capacity_version_count(
+                            edl_eps, drama_name)
+                    except Exception as e:
+                        self.logger.log(drama_name, 'WARN',
+                                        f'方案B容量计算异常，用集数判定：{e}')
+                        version_count = self.determine_version_count(ep_count)
                 
                 # 生产路径统一走导演叙事（钩子→前因→发展→结局）。
                 # 只有高光/转写全缺时，_generate_reverse_segments 才回落随机兜底，
@@ -2495,15 +2516,21 @@ class PipelineProcessor:
         consecutive_fail = 0
         last_fail_cat = None
 
+        # 方案B：跨版本 (集,起点) 零复用——所有版本共享一个全局已用集合，
+        # 保证任何素材片段在全部版本中最多出现一次。
+        used_global = set() if CONFIG['edl'].get('dedup_segments') else None
+
         for v_idx in range(min(count, len(ep_nums))):
             self._raise_if_cancelled(cancel_event)
             # 根据倒叙或随机生成segments
             if use_reverse:
                 segments = self._generate_reverse_segments(edl_eps, v_idx,
                                                            drama_name=drama_name,
-                                                           plan=edl_plan)
+                                                           plan=edl_plan,
+                                                           used_global=used_global)
             else:
-                segments = self._generate_random_segments(edl_eps, v_idx)
+                segments = self._generate_random_segments(edl_eps, v_idx,
+                                                          used_global=used_global)
             
             if not segments:
                 continue
@@ -2754,8 +2781,71 @@ class PipelineProcessor:
     HIGHLIGHT_WINDOW_MIN = 30.0
 
     def _seg_budget_left(self, segments):
-        """规划总时长预算还剩多少秒（相对 PLANNED_SEGS_MAX）。"""
-        return self.PLANNED_SEGS_MAX - sum(s["duration"] for s in segments)
+        """规划总时长预算还剩多少秒。
+
+        方案B（non_overlap）：预算 = CONFIG['edl']['target_dur']（如 200s）。
+        否则用 PLANNED_SEGS_MAX（285s）原逻辑。
+        """
+        if CONFIG['edl'].get('non_overlap'):
+            target = float(CONFIG['edl'].get('target_dur', 200.0))
+        else:
+            target = self.PLANNED_SEGS_MAX
+        return target - sum(s["duration"] for s in segments)
+
+    def _nonoverlap_cands(self, llm_cands, ep_dur, seg_dur):
+        """方案B：把 LLM 候选（可能互相重叠的窗口）重排为互不重叠的 seg_dur 段。
+
+        从 0 起连续切 [i*seg, (i+1)*seg]，段数 = floor(ep_dur / seg_dur)。
+        每段携带对应 LLM 候选的 score/hook_type/reason（按分数降序对齐；
+        候选不够时用最高分候选兜底，保证段有可用的钩子标签）。无候选也按
+        ep_dur 切（score 0 兜底）。返回新 cands 列表。
+        """
+        seg_dur = float(seg_dur)
+        out = []
+        i = 0
+        while (i + 1) * seg_dur <= ep_dur + 0.05:
+            st = round(i * seg_dur, 1)
+            src = (llm_cands[i] if i < len(llm_cands)
+                   else (llm_cands[0] if llm_cands else {}))
+            out.append({
+                'score': src.get('score', 0),
+                'start': st,
+                'dur': round(seg_dur, 1),
+                'src': src.get('src', 'llm'),
+                'hook_type': src.get('hook_type', ''),
+                'reason': src.get('reason', ''),
+            })
+            i += 1
+        return out
+
+    def _capacity_version_count(self, edl_eps, drama_name):
+        """方案B：素材容量决定版本数（零复用前提）。
+
+        版本数 = 总非重叠段数 // 每版段数，clamp[min_versions, max_versions]。
+        素材段数 = Σ floor(ep_dur / segment_dur)（_load_episode_highlights 已按
+        方案B生成非重叠候选）。段数不足以支撑 min_versions 时降到 min_versions
+        （此时无法完全零复用，由跨版本去重尽力避免重复）。
+        """
+        cfg = CONFIG['edl']
+        seg_dur = float(cfg.get('segment_dur', 20.0))
+        target = float(cfg.get('target_dur', 200.0))
+        segs_per_version = max(1, int(math.ceil(target / seg_dur)))
+        total = 0
+        try:
+            hl = self._load_episode_highlights(edl_eps, drama_name=drama_name)
+            total = sum(len(e.get('cands', [])) for e in hl)
+        except Exception as e:
+            self.logger.log(drama_name, 'WARN',
+                            f'方案B容量计算失败，回退集数判定：{e}')
+            total = 0
+        if total <= 0:
+            return self.determine_version_count(len(edl_eps))
+        count = max(int(cfg.get('min_versions', 4)),
+                    min(int(cfg.get('max_versions', 8)), total // segs_per_version))
+        self.logger.log(drama_name, 'INFO',
+                        f'方案B容量：素材{total}段 / 每版{segs_per_version}段 '
+                        f'→ {count}版（零复用）')
+        return count
 
     # 冲突/悬念词库：LLM 不可用时的兜底打分
     # 冲突词权重 2（情绪爆发），悬念词权重 1（信息揭示）
@@ -3118,6 +3208,12 @@ class PipelineProcessor:
                                   "reason": c.get("reason", "")})
             if not cands:
                 cands = self._keyword_cands(raw, ep_dur)
+            # 方案B：LLM/关键词候选重排为互不重叠的 segment_dur 段（每集 1-N 段），
+            # 保证跨版本零复用有足够的、不重叠的独立窗口可用。
+            if cands and CONFIG['edl'].get('non_overlap'):
+                cands = self._nonoverlap_cands(
+                    cands, ep_dur,
+                    float(CONFIG['edl'].get('segment_dur', 20.0)))
             if cands:
                 out.append({"episode": ep_num, "path": ep_file,
                             "dur": ep_dur, "cands": cands})
@@ -3435,7 +3531,8 @@ class PipelineProcessor:
         return self._snap_scene_start(start, dur, e.get('dur', 0),
                                       boundaries)
 
-    def _generate_reverse_segments(self, edl_eps, v_idx, drama_name=None, plan=None):
+    def _generate_reverse_segments(self, edl_eps, v_idx, drama_name=None,
+                                   plan=None, used_global=None):
         """倒叙结构：开头上钩子，随后按叙事顺序铺开每集的高能窗口。
 
         高能点主路径是 LLM 逐集打分（带理由，落日志可审计），关键词兜底。
@@ -3445,16 +3542,20 @@ class PipelineProcessor:
         - 该集候选轮换 = cands[v_idx % len(cands)]（不同版不同候选段）
         - 叙事顺序 = _build_arc_order（钩子→前因闪回→顺叙结局，剧情连贯不跳戏）
         无 plan 回退原逻辑（全局最高分钩子 + 集号逆序）。
+
+        used_global（方案B跨版本去重）：跨版本共享的 (集,起点) 已用集合；
+        任何版本都跳过已用段 → 版本间零复用同一个素材片段。None 关闭。
         """
         eps_hl = self._load_episode_highlights(edl_eps, drama_name=drama_name)
         if not eps_hl:
             # 没有 ASR 转写（未跑通或素材缺转写）：退回随机逻辑，保证版本开得出
-            return self._generate_random_segments(edl_eps, v_idx)
+            return self._generate_random_segments(edl_eps, v_idx,
+                                                  used_global=used_global)
 
         segments = []
 
         def add(ep_num, start, dur):
-            """按累计时长预算追加片段；预算耗尽返回 False"""
+            """按累计时长预算追加片段；预算耗尽或全局已用返回 False"""
             left = self._seg_budget_left(segments)
             if left <= self.MIN_SEG_DUR:
                 return False
@@ -3465,6 +3566,14 @@ class PipelineProcessor:
             # A1 镜头边界吸附：转写 start 是音频起点，常带 1-3s 前一镜头；
             # 吸附到最近 scene 边界修复半帧切。检测失败保守放行（不吸附）。
             s = self._snap_segment_start(ep_num, s, d, eps_hl)
+            if s is None:   # 防御：吸附异常/类型推断，绝不把 None 写进片段
+                s = 0.0
+            # 方案B：跨版本零复用——同一 (集,起点) 全局只允许用一次（吸附后键）
+            if used_global is not None:
+                key = (ep_num, round(float(s), 1))
+                if key in used_global:
+                    return False
+                used_global.add(key)
             segments.append({
                 "episode": ep_num,
                 "start": s,
@@ -3492,6 +3601,13 @@ class PipelineProcessor:
                     opening = last
         # 候选轮换：不同版本取不同候选段（V1 候选0、V2 候选1…）
         oc = opening["cands"][v_idx % len(opening["cands"])]
+        # 方案B：开头钩子段被全局（其他版本）占用 → 顺延该集下一个未用段，
+        # 保证每个版本的开头钩子都是独立的素材片段。
+        if used_global is not None and len(opening["cands"]) > 1:
+            for c2 in opening["cands"]:
+                if (opening["episode"], round(float(c2["start"]), 1)) not in used_global:
+                    oc = c2
+                    break
         if vplan:
             self.logger.log(
                 'system', 'INFO',
@@ -3513,6 +3629,7 @@ class PipelineProcessor:
         # 2. 叙事顺序：导演方案 order_type（钩子→前因闪回→顺叙结局）；
         #    无方案回退集号逆序（原逻辑）。
         used = {(opening["episode"], oc["start"])}
+        used_eps = {opening["episode"]}   # 本版已用集（补足阶段避免同集二次出现）
         if vplan:
             order = self._build_arc_order(eps_hl, opening["episode"],
                                           vplan.get('order_type', 'reverse'))
@@ -3527,25 +3644,59 @@ class PipelineProcessor:
             e = next((x for x in eps_hl if x["episode"] == e_num), None)
             if e is None or not e["cands"]:
                 continue
-            # 每集候选轮换：v_idx 偏移取该集候选，被占则顺延下一个未用候选
+            # 每集候选轮换：v_idx 偏移取该集候选，被本地/全局占用则顺延下一个未用候选
             cands = e["cands"]
             c = cands[v_idx % len(cands)]
-            if (e_num, c["start"]) in used:
+            if (e_num, c["start"]) in used or (
+                    used_global is not None
+                    and (e_num, round(float(c["start"]), 1)) in used_global):
                 picked = None
                 for c2 in cands:
-                    if (e_num, c2["start"]) not in used:
-                        picked = c2
-                        break
+                    if (e_num, c2["start"]) in used:
+                        continue
+                    if (used_global is not None
+                            and (e_num, round(float(c2["start"]), 1)) in used_global):
+                        continue
+                    picked = c2
+                    break
                 if picked is None:
                     continue
                 c = picked
             used.add((e_num, c["start"]))
+            used_eps.add(e_num)
             if add(e_num, c["start"], c["dur"]):
                 continue
 
+        # 方案B补足：arc 遍历完但预算未满（如最后一版素材被前面版本分散占用），
+        # 从剩余全局未用段按分数降序补足到目标时长，避免末版时长跌破 3 分钟。
+        # 两遍：先取本版未出现过的集（避免同集二次出现观感重复），无果再放宽。
+        # 仅方案B（dedup 启用，used_global 非 None）生效；旧逻辑/测试不受影响。
+        if (CONFIG['edl'].get('non_overlap') and used_global is not None
+                and self._seg_budget_left(segments) > self.MIN_SEG_DUR):
+            ranked = sorted(eps_hl,
+                            key=lambda x: -max((c['score'] for c in x['cands']),
+                                               default=0))
+            for allow_reused_ep in (False, True):
+                if self._seg_budget_left(segments) <= self.MIN_SEG_DUR:
+                    break
+                for e in ranked:
+                    if self._seg_budget_left(segments) <= self.MIN_SEG_DUR:
+                        break
+                    if e['episode'] == opening['episode']:
+                        continue
+                    if e['episode'] in used_eps and not allow_reused_ep:
+                        continue
+                    for c in e['cands']:
+                        key = (e['episode'], round(float(c['start']), 1))
+                        if used_global is not None and key in used_global:
+                            continue
+                        if add(e['episode'], c['start'], c['dur']):
+                            used_eps.add(e['episode'])
+                            break
+
         return segments
 
-    def _generate_random_segments(self, edl_eps, v_idx):
+    def _generate_random_segments(self, edl_eps, v_idx, used_global=None):
         """生成随机结构的segments - 检查时长有效性"""
         segments = []
         
@@ -3561,6 +3712,7 @@ class PipelineProcessor:
             
             num_segments = random.randint(2, 3)
             start = random.uniform(5, 15)
+            ep_num = self._get_episode_num(ep_file)
             
             for _ in range(num_segments):
                 # 累计时长预算用完就停手，保证成片落在 210-300s 窗口内
@@ -3581,9 +3733,16 @@ class PipelineProcessor:
                 if boundaries:
                     s = self._snap_scene_start(start, seg_duration, duration,
                                                boundaries)
+                # 方案B：跨版本零复用——跳过全局已用 (集,起点) 段
+                if used_global is not None:
+                    key = (ep_num, round(float(s or 0.0), 1))
+                    if key in used_global:
+                        start += seg_duration + random.uniform(1, 3)
+                        continue
+                    used_global.add(key)
                 segments.append({
-                    "episode": self._get_episode_num(ep_file),
-                    "start": round(s, 1),
+                    "episode": ep_num,
+                    "start": round(float(s or 0.0), 1),
                     "duration": round(seg_duration, 1)
                 })
                 start += seg_duration + random.uniform(1, 3)

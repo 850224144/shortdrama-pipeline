@@ -94,6 +94,15 @@ class TestScoreEpisodeLlmMultiCand(unittest.TestCase):
 
 
 class TestLoadHighlightsCacheCompat(unittest.TestCase):
+    def setUp(self):
+        # 这些测试验证 LLM 窗口归一化/缓存兼容（非方案B路径）——
+        # 显式关闭 non_overlap，避免方案B的重建窗口覆盖原断言。
+        self._prev_non_overlap = processor.CONFIG['edl'].get('non_overlap')
+        processor.CONFIG['edl']['non_overlap'] = False
+
+    def tearDown(self):
+        processor.CONFIG['edl']['non_overlap'] = self._prev_non_overlap
+
     def _setup(self, cached):
         d = tempfile.mkdtemp()
         tr = os.path.join(d, 'transcribe')
@@ -343,6 +352,72 @@ class TestArcAngleRichness(unittest.TestCase):
         p, _ = _mk()
         self.assertEqual(p.ARC_ANGLES[:6],
                          ['逆袭', '打脸', '真相', '反转', '高潮', '泪目'])
+
+
+class TestPlanBNonOverlap(unittest.TestCase):
+    """方案B：非重叠分段 + 素材容量版本数 + 跨版本 (集,起点) 零复用。"""
+
+    def _eps_hl(self, n=10, dur=45.0):
+        """n 集，每集 dur 秒，LLM 双候选 → _nonoverlap_cands 重排为 2 个 20s 段。"""
+        p, _ = _mk()
+        out = []
+        for i in range(1, n + 1):
+            llm = [
+                {"score": 10 - (i % 9), "start": 0.0, "end": 30.0,
+                 "hook_type": "逆袭", "reason": f"r{i}a", "src": "llm"},
+                {"score": 9 - (i % 9), "start": 5.0, "end": 35.0,
+                 "hook_type": "真相", "reason": f"r{i}b", "src": "llm"},
+            ]
+            cands = p._nonoverlap_cands(llm, dur, 20.0)
+            out.append({"episode": i, "path": f"X:\\素材\\第{i}集.mp4",
+                        "dur": dur, "cands": cands})
+        return p, out
+
+    def test_nonoverlap_cands_consecutive(self):
+        p, eps = self._eps_hl(1)
+        cands = eps[0]['cands']
+        self.assertEqual(len(cands), 2, '45s 集应切 2 个 20s 段')
+        self.assertEqual(cands[0]['start'], 0.0)
+        self.assertEqual(cands[0]['dur'], 20.0)
+        self.assertEqual(cands[1]['start'], 20.0)
+        self.assertEqual(cands[1]['dur'], 20.0)
+        # 互不重叠：段2 起点 ≥ 段1 终点
+        self.assertGreaterEqual(cands[1]['start'],
+                                cands[0]['start'] + cands[0]['dur'])
+        # 分数按 LLM 顺序对齐（helper: score=10-(i%9)=9, 9-(i%9)=8 for i=1）
+        self.assertEqual(cands[0]['score'], 9)
+        self.assertEqual(cands[1]['score'], 8)
+
+    def test_nonoverlap_cands_short_ep_single_seg(self):
+        p, _ = _mk()
+        llm = [{"score": 8, "start": 0.0, "end": 30.0, "hook_type": "逆袭",
+                "reason": "r", "src": "llm"}]
+        cands = p._nonoverlap_cands(llm, 34.3, 20.0)
+        self.assertEqual(len(cands), 1, '34.3s 集只够 1 个 20s 段')
+        self.assertEqual(cands[0]['start'], 0.0)
+
+    def test_capacity_version_count_clamps(self):
+        p, eps = self._eps_hl(10)   # 10集 × 2段 = 20段
+        with mock.patch.object(p, '_load_episode_highlights', return_value=eps):
+            vc = p._capacity_version_count(['x'], '测试剧')
+        # 20段 // 10段/版 = 2 版（clamp[4,8] 下限 4）
+        self.assertEqual(vc, 4, '素材不足时降到 min_versions')
+
+    def test_cross_version_no_reuse(self):
+        p, eps = self._eps_hl(10)
+        plan = [{"opening_ep": 1, "angle": "逆袭", "order_type": "reverse"},
+                {"opening_ep": 2, "angle": "真相", "order_type": "reverse"}]
+        used = set()
+        with mock.patch.object(p, '_load_episode_highlights', return_value=eps):
+            v1 = p._generate_reverse_segments(['x'], 0, drama_name='测试剧',
+                                              plan=plan, used_global=used)
+            v2 = p._generate_reverse_segments(['x'], 1, drama_name='测试剧',
+                                              plan=plan, used_global=used)
+        keys1 = {(s['episode'], round(s['start'], 1)) for s in v1}
+        keys2 = {(s['episode'], round(s['start'], 1)) for s in v2}
+        self.assertFalse(keys1 & keys2,
+                         '跨版本不得复用同一 (集,起点) 素材片段')
+        self.assertTrue(keys1, 'V1 应生成片段')
 
 
 if __name__ == '__main__':
