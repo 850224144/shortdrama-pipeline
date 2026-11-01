@@ -106,6 +106,36 @@ _reconcile_thread.start()
 process_controller = ProcessJobController(processor, on_status=socketio.emit)
 processing_state = process_controller.state
 
+# P3: 启动恢复崩溃遗留的下载任务（心跳过期且 status=downloading 的自动续传）。
+# 复用 process_controller.start 全流程（下载+切片）；单任务，busy 则延时重试。
+def _startup_download_resume():
+    try:
+        orphan_jobs = processor.find_orphaned_download_jobs()
+        if not orphan_jobs:
+            return
+        for attempt in range(2):
+            job = orphan_jobs[0]
+            params = job.get('params') or {}
+            link = params.get('link')
+            if not link:
+                return
+            pwd = params.get('pwd') or CONFIG['download'].get('default_pwd', '9999')
+            msg = link if 'pwd=' in link else f"{link}?pwd={pwd}"
+            logger.log('system', 'WARN', f'启动恢复：续传中断下载 {link}')
+            body, status = process_controller.start(msg)
+            if status == 200:
+                logger.log('system', 'INFO', f'启动恢复：已提交续传任务')
+                return
+            logger.log('system', 'WARN',
+                       f'启动恢复：续传被拒（{status}），{20}s后重试')
+            time.sleep(20)
+    except Exception as e:
+        logger.log('system', 'ERROR', f'启动下载恢复失败: {e}')
+
+
+_resume_thread = threading.Thread(target=_startup_download_resume, daemon=True)
+_resume_thread.start()
+
 # ===== API路由 =====
 
 @app.route('/')

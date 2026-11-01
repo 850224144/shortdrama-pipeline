@@ -13,6 +13,7 @@ import subprocess
 import sys
 import threading
 import random
+import uuid
 from datetime import datetime
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
@@ -20,6 +21,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from ai_copy_generator import AICopyGenerator
 from job_runtime import JobCancelled, execution_gate
+from job_store import JobStore
 
 # 路径配置
 CONFIG = {
@@ -40,11 +42,14 @@ CONFIG = {
         'max_workers': 2,  # 同一百度账号CLI并发不宜过高，5会冲突
         'max_retries': 3,
         'timeout': 1800,
+        'stall_timeout': 300,  # P1: 无新文件产出达此秒数判卡顿，杀进程并重试
         'transfer_timeout': 120,
         'delete_timeout': 60,
         'default_pwd': '9999',  # 默认提取码
         'min_manual_files': 2,  # 手动素材最少文件数
         'min_download_files': 10,  # 已下载最少文件数
+        'min_completeness': 0.5,  # P7: 完成度低于此比例视为残缺，跳过切片并重试
+        'resume_on_startup': True,  # P3: 启动时恢复崩溃遗留的下载任务
     },
     
     
@@ -83,6 +88,11 @@ PUNCTUATIONS = ['，', '。', '？', '！', '、', '：', '；', '“', '”', '
 
 # 兼容现有调用与测试名称；取消语义由 job_runtime 统一提供。
 CutCancelled = JobCancelled
+
+
+class DownloadStalled(Exception):
+    """下载卡顿：进程存活但长时间无新文件产出（P1 卡顿检测）。"""
+    pass
 
 
 # 题材分类规则
@@ -323,6 +333,7 @@ class PipelineProcessor:
         self.logger = logger
         self.state_manager = state_manager
         self.processing = False
+        self._job_store = None  # P3: 下载任务持久化（惰性）
         self.lock = threading.Lock()
         
         # 初始化目录
@@ -521,6 +532,29 @@ class PipelineProcessor:
             
             self.logger.log('system', 'INFO',
                            f'下载完成: 成功{len(successful_downloads)}, 失败{len(failed_downloads)}')
+
+            # P7: 完整性门控 —— 明显残缺的下载不进切片（视为失败，避免产出残缺成品）。
+            # 放行策略：集数达 min_download_files 下限且完成度达 min_completeness。
+            min_eps = CONFIG['download'].get('min_download_files', 10)
+            min_ratio = CONFIG['download'].get('min_completeness', 0.5)
+            gated = []
+            for r in successful_downloads:
+                mp4s = [f for f in (r.get('downloaded_files') or [])
+                        if f.endswith('.mp4') and '.downloading' not in f]
+                incomplete = (r.get('episode_complete') is False)
+                total = r.get('total_episodes') or 0
+                ratio = (len(mp4s) / total) if (incomplete and total) else 1.0
+                if incomplete and (len(mp4s) < min_eps or ratio < min_ratio):
+                    self.logger.log('system', 'WARN',
+                        f'{r.get("drama_name") or r.get("link_id")}: '
+                        f'下载不完整（{len(mp4s)}/{total}集，{ratio:.0%}），低于切片阈值'
+                        f'（{min_eps}集/{min_ratio:.0%}），跳过切片')
+                    r['error'] = f'下载不完整（{len(mp4s)}/{total}集），跳过切片'
+                    r['success'] = False
+                    failed_downloads.append(r)
+                else:
+                    gated.append(r)
+            successful_downloads = gated
             
             if not successful_downloads:
                 return {
@@ -743,6 +777,19 @@ class PipelineProcessor:
                 last_result = result
                 
                 if result['success']:
+                    # P7/P4: 下载成功但明显残缺 → 视为可重试，续传缺失集（P4 只补缺失集）。
+                    # 重试上限内继续；超限则保留结果，由切片段 P7 门控放行/拦截。
+                    if result.get('episode_complete') is False:
+                        total = result.get('total_episodes') or 0
+                        n_mp4 = len([f for f in (result.get('downloaded_files') or [])
+                                     if f.endswith('.mp4') and '.downloading' not in f])
+                        min_ratio = CONFIG['download'].get('min_completeness', 0.5)
+                        if total and (n_mp4 / total) < min_ratio and attempts < max_retries:
+                            last_error = f'下载不完整（{n_mp4}/{total}集），续传缺失集'
+                            self.logger.log(
+                                result.get('drama_name') or link_info['link_id'],
+                                'WARN', last_error)
+                            continue
                     # archive 回填：真实下载/手动素材成功；防重跳过不覆盖历史
                     if not (result.get('error') or '').startswith('防重'):
                         try:
@@ -842,6 +889,8 @@ class PipelineProcessor:
         
         # 从链接提取ID（用于日志）
         link_dir_name = link.split('/')[-1].split('?')[0]
+        # P3: 下载任务持久化 id（在下载段创建；此前未创建则为 None）
+        download_job_id = None
         
         # archive 防重：本地目录已存在 或 历史 download_state=done → 不重复下载
         # （用户设计：防重复下载，集数完整性不校验）
@@ -1084,39 +1133,80 @@ class PipelineProcessor:
             # 4. 创建本地目标目录
             target_dir = os.path.join(CONFIG['download_base_dir'], dir_name)
             os.makedirs(target_dir, exist_ok=True)
-            
-            # 检查是否已下载完成：不再用固定阈值早退（半拉下载会被误判完成），
-            # 直接走 download 命令，它带 --overwrite=never，已下好的文件会自动跳过、续传剩余的。
 
-            # 5. 从网盘下载
-            download_cmd = [
-                CONFIG['baidupcs_path'], "download",
-                f"/短剧素材/{dir_name}",
-                "--saveto", target_dir,
-                "--overwrite=never"
-            ]
-            
-            self.logger.log(dir_name, 'INFO', f'开始下载：{dir_name}')
-            
-            # 启动进度监控线程
-            stop_monitor = threading.Event()
-            monitor_thread = threading.Thread(
-                target=self._monitor_download_progress, 
-                args=(target_dir, dir_name, stop_monitor)
-            )
-            monitor_thread.start()
-            
-            try:
-                process = self._run_command_cancellable(
-                    download_cmd,
-                    timeout=CONFIG['download']['timeout'],
-                    cancel_event=cancel_event,
-                    cwd=os.path.dirname(CONFIG['baidupcs_path']),
+            # P6: 清理残留 .downloading 与 <5MB 损坏文件，避免带病续传
+            self._clean_partial_downloads(target_dir)
+
+            # P3: 下载开始前持久化任务（崩溃后由启动恢复续传）
+            download_job_id = self._persist_download_job(link_info, dir_name, target_dir)
+
+            # P4: 比对本地已下集号 vs 网盘清单，仅对缺失集发起下载
+            cloud_files = self._list_cloud_files(f"/短剧素材/{dir_name}")
+            cloud_eps = sorted({n for n in
+                                (self.parse_episode_number(os.path.basename(x)) for x in cloud_files)
+                                if n is not None})
+            local_files = self._scan_files_recursive(target_dir)
+            local_eps = sorted({n for n in
+                                (self.parse_episode_number(os.path.basename(x)) for x in local_files)
+                                if n is not None})
+            missing_eps = sorted(set(cloud_eps) - set(local_eps))
+
+            if cloud_eps and not missing_eps:
+                # 网盘集全部已在本机：跳过下载，直接进入扫描/连续性校验
+                self.logger.log(dir_name, 'INFO',
+                                f'网盘 {len(cloud_eps)} 集已全部在本机，跳过下载')
+                download_cmd = None
+            elif cloud_eps and missing_eps and local_eps:
+                # 部分缺失：细粒度续传，只补下载缺失集
+                missing_names = []
+                for cf in cloud_files:
+                    n = self.parse_episode_number(os.path.basename(cf))
+                    if n in missing_eps:
+                        missing_names.append(cf)
+                self.logger.log(dir_name, 'INFO',
+                    f'续传：已下{len(local_eps)}集，缺失{len(missing_eps)}集'
+                    f'（{",".join(str(e) for e in missing_eps[:12])}），仅补缺失集')
+                download_cmd = ([CONFIG['baidupcs_path'], "download"] +
+                                [f"/短剧素材/{dir_name}/{name}" for name in missing_names] +
+                                ["--saveto", target_dir, "--overwrite=never"])
+            else:
+                # 全新下载
+                download_cmd = [
+                    CONFIG['baidupcs_path'], "download",
+                    f"/短剧素材/{dir_name}",
+                    "--saveto", target_dir,
+                    "--overwrite=never"
+                ]
+                self.logger.log(dir_name, 'INFO', f'开始下载：{dir_name}')
+
+            if download_cmd is not None:
+                # P1: 共享进度状态（last 时间戳供卡顿探测，eps 供集号级进度）
+                progress = {'last': time.monotonic(), 'count': len(local_eps), 'eps': local_eps}
+                stop_monitor = threading.Event()
+                monitor_thread = threading.Thread(
+                    target=self._monitor_download_progress,
+                    args=(target_dir, dir_name, stop_monitor),
+                    kwargs={
+                        'progress': progress,
+                        'expected_eps': set(cloud_eps) if cloud_eps else None,
+                        'job_id': download_job_id,
+                    }
                 )
-            finally:
-                # 取消/超时也必须先停监控，避免后台线程一直轮询目录。
-                stop_monitor.set()
-                monitor_thread.join(timeout=5)
+                monitor_thread.start()
+
+                try:
+                    process = self._run_command_cancellable(
+                        download_cmd,
+                        timeout=CONFIG['download']['timeout'],
+                        cancel_event=cancel_event,
+                        cwd=os.path.dirname(CONFIG['baidupcs_path']),
+                        progress_probe=lambda: progress['last'],
+                        stall_timeout=CONFIG['download'].get('stall_timeout', 300),
+                    )
+                finally:
+                    # 取消/超时/卡顿也必须先停监控，避免后台线程一直轮询目录。
+                    stop_monitor.set()
+                    monitor_thread.join(timeout=5)
             
             # 6. 扫描下载的文件
             downloaded_files = self._scan_files_recursive(target_dir)
@@ -1135,6 +1225,7 @@ class PipelineProcessor:
                     self.logger.log(dir_name, 'ERROR',
                         f'下载不完整：mp4={len(mp4_files)}个，其中{len(too_small)}个小于{MIN_MP4_MB}MB。'
                         f'保留网盘备份待重试，不删除云端文件。')
+                    self._finalize_download_job(download_job_id, False, '下载不完整')
                     return {
                         'success': False,
                         'downloaded_files': [],
@@ -1174,6 +1265,7 @@ class PipelineProcessor:
                 except Exception as e:
                     self.logger.log(dir_name, 'WARN', f'清理网盘异常：{str(e)}')
                 
+                self._finalize_download_job(download_job_id, True, None)
                 return {
                     'success': True,
                     'downloaded_files': downloaded_files,
@@ -1187,6 +1279,7 @@ class PipelineProcessor:
                 }
             else:
                 self.logger.log(dir_name, 'ERROR', '下载完成但未找到文件，将重试')
+                self._finalize_download_job(download_job_id, False, '下载完成但未找到文件')
                 return {
                     'success': False,
                     'downloaded_files': [],
@@ -1197,6 +1290,7 @@ class PipelineProcessor:
                 }
             
         except CutCancelled:
+            self._finalize_download_job(download_job_id, False, '用户已停止任务')
             return {
                 'success': False,
                 'cancelled': True,
@@ -1206,51 +1300,148 @@ class PipelineProcessor:
                 'error': '用户已停止任务',
                 'transferred': False,
             }
-        except subprocess.TimeoutExpired:
-            # 如果已转存，尝试清理网盘
-            if 'dir_name' in locals() and dir_name != link_dir_name:
-                try:
-                    delete_cmd = [
-                        CONFIG['baidupcs_path'], "delete",
-                        f"/短剧素材/{dir_name}",
-                        "--force"
-                    ]
-                    subprocess.run(delete_cmd, timeout=30, 
-                                  cwd=os.path.dirname(CONFIG['baidupcs_path']))
-                    self.logger.log(dir_name, 'INFO', '网盘文件已清理（超时）')
-                except Exception:
-                    pass
+        except DownloadStalled:
+            # P1: 卡顿已由 _run_command_cancellable 终止并抛错。
+            # P2: 保留网盘备份（本地残缺，续传靠 --overwrite=never 补缺失集）。
+            self._finalize_download_job(download_job_id, False, '下载卡顿')
             return {
                 'success': False,
                 'downloaded_files': [],
                 'target_dir': None,
                 'drama_name': link_dir_name,
-                'error': 'Timeout',
-                'transferred': False
+                'error': '下载卡顿，已终止（保留网盘备份待续传）',
+                'transferred': True
+            }
+        except subprocess.TimeoutExpired:
+            # P2: 超时不再删除网盘备份 —— 本地残缺时云端源是续传的基础。
+            # 保留 /短剧素材/{dir_name}，下次重试走"已存在"分支复用。
+            self._finalize_download_job(download_job_id, False, '下载超时')
+            self.logger.log(dir_name if 'dir_name' in locals() else link_dir_name,
+                            'WARN', '下载超时：保留网盘备份待续传，不删除云端文件')
+            return {
+                'success': False,
+                'downloaded_files': [],
+                'target_dir': target_dir if 'target_dir' in locals() else None,
+                'drama_name': link_dir_name,
+                'error': '下载超时（保留网盘备份待续传）',
+                'transferred': True
             }
         except Exception as e:
-            # 如果已转存，尝试清理网盘
-            if 'dir_name' in locals() and dir_name != link_dir_name:
-                try:
-                    delete_cmd = [
-                        CONFIG['baidupcs_path'], "delete",
-                        f"/短剧素材/{dir_name}",
-                        "--force"
-                    ]
-                    subprocess.run(delete_cmd, timeout=30, 
-                                  cwd=os.path.dirname(CONFIG['baidupcs_path']))
-                    self.logger.log(dir_name, 'INFO', '网盘文件已清理（异常）')
-                except Exception:
-                    pass
+            # P2: 异常也不删除网盘备份 —— 保留云端源待续传。
+            self._finalize_download_job(download_job_id, False, str(e))
+            self.logger.log(dir_name if 'dir_name' in locals() else link_dir_name,
+                            'WARN', f'下载异常：保留网盘备份待续传（{str(e)}）')
             return {
                 'success': False,
                 'downloaded_files': [],
-                'target_dir': None,
+                'target_dir': target_dir if 'target_dir' in locals() else None,
                 'drama_name': link_dir_name,
                 'error': str(e),
-                'transferred': False
+                'transferred': True
             }
     
+    # ── P3: 下载任务持久化（崩溃自动续传）─────────────────────────
+    def _download_job_store(self):
+        """惰性创建下载任务存储（与切片共用 jobs.db，job_type 区分）。"""
+        if self._job_store is None:
+            self._job_store = JobStore(os.path.join(CONFIG['data_dir'], 'jobs.db'))
+        return self._job_store
+
+    def _persist_download_job(self, link_info, dir_name, target_dir):
+        """下载开始前持久化任务，崩溃后由启动恢复续传。返回 job_id 或 None。"""
+        try:
+            job_id = uuid.uuid4().hex[:12]
+            now = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+            self._download_job_store().put({
+                'id': job_id,
+                'job_type': 'download',
+                'status': 'downloading',
+                'stage': 'downloading',
+                'progress': 0,
+                'params': {
+                    'link': link_info.get('link'),
+                    'pwd': link_info.get('pwd'),
+                    'link_id': link_info.get('link_id'),
+                    'drama_guess': dir_name,
+                    'target_dir': target_dir,
+                },
+                'started_at': now,
+                'heartbeat_at': now,
+            })
+            return job_id
+        except Exception as e:
+            self.logger.log('system', 'WARN',
+                            f'持久化下载任务失败（不影响下载）：{e}')
+            return None
+
+    def _finalize_download_job(self, job_id, success, error=None):
+        """下载结束（成功/终态失败）更新任务状态。"""
+        if not job_id:
+            return
+        try:
+            now = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+            self._download_job_store().update(
+                job_id, status='done' if success else 'failed',
+                finished_at=now, error=error)
+        except Exception as e:
+            self.logger.log('system', 'WARN', f'更新下载任务状态失败：{e}')
+
+    def find_orphaned_download_jobs(self):
+        """返回心跳过期且 status=downloading 的下载任务（崩溃遗留，待续传）。"""
+        try:
+            store = self._download_job_store()
+            return store.stale_jobs(job_type='download',
+                                    statuses=('downloading',),
+                                    window_seconds=90)
+        except Exception as e:
+            self.logger.log('system', 'WARN', f'查找中断下载任务失败：{e}')
+            return []
+
+    # ── P4: 网盘文件清单（缺失集比对）────────────────────────────
+    def _list_cloud_files(self, cloud_dir):
+        """列出网盘目录下的文件名（供缺失集比对）。失败返回 []。"""
+        try:
+            ls_cmd = [CONFIG['baidupcs_path'], "ls", cloud_dir]
+            ls_process = subprocess.run(
+                ls_cmd, capture_output=True, text=True, encoding="utf-8",
+                timeout=30, cwd=os.path.dirname(CONFIG['baidupcs_path']))
+            if ls_process.returncode != 0:
+                return []
+            pattern = r'^\s*\d+\s+\S+\s+\d{4}-\d{2}-\d{2}\s+\d{2}:\d{2}:\d{2}\s+(.+)$'
+            names = []
+            for line in ls_process.stdout.split('\n'):
+                m = re.match(pattern, line)
+                if m:
+                    names.append(m.group(1).strip().strip('/'))
+            return names
+        except Exception as e:
+            self.logger.log('system', 'WARN', f'列出网盘文件失败：{e}')
+            return []
+
+    # ── P6: 本地下载残留清理 ────────────────────────────────────
+    def _clean_partial_downloads(self, target_dir):
+        """清理残留 .downloading 临时文件与 <5MB 损坏 mp4。返回清理数。"""
+        if not os.path.isdir(target_dir):
+            return 0
+        removed = 0
+        for root, dirs, files in os.walk(target_dir):
+            for f in files:
+                p = os.path.join(root, f)
+                try:
+                    if f.endswith('.downloading'):
+                        os.remove(p)
+                        removed += 1
+                    elif f.lower().endswith('.mp4') and \
+                            os.path.getsize(p) < 5 * 1024 * 1024:
+                        os.remove(p)
+                        removed += 1
+                except OSError:
+                    pass
+        if removed:
+            self.logger.log(os.path.basename(target_dir), 'WARN',
+                            f'清理下载残留：删除 {removed} 个临时/损坏文件')
+        return removed
+
     def _find_dir_in_cloud(self, cloud_dir):
         """从网盘目录查找剧名目录"""
         # 已知的非剧目录，需要跳过
@@ -1291,21 +1482,60 @@ class PipelineProcessor:
             self.logger.log('system', 'WARN', f'查找网盘目录失败：{str(e)}')
             return []
     
-    def _monitor_download_progress(self, target_dir, dir_name, stop_event):
-        """监控下载进度，记录已下载的文件"""
+    def _monitor_download_progress(self, target_dir, dir_name, stop_event,
+                                   progress=None, expected_eps=None, job_id=None):
+        """监控下载进度，记录已下载的文件（P1/P3/P5 增强）。
+
+        progress: 共享 dict {last, count, eps}；进度变化时刷新 last 时间戳
+                  （P1 卡顿探测用）与 eps 集号列表（P5 显示）。
+        expected_eps: 云端预期集号集合（P5 进度分母）。
+        job_id: 下载任务 id；进度变化时刷新心跳（P3 崩溃恢复）。
+        """
         last_count = 0
+        last_logged = 0
         try:
             while not stop_event.is_set():
                 try:
                     files = self._scan_files_recursive(target_dir)
                     mp4_files = [f for f in files if f.endswith('.mp4') and '.downloading' not in f]
                     total_size = sum(os.path.getsize(f) for f in mp4_files)
-                    
-                    if len(mp4_files) > last_count:
-                        self.logger.log(dir_name, 'INFO', 
-                            f'下载中：{len(mp4_files)}集 ({total_size/1024/1024:.1f}MB)')
-                        last_count = len(mp4_files)
-                    
+                    eps = []
+                    for f in mp4_files:
+                        n = self.parse_episode_number(os.path.basename(f))
+                        if n is not None:
+                            eps.append(n)
+                    eps = sorted(set(eps))
+
+                    # P1: 共享进度状态（last 时间戳、count、eps）
+                    if progress is not None:
+                        if len(mp4_files) > progress.get('count', 0):
+                            progress['last'] = time.monotonic()
+                            progress['count'] = len(mp4_files)
+                        progress['eps'] = eps
+
+                    # P5: 仅在集数增加时打日志，集号级进度
+                    if len(mp4_files) > last_logged:
+                        if expected_eps:
+                            total = len(expected_eps)
+                            pct = (len(eps) / total * 100) if total else 0
+                            eps_str = ','.join(str(e) for e in eps[:12])
+                            if len(eps) > 12:
+                                eps_str += f'...共{len(eps)}集'
+                            self.logger.log(dir_name, 'INFO',
+                                f'下载中：已下{len(eps)}/{total}集 [{eps_str}] · '
+                                f'{total_size/1024/1024:.1f}MB · {pct:.0f}%')
+                        else:
+                            self.logger.log(dir_name, 'INFO',
+                                f'下载中：{len(mp4_files)}集 ({total_size/1024/1024:.1f}MB)')
+                        last_logged = len(mp4_files)
+
+                    # P3: 下载任务心跳（崩溃后判定孤儿用）
+                    if job_id:
+                        try:
+                            self._download_job_store().touch_heartbeat(job_id)
+                        except Exception:
+                            pass
+
                     stop_event.wait(timeout=10)
                 except Exception as e:
                     self.logger.log(dir_name, 'WARN', f'监控异常：{str(e)}')
@@ -1838,10 +2068,15 @@ class PipelineProcessor:
                 except Exception:
                     pass
 
-    def _run_command_cancellable(self, cmd, timeout, cancel_event=None, cwd=None):
+    def _run_command_cancellable(self, cmd, timeout, cancel_event=None, cwd=None,
+                                 progress_probe=None, stall_timeout=None):
         """运行子进程；cancel_event 置位时终止整棵进程树。
 
         未提供取消事件时仍走 subprocess.run，保持已有调用和测试兼容。
+
+        P1 卡顿检测：progress_probe 为无参可调用，返回最近一次有进度的时间戳
+        （monotonic），或 None 表示尚未有进度；stall_timeout 给定且当前时间减
+        最近进度超过该值，判定下载卡顿，终止整棵进程树并抛 DownloadStalled。
         """
         self._raise_if_cancelled(cancel_event)
         child_env = self._child_process_env()
@@ -1876,6 +2111,19 @@ class PipelineProcessor:
                 if cancel_event.is_set():
                     self._terminate_process_tree(process)
                     raise CutCancelled('用户已停止切片')
+                # P1: 卡顿检测 —— 进程活着但长时间无进度，主动终止并重试
+                if stall_timeout and progress_probe is not None:
+                    try:
+                        last_progress = progress_probe()
+                    except Exception:
+                        last_progress = None
+                    if last_progress is not None and \
+                       (time.monotonic() - last_progress) >= stall_timeout:
+                        self.logger.log('system', 'WARN',
+                            f'下载卡顿：{stall_timeout}s 无新文件，终止并重试')
+                        self._terminate_process_tree(process)
+                        raise DownloadStalled(
+                            f'下载卡顿（{stall_timeout}s无进度），已终止待重试')
                 if time.monotonic() - started_at >= timeout:
                     self._terminate_process_tree(process)
                     raise subprocess.TimeoutExpired(cmd, timeout)
