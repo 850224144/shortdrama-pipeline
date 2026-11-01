@@ -155,6 +155,36 @@ def test_p7_gate_logic():
     print('  P7 OK: 完整短剧放行/明显残缺拦截/达阈值放行 全部符合')
 
 
+def test_dedupe_episodes():
+    """去重：36集顶层 + 36集嵌套副本（72文件）→ 36集，每集保留顶层最浅路径一份。"""
+    p = PipelineProcessor.__new__(PipelineProcessor)
+    p.logger = MockLogger()
+    p.state_manager = None
+    p.processing = False
+    p._job_store = None
+    top = r'E:\短剧素材\迟来的父爱\迟来的父爱'
+    nested = r'E:\短剧素材\迟来的父爱\迟来的父爱\迟来的父爱'
+    # 模拟 72 个文件：36 顶层 第N集.mp4 + 36 嵌套 迟来的父爱 - 第N集.mp4
+    files = []
+    for i in range(1, 37):
+        files.append(os.path.join(top, f'第{i}集.mp4'))
+        files.append(os.path.join(nested, f'迟来的父爱 - 第{i}集.mp4'))
+    assert len(files) == 72
+    deduped = p._dedupe_episodes_by_number(files)
+    assert len(deduped) == 36, f'应去重为36，实际{len(deduped)}'
+    # 每集保留顶层（更浅）路径
+    for f in deduped:
+        assert f.startswith(top) and '\\' not in os.path.relpath(f, top), f'应保留顶层路径: {f}'
+    # 集号 1-36 全覆盖
+    eps = sorted(n for n in (p.parse_episode_number(os.path.basename(f)) for f in deduped) if n is not None)
+    assert eps == list(range(1, 37)), f'集号应为1-36: {eps}'
+    # 不可解析文件保留
+    odd = [os.path.join(top, '预告片.mp4')]
+    deduped2 = p._dedupe_episodes_by_number(files + odd)
+    assert os.path.join(top, '预告片.mp4') in deduped2, '不可解析文件应保留'
+    print('  DEDUPE OK: 72→36集，每集保留顶层一份，不可解析文件保留')
+
+
 if __name__ == '__main__':
     print('=== 下载优化单测 ===')
     test_p1_stall()
@@ -162,4 +192,5 @@ if __name__ == '__main__':
     test_p4_missing_eps()
     test_p6_cleanup()
     test_p7_gate_logic()
+    test_dedupe_episodes()
     print('=== 全部通过 ===')

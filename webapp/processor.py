@@ -637,11 +637,19 @@ class PipelineProcessor:
         
         # 扫描素材文件
         files = self._scan_files_recursive(src_dir)
-        mp4_files = [f for f in files if f.endswith('.mp4') and '.downloading' not in f]
+        raw_mp4 = [f for f in files if f.endswith('.mp4') and '.downloading' not in f]
+        # 去重：网盘源若含子目录副本（/短剧素材/{剧名}/{剧名}/），递归扫描得 2N 个文件；
+        # 按集号去重只保留每集一份（顶层优先），避免「找到N集」误报与双份裁剪。
+        mp4_files = self._dedupe_episodes_by_number(raw_mp4)
         
         if len(mp4_files) < 2:
-            self.logger.log('system', 'ERROR', f'素材文件不足：{len(mp4_files)}个')
-            return {'status': 'failed', 'error': f'素材文件不足：{len(mp4_files)}个'}
+            self.logger.log('system', 'ERROR', f'素材文件不足：{len(mp4_files)}集（原始{len(raw_mp4)}个文件）')
+            return {'status': 'failed', 'error': f'素材文件不足：{len(mp4_files)}集'}
+        
+        if len(raw_mp4) != len(mp4_files):
+            self.logger.log('system', 'INFO',
+                f'检测到嵌套副本：原始{len(raw_mp4)}个文件去重为{len(mp4_files)}集'
+                f'（网盘源含子目录副本，仅保留每集一份）')
         
         self.logger.log('system', 'INFO', f'找到{len(mp4_files)}集素材，开始切片...')
 
@@ -1210,10 +1218,17 @@ class PipelineProcessor:
             
             # 6. 扫描下载的文件
             downloaded_files = self._scan_files_recursive(target_dir)
+            # 去重：网盘源若同时含顶层文件与 {剧名}/ 子目录副本，递归扫描得 2N 个文件；
+            # 按集号去重只保留每集一份（顶层优先），避免「N集」误报与双份裁剪。
+            deduped_files = self._dedupe_episodes_by_number(downloaded_files)
             
             if downloaded_files:
                 mp4_files = [f for f in downloaded_files if f.endswith('.mp4')]
-                self.logger.log(dir_name, 'INFO', f'下载完成：{len(downloaded_files)}个文件（{len(mp4_files)}集视频）')
+                if len(deduped_files) != len(mp4_files):
+                    self.logger.log(dir_name, 'INFO',
+                        f'检测到嵌套副本：原始{len(mp4_files)}个文件去重为{len(deduped_files)}集'
+                        f'（网盘源含子目录副本，仅保留每集一份）')
+                self.logger.log(dir_name, 'INFO', f'下载完成：{len(deduped_files)}集（{len(mp4_files)}个mp4）')
                 for f in downloaded_files[:20]:
                     size = os.path.getsize(f) / (1024*1024)
                     self.logger.log(dir_name, 'INFO', f'  ✓ {os.path.basename(f)} ({size:.1f}MB)')
@@ -1268,7 +1283,7 @@ class PipelineProcessor:
                 self._finalize_download_job(download_job_id, True, None)
                 return {
                     'success': True,
-                    'downloaded_files': downloaded_files,
+                    'downloaded_files': deduped_files,
                     'target_dir': target_dir,
                     'drama_name': dir_name,
                     'error': None,
@@ -1525,8 +1540,11 @@ class PipelineProcessor:
                                 f'下载中：已下{len(eps)}/{total}集 [{eps_str}] · '
                                 f'{total_size/1024/1024:.1f}MB · {pct:.0f}%')
                         else:
+                            # expected_eps 缺失（云端清单为空）时，仍用独特集号而非原始文件数，
+                            # 避免嵌套副本把计数撑到 2N（「51集/72集」误报根因）。
+                            n_disp = len(eps) if eps else len(mp4_files)
                             self.logger.log(dir_name, 'INFO',
-                                f'下载中：{len(mp4_files)}集 ({total_size/1024/1024:.1f}MB)')
+                                f'下载中：已下{n_disp}集 ({total_size/1024/1024:.1f}MB)')
                         last_logged = len(mp4_files)
 
                     # P3: 下载任务心跳（崩溃后判定孤儿用）
@@ -1555,6 +1573,32 @@ class PipelineProcessor:
             self.logger.log('system', 'WARN', f'扫描文件失败：{str(e)}')
         return files
     
+    def _dedupe_episodes_by_number(self, file_list):
+        """按集号去重同一剧的多份副本（顶层/嵌套），保留每集最浅路径一份。
+
+        根因：网盘源 /短剧素材/{剧名}/ 若同时含顶层文件与 {剧名}/ 子目录
+        （分享链接内容本身是目录），下载会拉下两份全集 → 递归扫描得 2N 个文件，
+        旧代码用 len(mp4_files) 计数导致「下载中：51集/72集」误报，且
+        downloaded_files 全量传给 cut_batch 造成双份裁剪。
+
+        本方法对每集号只保留路径最浅（最接近顶层）的一份；集号解析失败的
+        文件原样保留（不丢数据）。返回按集号排序的去重文件列表。
+        """
+        by_ep = {}
+        unparsed = []
+        for f in file_list:
+            if not f.lower().endswith('.mp4') or '.downloading' in f:
+                continue
+            n = self.parse_episode_number(os.path.basename(f))
+            if n is None:
+                unparsed.append(f)
+                continue
+            cur = by_ep.get(n)
+            # 保留路径更浅（更少分隔符）的副本：顶层 第N集.mp4 优先于 嵌套 剧名-第N集.mp4
+            if cur is None or f.count(os.sep) < cur.count(os.sep):
+                by_ep[n] = f
+        return [by_ep[n] for n in sorted(by_ep)] + unparsed
+
     def _check_episode_continuity(self, src_dir):
         """检查集数是否连续完整
         返回：(is_complete, missing_eps, max_ep, message)
