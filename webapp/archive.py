@@ -172,6 +172,25 @@ def get_archive(drama_name):
     return d
 
 
+def get_archive_by_source(source_url):
+    """按来源链接返回最新"已完成下载"的剧档案（drama_name/local_dir/download_state）。
+
+    供下载防重分支找回真实剧名与素材目录：调用方只有 link_id（分享码）猜的路径，
+    与真实目录名（剧名）不一致时会指向空目录。无记录返回 None。
+    """
+    conn = _conn()
+    try:
+        row = conn.execute(
+            "SELECT drama_name, local_dir, download_state, downloaded_at FROM drama_archive "
+            "WHERE source_url=? AND download_state='done' ORDER BY id DESC LIMIT 1",
+            (source_url,)).fetchone()
+    finally:
+        conn.close()
+    if not row:
+        return None
+    return dict(zip(('drama_name', 'local_dir', 'download_state', 'downloaded_at'), row))
+
+
 def should_download(drama_name, local_dir, source_url=None):
     """防重下载检查。返回 (是否可下载, 原因)。
 

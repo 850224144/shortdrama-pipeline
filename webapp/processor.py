@@ -909,10 +909,23 @@ class PipelineProcessor:
             _ok, _reason = _arch_should(
                 _drama_guess, _local, source_url=link)
             if not _ok:
-                _existing = self._scan_files_recursive(_local) if os.path.isdir(_local) else []
-                self.logger.log(_drama_guess, 'INFO', f'防重跳过下载：{_reason}')
+                # 防重跳过：按 source_url 找回真实剧名/素材目录（调用方只有 link_id
+                # 猜的路径，与真实目录名（剧名）不一致会指向空目录 → 切片"没有素材文件"）。
+                _real_name, _real_dir = _drama_guess, _local
+                try:
+                    from archive import get_archive_by_source as _arch_by_src
+                    _rec = _arch_by_src(link)
+                    if _rec:
+                        _real_name = _rec.get('drama_name') or _real_name
+                        _real_dir = _rec.get('local_dir') or _real_dir
+                except Exception:
+                    pass
+                _existing = (self._dedupe_episodes_by_number(
+                                self._scan_files_recursive(_real_dir))
+                            if os.path.isdir(_real_dir) else [])
+                self.logger.log(_real_name, 'INFO', f'防重跳过下载：{_reason}')
                 return {'success': True, 'downloaded_files': _existing,
-                        'target_dir': _local, 'drama_name': _drama_guess,
+                        'target_dir': _real_dir, 'drama_name': _real_name,
                         'error': f'防重：{_reason}', 'transferred': False}
         except Exception as _e:
             self.logger.log(link_id, 'WARN', f'archive 防重检查失败（继续下载）：{_e}')
