@@ -1,0 +1,48 @@
+name: Auto merge development branch to main
+
+# 规则：codex/pipeline-reliability 为开发分支。本地验证（全量测试）通过后
+# 推送到开发分支，本 workflow 自动把开发分支 fast-forward 合并到 main 并推送。
+#
+# 安全边界：
+# - 仅 ff-only 合并（main 有并发新提交时合并失败，绝不 force/rebuse 改写历史）。
+# - concurrency 串行化，避免并发推送竞争。
+# - 不修改开发分支，也不触碰工作区之外的任何本地文件（远程执行）。
+
+on:
+  push:
+    branches: [codex/pipeline-reliability]
+
+permissions:
+  contents: write
+
+concurrency:
+  group: auto-merge-main
+  cancel-in-progress: false
+
+jobs:
+  merge-to-main:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository (full history)
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Configure git
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
+      - name: Fast-forward merge dev branch to main
+        run: |
+          git fetch origin codex/pipeline-reliability main
+          git checkout main
+          git merge --ff-only origin/codex/pipeline-reliability
+          git push origin main
+          echo "已自动合并 codex/pipeline-reliability -> main"
+
+      - name: Report merge result
+        run: |
+          echo "main 现在指向: $(git rev-parse --short main)"
+          echo "开发分支指向: $(git rev-parse --short origin/codex/pipeline-reliability)"
