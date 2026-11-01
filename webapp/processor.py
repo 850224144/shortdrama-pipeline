@@ -2314,8 +2314,13 @@ class PipelineProcessor:
         return None
     
     def list_episodes(self, src_dir):
-        """列出所有集数，返回 [(ep_num, filepath), ...] - 递归扫描子目录"""
-        episodes = []
+        """列出所有集数，返回 [(ep_num, filepath), ...] - 递归扫描子目录，按集号去重。
+
+        去重根因：网盘源 /短剧素材/{剧名}/ 若同时含顶层文件与 {剧名}/ 子目录
+        （分享链接内容本身是目录），递归扫描会得 2N 个文件；本方法对同一集号
+        只保留路径最浅（最接近顶层）的一份，避免「72集」误报与双份裁剪。
+        """
+        by_ep = {}
         try:
             # 使用递归扫描，处理嵌套目录结构
             for f in self._scan_files_recursive(src_dir):
@@ -2323,10 +2328,13 @@ class PipelineProcessor:
                     fname = os.path.basename(f)
                     ep_num = self.parse_episode_number(fname)
                     if ep_num is not None:
-                        episodes.append((ep_num, f))
+                        # 去重：保留路径更浅（更少分隔符）的副本：顶层 第N集.mp4 优先于 嵌套 剧名-第N集.mp4
+                        cur = by_ep.get(ep_num)
+                        if cur is None or f.count(os.sep) < cur[1].count(os.sep):
+                            by_ep[ep_num] = (ep_num, f)
         except Exception as e:
             self.logger.log('system', 'WARN', f'列出剧集失败：{str(e)}')
-        episodes.sort()
+        episodes = [by_ep[k] for k in sorted(by_ep)]
         return episodes
     
     def _generate_edl_versions(self, drama_name, src_dir, edl_eps, count, out_dir,
