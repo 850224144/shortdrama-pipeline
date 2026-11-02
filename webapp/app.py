@@ -41,6 +41,10 @@ from health import apply_env_overrides, run_health_checks
 
 apply_env_overrides(CONFIG)
 
+# 重启/切版核验标识：与代码文件的修改时间无关，展示的是当前进程实际启动时间。
+RUNTIME_STARTED_AT = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+RUNTIME_PID = os.getpid()
+
 app = Flask(__name__, template_folder='templates', static_folder='static')
 socketio = SocketIO(app, cors_allowed_origins="*")
 
@@ -155,6 +159,8 @@ def get_status():
         'processing': current['processing'],
         'stopping': current['stopping'],
         'job_id': current['job_id'],
+        'runtime_started_at': RUNTIME_STARTED_AT,
+        'runtime_pid': RUNTIME_PID,
     })
 
 @app.route('/api/health')
@@ -767,9 +773,11 @@ def get_cuttable_dramas():
                 if not os.path.isdir(drama_dir):
                     continue
                 
-                # 统计素材集数
-                files = os.listdir(drama_dir)
-                mp4_files = [f for f in files if f.endswith('.mp4')]
+                # 统计素材集数：递归扫描 + 按集号去重，排除 BaiduPCS 半成品。
+                # 直接 os.listdir 会在历史嵌套素材上少报集数。
+                files = processor._scan_files_recursive(drama_dir)
+                mp4_files = [f for f in processor._dedupe_episodes_by_number(files)
+                             if f.lower().endswith('.mp4')]
                 
                 if len(mp4_files) >= 2:
                     dramas.append({
@@ -883,12 +891,28 @@ def retry_cut_task():
     try:
         data = request.get_json() or {}
         drama_name = data.get('drama_name')
-        account = data.get('account', '小桃追剧中')
-        
+
         if not drama_name:
             return jsonify({'status': 'failed', 'error': '缺少剧名'}), 400
+
+        account = (data.get('account') or '').strip()
+        # 历史失败记录不一定保存账号。优先从已有输出目录推断，避免福桃
+        # 的剧被错误对账到小桃目录；没有现场时再走正常题材分类。
+        if not account and os.path.isdir(CONFIG['output_dir']):
+            for _account_dir in os.listdir(CONFIG['output_dir']):
+                if os.path.isdir(os.path.join(
+                        CONFIG['output_dir'], _account_dir, drama_name)):
+                    account = _account_dir
+                    break
+        if not account:
+            account = processor.assign_account(drama_name)
+        # 历史“重试”默认执行完整重切：旧失败的 EDL 配置可能本身不完整，
+        # 或成功版本配置已按设计删除，单纯续跑无法补齐整批。
+        resume = bool(data.get('resume', False))
+        force = bool(data.get('force', True))
         
-        result = batch_cut_manager.add_to_queue(drama_name, account, resume=True)
+        result = batch_cut_manager.add_to_queue(
+            drama_name, account, resume=resume, force=force)
         # 自动开始（若未在切且入队成功）
         if result.get('status') == 'success':
             start = batch_cut_manager.start_cutting()

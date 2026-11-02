@@ -59,6 +59,12 @@ class DashboardXssTests(unittest.TestCase):
         self.assertGreaterEqual(html.count('function escapeHtml('), 1,
                                 'dashboard.html 缺少 escapeHtml 辅助函数')
 
+    def test_failed_history_has_retry_action(self):
+        with open(HTML, encoding='utf-8') as f:
+            html = f.read()
+        self.assertIn('retryHistory(this.dataset.drama)', html)
+        self.assertIn("fetch('/api/cut/retry'", html)
+
 
 if __name__ == '__main__':
     unittest.main()

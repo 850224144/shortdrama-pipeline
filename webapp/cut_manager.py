@@ -75,6 +75,7 @@ class BatchCutManager:
                     'drama_name': params.get('drama_name', ''),
                     'account': params.get('account', '小桃追剧中'),
                     'resume': bool(params.get('resume', False)),
+                    'force': bool(params.get('force', False)),
                     'status': status,
                     'created_at': job.get('created_at'),
                     'started_at': job.get('started_at'),
@@ -131,6 +132,7 @@ class BatchCutManager:
                 'drama_name': task['drama_name'],
                 'account': task.get('account', '小桃追剧中'),
                 'resume': bool(task.get('resume', False)),
+                'force': bool(task.get('force', False)),
             },
             'result': result,
             'error': task.get('error'),
@@ -141,7 +143,8 @@ class BatchCutManager:
             'heartbeat_at': heartbeat,
         })
 
-    def add_to_queue(self, drama_name, account='小桃追剧中', resume=False):
+    def add_to_queue(self, drama_name, account='小桃追剧中', resume=False,
+                     force=False):
         """添加切片任务到队列。"""
         with self.lock:
             for task in self.queue:
@@ -154,6 +157,7 @@ class BatchCutManager:
                 'drama_name': drama_name,
                 'account': account,
                 'resume': bool(resume),
+                'force': bool(force),
                 'status': 'pending',
                 'created_at': datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
             }
@@ -162,9 +166,11 @@ class BatchCutManager:
                 self._persist_task(task)
                 self.store.add_event(task['id'], 'info', 'cut_enqueued',
                                      f'添加切片任务：{drama_name}'
-                                     f'{"（续跑）" if resume else ""}')
+                                     f'{"（续跑）" if resume else ""}'
+                                     f'{"（显式重切）" if force else ""}')
                 self._log('info', f'添加切片任务：{drama_name}'
-                                  f'{"（续跑）" if resume else ""}')
+                                  f'{"（续跑）" if resume else ""}'
+                                  f'{"（显式重切）" if force else ""}')
             except Exception:
                 # 持久化失败不阻断入队（内存态仍可用），但要暴露给日志
                 self._log('error', f'任务持久化失败：{drama_name}')
@@ -477,11 +483,16 @@ class BatchCutManager:
 
                 cancelled = False
                 try:
-                    result = self.processor.manual_cut(
-                        task['drama_name'],
-                        resume=task.get('resume', False),
-                        cancel_event=cancel_event,
-                    )
+                    cut_kwargs = {
+                        'resume': task.get('resume', False),
+                        'cancel_event': cancel_event,
+                    }
+                    # 兼容既有测试/插件 processor 的旧三参签名；只有显式重切
+                    # 才传 force，真实 processor 支持该参数。
+                    if task.get('force', False):
+                        cut_kwargs['force'] = True
+                    result = self.processor.manual_cut(task['drama_name'],
+                                                       **cut_kwargs)
                     cancelled = bool(
                         result.get('cancelled') or
                         result.get('status') == 'cancelled' or

@@ -57,6 +57,14 @@ class TestArchive(unittest.TestCase):
         ok, reason = archive.should_download('进行中剧', os.path.join(tempfile.mkdtemp(), 'nope'))
         self.assertTrue(ok)
 
+    def test_should_download_downloading_with_existing_dir_allowed(self):
+        """崩溃遗留的 downloading 即使目录已建，也必须允许续传。"""
+        local = tempfile.mkdtemp()
+        archive.upsert_archive('中断续传剧', download_state='downloading')
+        ok, reason = archive.should_download('中断续传剧', local)
+        self.assertTrue(ok)
+        self.assertIn('未完成', reason)
+
     def test_should_download_ok(self):
         """本地无目录且无历史 → 可下载。"""
         ok, reason = archive.should_download('新剧', os.path.join(tempfile.mkdtemp(), 'nope'))

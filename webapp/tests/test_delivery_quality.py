@@ -125,9 +125,11 @@ class MediaGateIntegrationTests(unittest.TestCase):
                  mock.patch.object(p, '_validate_delivery_media',
                                    return_value={'ok': False, 'reason': '0 字节'}):
                 mr.return_value = mock.MagicMock(returncode=0, stderr='')
-                video, fail_cat = p._run_render_one('测试剧', d, 0, 'cfg.json')
+                video, fail_cat, verdict = p._run_render_one(
+                    '测试剧', d, 0, 'cfg.json')
             self.assertIsNone(video)
             self.assertEqual(fail_cat, 'quality')
+            self.assertEqual(verdict['status'], 'rejected')
 
     def test_accepted_media_returns_video(self):
         p = _mk()
@@ -138,10 +140,24 @@ class MediaGateIntegrationTests(unittest.TestCase):
                  mock.patch.object(p, '_validate_delivery_media',
                                    return_value={'ok': True, 'reason': ''}):
                 mr.return_value = mock.MagicMock(returncode=0, stderr='')
-                video, fail_cat = p._run_render_one('测试剧', d, 0, 'cfg.json')
+                video, fail_cat, verdict = p._run_render_one(
+                    '测试剧', d, 0, 'cfg.json')
             self.assertIsNone(fail_cat)
             self.assertIsNotNone(video)
             self.assertEqual(video['filename'], '测试剧_1_打脸_去重版.mp4')
+            self.assertEqual(verdict['status'], 'accepted')
+
+    def test_rc0_without_output_is_not_accepted(self):
+        p = _mk()
+        with tempfile.TemporaryDirectory() as d:
+            with mock.patch.object(
+                    p, '_run_command_cancellable',
+                    return_value=mock.MagicMock(returncode=0, stderr='')):
+                video, fail_cat, verdict = p._run_render_one(
+                    '测试剧', d, 0, 'cfg.json')
+        self.assertIsNone(video)
+        self.assertEqual(fail_cat, 'other')
+        self.assertEqual(verdict['status'], 'render_failed')
 
     def test_gate_exception_fails_closed_as_unknown(self):
         p = _mk()

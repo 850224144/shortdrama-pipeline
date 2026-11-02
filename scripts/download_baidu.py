@@ -89,20 +89,49 @@ def _flatten(tmp_dir, local_dir):
     """
     os.makedirs(local_dir, exist_ok=True)
     moved = 0
+    partial = 0
+    all_files = []
     for root, _, files in os.walk(tmp_dir):
-        for f in files:
-            src = os.path.join(root, f)
-            dst = os.path.join(local_dir, f)
-            if os.path.exists(dst):
-                # 同名冲突：保留目标，源跳过（不覆盖已有）
-                continue
+        all_files.extend(os.path.join(root, f) for f in files)
+
+    marker_suffixes = ('.baidupcs-go-downloading', '.downloading')
+    for p in list(all_files):
+        lower = os.path.basename(p).lower()
+        marker = next((s for s in marker_suffixes if lower.endswith(s)), None)
+        if not marker:
+            continue
+        base = p[:-len(marker)]
+        try:
+            os.remove(p)
+            if base.lower().endswith('.mp4') and os.path.isfile(base):
+                os.remove(base)
+            partial += 1
+        except OSError as e:
+            print(f'  清理未完成文件失败 {os.path.basename(p)}: {e}')
+
+    for p in all_files:
+        if not os.path.isfile(p):
+            continue
+        f = os.path.basename(p)
+        if (f.lower().endswith('.mp4')
+                and os.path.getsize(p) < 5 * 1024 * 1024):
             try:
-                shutil.move(src, dst)
-                moved += 1
-            except (OSError, shutil.Error) as e:
-                print(f'  移动失败 {f}: {e}')
+                os.remove(p)
+                partial += 1
+            except OSError as e:
+                print(f'  清理损坏文件失败 {f}: {e}')
+            continue
+        dst = os.path.join(local_dir, f)
+        if os.path.exists(dst):
+            # 同名冲突：保留目标，源跳过（不覆盖已有）
+            continue
+        try:
+            shutil.move(p, dst)
+            moved += 1
+        except (OSError, shutil.Error) as e:
+            print(f'  移动失败 {f}: {e}')
     shutil.rmtree(tmp_dir, ignore_errors=True)
-    return moved
+    return moved, partial
 
 
 def main():
@@ -152,7 +181,10 @@ def main():
                      timeout=DOWNLOAD_TIMEOUT)
         if r.returncode != 0:
             raise RuntimeError((r.stdout or '')[-300:] + (r.stderr or '')[-300:])
-        moved = _flatten(tmp_dir, local_dir)
+        moved, partial = _flatten(tmp_dir, local_dir)
+        if partial:
+            raise RuntimeError(
+                f'检测到{partial}个未完成/损坏文件，保留网盘源并等待重试')
         size, files = _dir_size(local_dir)
         eps = _count_episodes(local_dir)
         archive.upsert_archive(drama_name, download_state='done', download_size=size,

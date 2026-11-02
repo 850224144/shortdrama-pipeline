@@ -198,6 +198,21 @@ class TestValidateArcPlan(unittest.TestCase):
         self.assertEqual(v[0]['angle'], '高潮', '非法 angle 兜底高潮')
         self.assertEqual(v[0]['order_type'], 'reverse', '非法 order 兜底 reverse')
 
+    def test_duplicate_angle_is_replaced_with_unused(self):
+        p, _ = _mk()
+        eps = _eps_hl()
+        plan = {"versions": [
+            {"opening_ep": 20, "angle": "反转", "order_type": "reverse"},
+            {"opening_ep": 10, "angle": "反转", "order_type": "reverse"},
+            {"opening_ep": 1, "angle": "真相", "order_type": "reverse"},
+        ]}
+        v = p._validate_arc_plan(plan, eps, 3)
+        self.assertIsNotNone(v)
+        self.assertEqual(len({x['angle'] for x in v}), 3,
+                         '同方案 angle 必须互不相同')
+        self.assertEqual(v[1]['angle'], next(
+            a for a in p.ARC_ANGLES if a not in {'反转', '真相'}))
+
     def test_opening_ep_not_in_episodes_dropped(self):
         p, _ = _mk()
         eps = _eps_hl()
@@ -400,8 +415,14 @@ class TestPlanBNonOverlap(unittest.TestCase):
         p, eps = self._eps_hl(10)   # 10集 × 2段 = 20段
         with mock.patch.object(p, '_load_episode_highlights', return_value=eps):
             vc = p._capacity_version_count(['x'], '测试剧')
-        # 20段 // 10段/版 = 2 版（clamp[4,8] 下限 4）
-        self.assertEqual(vc, 4, '素材不足时降到 min_versions')
+        # 10 集按集数判定为 6 版；不足部分将由受控复用补足。
+        self.assertEqual(vc, 6, '增量策略按集数目标，不再压到 4 版')
+
+    def test_capacity_version_count_30eps_targets_8(self):
+        p, eps = self._eps_hl(30)
+        with mock.patch.object(p, '_load_episode_highlights', return_value=eps):
+            vc = p._capacity_version_count([f'x{i}' for i in range(30)], '测试剧')
+        self.assertEqual(vc, 8)
 
     def test_cross_version_no_reuse(self):
         p, eps = self._eps_hl(10)

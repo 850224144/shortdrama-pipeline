@@ -388,8 +388,17 @@ class PipelineProcessor:
         ratio = difflib.SequenceMatcher(None, norm1, norm2).ratio()
         return ratio >= 0.85
     
-    def should_process(self, drama_name, src_dir, out_dir):
-        """检查是否应该处理"""
+    def should_process(self, drama_name, src_dir, out_dir, expected_count=None,
+                       force=False):
+        """检查是否应该处理。
+
+        expected_count：本次计划交付的版本数。旧逻辑只要目录里有 3 个 mp4
+        就永久跳过，导致 2/8、6/8 这类未完成任务无法补齐；显式重试还会被
+        completed 历史记录拦住。传入计划数后改为“已达到计划数才跳过”。
+        force：用户在历史记录中显式点击重切时绕过历史闸门（锁仍照常使用）。
+        """
+        if force:
+            return True, '用户显式重切'
         # 第1层：状态文件检查
         state = self.state_manager.load()
         completed_names = [c["name"] for c in state.get("completed", [])]
@@ -407,7 +416,8 @@ class PipelineProcessor:
             try:
                 mp4s = [f for f in os.listdir(out_dir) 
                        if f.endswith(".mp4") and "测试" not in f and "raw" not in f]
-                if len(mp4s) >= 3:
+                required = int(expected_count) if expected_count is not None else 3
+                if len(mp4s) >= max(1, required):
                     return False, f"输出目录已有成品：{len(mp4s)}个"
             except Exception as e:
                 self.logger.log('system', 'WARN', f'检查输出目录失败：{str(e)}')
@@ -622,7 +632,7 @@ class PipelineProcessor:
             with self.lock:
                 self.processing = False
     
-    def manual_cut(self, drama_name, resume=False, cancel_event=None):
+    def manual_cut(self, drama_name, resume=False, force=False, cancel_event=None):
         """手动切片 - 从素材目录直接切片
 
         resume=True：失败续跑，只重渲染保留的 edl_config，不重新生成 EDL；
@@ -663,14 +673,22 @@ class PipelineProcessor:
         
         self.logger.log('system', 'INFO', f'找到{len(mp4_files)}集素材，开始切片...')
 
-        # 重复切片检查：output 下已有该剧成片则跳过
+        expected_count = self.determine_version_count(len(mp4_files))
+
+        # 重复切片检查：只有达到目标版本数才跳过。旧逻辑看到任意一部成片
+        # 就返回 skipped，导致 2/8、6/8 的批次永远无法继续完成。
         for account_dir in os.listdir(CONFIG['output_dir']) if os.path.exists(CONFIG['output_dir']) else []:
             existing = os.path.join(CONFIG['output_dir'], account_dir, drama_name)
             if os.path.isdir(existing):
                 done = [f for f in os.listdir(existing) if f.endswith('_去重版.mp4')]
-                if done:
+                if done and len(done) >= expected_count and not force:
                     self.logger.log('system', 'INFO', f'已有{len(done)}个成片，跳过重复切片：{existing}')
                     return {'status': 'skipped', 'reason': 'already_cut', 'output_dir': existing, 'existing': done}
+                if done:
+                    self.logger.log(
+                        'system', 'INFO',
+                        f'未完成任务继续处理：已有{len(done)}/{expected_count}版'
+                        f'，{"显式重切" if force else "补齐完整批次"}')
 
         # 构建下载结果
         download_result = {
@@ -683,7 +701,7 @@ class PipelineProcessor:
         }
         
         # 切片
-        result = self.cut_batch([download_result], resume=resume,
+        result = self.cut_batch([download_result], resume=resume, force=force,
                                 cancel_event=cancel_event)
         
         successful_cuts = [r for r in result if r['success']]
@@ -1161,15 +1179,22 @@ class PipelineProcessor:
                 else:
                     self.logger.log(dir_name, 'WARN', f'移动失败：{move_result.stdout[:100]}')
             
-            # 4. 创建本地目标目录
+            # 4. 创建本地目标目录。实际下载先落独立暂存区，成功后再整理，
+            #    避免 BaiduPCS-Go 按网盘相对路径在目标目录内重复套剧名。
             target_dir = os.path.join(CONFIG['download_base_dir'], dir_name)
             os.makedirs(target_dir, exist_ok=True)
+            staging_dir = os.path.join(target_dir, '.incoming')
+            os.makedirs(staging_dir, exist_ok=True)
 
             # P6: 清理残留 .downloading 与 <5MB 损坏文件，避免带病续传
             self._clean_partial_downloads(target_dir)
+            self._clean_partial_downloads(staging_dir)
+            # 上次中断时可能已有完整文件留在暂存区，先整理并纳入本地集数比对。
+            self._normalize_download_tree(staging_dir, target_dir, dir_name)
 
             # P3: 下载开始前持久化任务（崩溃后由启动恢复续传）
-            download_job_id = self._persist_download_job(link_info, dir_name, target_dir)
+            download_job_id = self._persist_download_job(
+                link_info, dir_name, target_dir, staging_dir=staging_dir)
 
             # P4: 比对本地已下集号 vs 网盘清单，仅对缺失集发起下载
             cloud_files = self._list_cloud_files(f"/短剧素材/{dir_name}")
@@ -1199,13 +1224,13 @@ class PipelineProcessor:
                     f'（{",".join(str(e) for e in missing_eps[:12])}），仅补缺失集')
                 download_cmd = ([CONFIG['baidupcs_path'], "download"] +
                                 [f"/短剧素材/{dir_name}/{name}" for name in missing_names] +
-                                ["--saveto", target_dir, "--overwrite=never"])
+                                ["--saveto", staging_dir, "--overwrite=never"])
             else:
-                # 全新下载
+                # 全新下载：与源目录名隔离的 staging，避免 saveto 同名嵌套。
                 download_cmd = [
                     CONFIG['baidupcs_path'], "download",
                     f"/短剧素材/{dir_name}",
-                    "--saveto", target_dir,
+                    "--saveto", staging_dir,
                     "--overwrite=never"
                 ]
                 self.logger.log(dir_name, 'INFO', f'开始下载：{dir_name}')
@@ -1216,7 +1241,7 @@ class PipelineProcessor:
                 stop_monitor = threading.Event()
                 monitor_thread = threading.Thread(
                     target=self._monitor_download_progress,
-                    args=(target_dir, dir_name, stop_monitor),
+                    args=(staging_dir, dir_name, stop_monitor),
                     kwargs={
                         'progress': progress,
                         'expected_eps': set(cloud_eps) if cloud_eps else None,
@@ -1238,10 +1263,14 @@ class PipelineProcessor:
                     # 取消/超时/卡顿也必须先停监控，避免后台线程一直轮询目录。
                     stop_monitor.set()
                     monitor_thread.join(timeout=5)
-            
-            # P1：本地展平——下载产物若形成 剧名/剧名/ 嵌套（分享链接内容本身是目录），
-            # 把内层内容上移一层并删除空目录，保证素材结构扁平（用户要求 E:\短剧素材\剧名\）。
-            self._flatten_local_dir(target_dir, dir_name)
+
+            # 下载命令可能返回非 0 但已经写入部分完成文件；先整理完整文件，
+            # 再由后续“云端集号 vs 本地集号”做最终判据。
+            if download_cmd is not None and process.returncode != 0:
+                self.logger.log(dir_name, 'WARN',
+                                f'BaiduPCS-Go 退出码 {process.returncode}，先整理已完成文件')
+            self._normalize_download_tree(staging_dir, target_dir, dir_name)
+            self._clean_partial_downloads(target_dir)
             
             # 6. 扫描下载的文件
             downloaded_files = self._scan_files_recursive(target_dir)
@@ -1275,6 +1304,50 @@ class PipelineProcessor:
                         'drama_name': dir_name,
                         'error': f'下载不完整：mp4={len(mp4_files)}，损坏{len(too_small)}',
                         'transferred': True
+                    }
+
+                # 最终完整性以网盘清单为权威。临时标记对应的残缺 mp4 已在前面
+                # 删除；只要云端还有缺失集，就不能把本地任务标记为 done 或删云端。
+                local_eps_final = sorted({
+                    n for n in (self.parse_episode_number(os.path.basename(f))
+                                for f in deduped_files)
+                    if n is not None
+                })
+                missing_final = (sorted(set(cloud_eps) - set(local_eps_final))
+                                 if cloud_eps else [])
+                if missing_final:
+                    self.logger.log(
+                        dir_name, 'ERROR',
+                        f'下载不完整：云端{len(cloud_eps)}集，本地{len(local_eps_final)}集，'
+                        f'仍缺{len(missing_final)}集 '
+                        f'（{",".join(str(e) for e in missing_final[:12])}）')
+                    self._finalize_download_job(download_job_id, False, '下载不完整')
+                    return {
+                        'success': False,
+                        'downloaded_files': [],
+                        'target_dir': target_dir,
+                        'drama_name': dir_name,
+                        'error': f'下载不完整：缺少{len(missing_final)}集',
+                        'transferred': True,
+                        'episode_complete': False,
+                        'missing_episodes': missing_final,
+                        'total_episodes': (max(cloud_eps) if cloud_eps else 0),
+                    }
+
+                layout_errors = self._validate_download_layout(target_dir)
+                if layout_errors:
+                    detail = '；'.join(layout_errors[:5])
+                    self.logger.log(dir_name, 'ERROR',
+                                    f'下载目录布局校验失败：{detail}')
+                    self._finalize_download_job(
+                        download_job_id, False, '下载目录布局异常')
+                    return {
+                        'success': False,
+                        'downloaded_files': [],
+                        'target_dir': target_dir,
+                        'drama_name': dir_name,
+                        'error': f'下载目录布局异常：{detail}',
+                        'transferred': True,
                     }
 
                 # 检查集数连续性
@@ -1389,7 +1462,8 @@ class PipelineProcessor:
             self._job_store = JobStore(os.path.join(CONFIG['data_dir'], 'jobs.db'))
         return self._job_store
 
-    def _persist_download_job(self, link_info, dir_name, target_dir):
+    def _persist_download_job(self, link_info, dir_name, target_dir,
+                              staging_dir=None):
         """下载开始前持久化任务，崩溃后由启动恢复续传。返回 job_id 或 None。"""
         try:
             job_id = uuid.uuid4().hex[:12]
@@ -1406,6 +1480,7 @@ class PipelineProcessor:
                     'link_id': link_info.get('link_id'),
                     'drama_guess': dir_name,
                     'target_dir': target_dir,
+                    'staging_dir': staging_dir,
                 },
                 'started_at': now,
                 'heartbeat_at': now,
@@ -1462,17 +1537,35 @@ class PipelineProcessor:
 
     # ── P6: 本地下载残留清理 ────────────────────────────────────
     def _clean_partial_downloads(self, target_dir):
-        """清理残留 .downloading 临时文件与 <5MB 损坏 mp4。返回清理数。"""
+        """清理下载临时标记及其残缺 mp4，以及 <5MB 的损坏 mp4。
+
+        兼容两种 BaiduPCS-Go 临时后缀：
+        - ``<file>.downloading``
+        - ``<file>.BaiduPCS-Go-downloading``
+
+        后者旁边的 mp4 也是未完成文件；只删标记而保留 mp4，会让“缺失集比对”
+        误判该集已经下载完成。返回实际删除的文件数。
+        """
         if not os.path.isdir(target_dir):
             return 0
         removed = 0
+        marker_suffixes = ('.downloading', '.baidupcs-go-downloading')
         for root, dirs, files in os.walk(target_dir):
             for f in files:
                 p = os.path.join(root, f)
                 try:
-                    if f.endswith('.downloading'):
+                    lower = f.lower()
+                    marker = next((s for s in marker_suffixes
+                                   if lower.endswith(s)), None)
+                    if marker:
+                        # BaiduPCS 的标记名通常是 <集数>.mp4.<marker>。
+                        # 先删标记，再删同一目录下对应的未完成 mp4。
+                        base = p[:-len(marker)]
                         os.remove(p)
                         removed += 1
+                        if base.lower().endswith('.mp4') and os.path.isfile(base):
+                            os.remove(base)
+                            removed += 1
                     elif f.lower().endswith('.mp4') and \
                             os.path.getsize(p) < 5 * 1024 * 1024:
                         os.remove(p)
@@ -1589,67 +1682,198 @@ class PipelineProcessor:
             self.logger.log(dir_name, 'INFO', f'监控线程结束')
     
     def _flatten_local_dir(self, target_dir, dir_name):
-        """P1：下载产物若形成 剧名/剧名/ 嵌套（分享链接内容本身是目录时，
-        BaiduPCS-Go 转存会形成 /短剧素材/剧名/剧名/ 结构），把内层内容上移一层
-        并删除空目录，保证素材结构扁平（用户要求 E:\\短剧素材\\剧名\\）。
+        """仅折叠同名包装目录，保留 transcribe/covers 等业务子目录。
 
-        幂等；与网盘侧展平不同，本方法无条件在本地执行，不依赖 ls 输出解析。
-        同名顶层冲突跳过（由集号去重 _dedupe_episodes_by_number 兜底，不覆盖）。
-        Returns: 是否发生展平。
+        保留该方法用于修复“下载代码直接写最终目录”的旧调用现场；新下载路径
+        使用 _normalize_download_tree，在独立暂存目录中整理后一次性落盘。
         """
         flattened = False
         try:
             for entry in os.listdir(target_dir):
                 sub = os.path.join(target_dir, entry)
-                if not os.path.isdir(sub):
+                if entry != dir_name or not os.path.isdir(sub):
                     continue
-                try:
-                    inner = os.listdir(sub)
-                except OSError:
-                    continue
-                if not inner:
-                    # 空目录直接清掉（嵌套结构残留）
+                while os.path.isdir(sub) and os.listdir(sub) == [dir_name]:
+                    inner = os.path.join(sub, dir_name)
+                    if not os.path.isdir(inner):
+                        break
+                    for item in os.listdir(inner):
+                        src = os.path.join(inner, item)
+                        dst = os.path.join(sub, item)
+                        if os.path.exists(dst):
+                            continue
+                        shutil.move(src, dst)
+                        flattened = True
                     try:
-                        os.rmdir(sub)
+                        os.rmdir(inner)
                     except OSError:
-                        pass
-                    continue
-                moved = 0
-                for item in inner:
+                        break
+                # 内容上移到 target_dir；同名冲突的副本留给集号去重/隔离。
+                for item in os.listdir(sub):
                     src = os.path.join(sub, item)
                     dst = os.path.join(target_dir, item)
                     if os.path.exists(dst):
-                        continue  # 顶层已有同名，不覆盖，交给集号去重
-                    try:
-                        shutil.move(src, dst)
-                        moved += 1
-                    except OSError as e:
-                        self.logger.log(dir_name, 'WARN',
-                                        f'P1 展平移动失败 {item}: {e}')
-                if moved:
+                        continue
+                    shutil.move(src, dst)
                     flattened = True
-                    self.logger.log(
-                        dir_name, 'INFO',
-                        f'P1 本地展平：{entry}/ 内 {moved} 项已上移到 '
-                        f'{os.path.basename(target_dir)}/')
-                # 删除已空的嵌套目录
                 try:
-                    if not os.listdir(sub):
-                        os.rmdir(sub)
+                    os.rmdir(sub)
                 except OSError:
                     pass
         except OSError as e:
             self.logger.log(dir_name, 'WARN', f'P1 展平异常（可忽略）：{e}')
         return flattened
 
+    @staticmethod
+    def _download_marker_suffix(filename):
+        """返回 BaiduPCS 临时文件命中的后缀；不是临时文件返回 None。"""
+        lower = (filename or '').lower()
+        for suffix in ('.baidupcs-go-downloading', '.downloading'):
+            if lower.endswith(suffix):
+                return suffix
+        return None
+
+    def _is_partial_download_file(self, path, filenames=None):
+        """判断路径是否本身为下载临时文件，或旁边存在 BaiduPCS 临时标记。"""
+        if self._download_marker_suffix(os.path.basename(path)):
+            return True
+        folder = os.path.dirname(path)
+        base = os.path.basename(path)
+        if filenames is None:
+            try:
+                filenames = os.listdir(folder)
+            except OSError:
+                filenames = []
+        lowered = {str(f).lower() for f in filenames}
+        return any((base.lower() + suffix) in lowered
+                   for suffix in ('.baidupcs-go-downloading', '.downloading'))
+
+    def _quarantine_download_duplicate(self, source, staging_dir, batch_dir):
+        """把暂存区中的重复内容移到数据区隔离目录，保留可追溯性。"""
+        rel = os.path.relpath(source, staging_dir)
+        if rel.startswith('..'):
+            rel = os.path.basename(source)
+        dst = os.path.join(batch_dir, rel)
+        os.makedirs(os.path.dirname(dst), exist_ok=True)
+        shutil.move(source, dst)
+        return dst
+
+    def _normalize_download_tree(self, staging_dir, target_dir, dir_name):
+        """把暂存区中的完整文件整理到最终剧目录的直接层。
+
+        下载阶段不再直接写目标目录，所以无论网盘分享保留几层目录，这里都能把
+        实际文件一次整理到位。同一集号/同名文件已存在时不覆盖，重复副本移入
+        data/download_quarantine 供追溯。返回 (moved, quarantined)。
+        """
+        if not os.path.isdir(staging_dir):
+            return 0, 0
+        os.makedirs(target_dir, exist_ok=True)
+        self._clean_partial_downloads(staging_dir)
+
+        existing = [f for f in self._scan_files_recursive(target_dir)
+                    if os.path.dirname(os.path.abspath(f)) ==
+                    os.path.abspath(target_dir)]
+        existing_names = {os.path.basename(f).lower() for f in existing}
+        existing_eps = {}
+        for f in existing:
+            n = self.parse_episode_number(os.path.basename(f))
+            if n is not None:
+                existing_eps[n] = f
+
+        source_files = []
+        for root, dirs, files in os.walk(staging_dir):
+            dirs[:] = [d for d in dirs if d.lower() != '.incoming']
+            for f in files:
+                p = os.path.join(root, f)
+                if not self._is_partial_download_file(p, files):
+                    source_files.append(p)
+        source_files.sort(key=lambda p: (os.path.relpath(p, staging_dir).count(os.sep),
+                                         os.path.basename(p).lower()))
+
+        moved = 0
+        quarantined = 0
+        stamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+        safe_name = re.sub(r'[^0-9A-Za-z_\-\u4e00-\u9fff]+', '_', dir_name)
+        quarantine_batch = os.path.join(
+            CONFIG.get('data_dir', os.getcwd()), 'download_quarantine',
+            f'{safe_name}_{stamp}_{uuid.uuid4().hex[:6]}')
+        for src in source_files:
+            name = os.path.basename(src)
+            lower_name = name.lower()
+            ep = (self.parse_episode_number(name)
+                  if lower_name.endswith('.mp4') else None)
+            duplicate = lower_name in existing_names or (
+                ep is not None and ep in existing_eps)
+            dst = os.path.join(target_dir, name)
+            if duplicate or os.path.exists(dst):
+                dst = self._quarantine_download_duplicate(
+                    src, staging_dir, quarantine_batch)
+                quarantined += 1
+                self.logger.log(dir_name, 'WARN',
+                                f'下载重复文件已隔离：{name} → {dst}')
+                continue
+            shutil.move(src, dst)
+            existing_names.add(lower_name)
+            if ep is not None:
+                existing_eps[ep] = dst
+            moved += 1
+
+        # 清理暂存区空目录；保留非空目录供下一次续传。
+        for root, dirs, files in os.walk(staging_dir, topdown=False):
+            if root == staging_dir:
+                continue
+            try:
+                os.rmdir(root)
+            except OSError:
+                pass
+        try:
+            os.rmdir(staging_dir)
+        except OSError:
+            pass
+        if moved or quarantined:
+            self.logger.log(
+                dir_name, 'INFO',
+                f'下载整理完成：上移{moved}个文件，隔离重复{quarantined}个')
+        return moved, quarantined
+
+    def _validate_download_layout(self, target_dir):
+        """校验增量下载的最终布局；返回问题列表，空列表表示通过。"""
+        errors = []
+        target_abs = os.path.abspath(target_dir)
+        for root, dirs, files in os.walk(target_dir):
+            for f in files:
+                if self._download_marker_suffix(f):
+                    errors.append(
+                        f'存在下载临时标记：{os.path.relpath(os.path.join(root, f), target_dir)}')
+                if (f.lower().endswith('.mp4')
+                        and os.path.abspath(root) != target_abs):
+                    errors.append(
+                        f'mp4仍在子目录：{os.path.relpath(os.path.join(root, f), target_dir)}')
+            if os.path.abspath(root) == target_abs:
+                incoming = os.path.join(root, '.incoming')
+                if os.path.isdir(incoming):
+                    try:
+                        if os.listdir(incoming):
+                            errors.append('暂存区 .incoming 仍有未整理文件')
+                    except OSError:
+                        pass
+        return errors
+
     def _scan_files_recursive(self, directory):
-        """递归扫描文件"""
+        """递归扫描完整 mp4；排除暂存区、隔离区和 BaiduPCS 半成品。"""
         files = []
         try:
             for root, dirs, filenames in os.walk(directory):
+                dirs[:] = [d for d in dirs
+                           if d.lower() not in ('.incoming', 'download_quarantine')]
+                marker_names = {f.lower() for f in filenames}
                 for f in filenames:
-                    if f.lower().endswith('.mp4') and not f.endswith('.downloading'):
-                        files.append(os.path.join(root, f))
+                    if not f.lower().endswith('.mp4'):
+                        continue
+                    if any((f.lower() + suffix) in marker_names
+                           for suffix in ('.baidupcs-go-downloading', '.downloading')):
+                        continue
+                    files.append(os.path.join(root, f))
         except Exception as e:
             self.logger.log('system', 'WARN', f'扫描文件失败：{str(e)}')
         return files
@@ -1771,7 +1995,7 @@ class PipelineProcessor:
                 pass
         return 0
 
-    def cut_batch(self, downloads, resume=False, cancel_event=None):
+    def cut_batch(self, downloads, resume=False, force=False, cancel_event=None):
         """批量切片"""
         results = []
         failed = []
@@ -1799,7 +2023,8 @@ class PipelineProcessor:
                     upsert_archive(drama_name, slice_state='cutting')
                 except Exception:
                     pass
-            result = self._cut_once(d, resume=resume, cancel_event=cancel_event)
+            result = self._cut_once(d, resume=resume, force=force,
+                                    cancel_event=cancel_event)
             result['retried'] = False
             if drama_name:
                 try:
@@ -1842,7 +2067,8 @@ class PipelineProcessor:
                 })
                 break
             self.logger.log('system', 'INFO', f'重试切片：{d.get("link_id", "未知")}')
-            result = self._cut_once(d, resume=resume, cancel_event=cancel_event)
+            result = self._cut_once(d, resume=resume, force=force,
+                                    cancel_event=cancel_event)
             result['retried'] = True
             if drama_name:
                 try:
@@ -1876,7 +2102,8 @@ class PipelineProcessor:
         
         return results
     
-    def _cut_once(self, download_result, resume=False, cancel_event=None):
+    def _cut_once(self, download_result, resume=False, force=False,
+                  cancel_event=None):
         """单次切片"""
         # 从下载目录提取实际剧名
         drama_name = download_result.get('drama_name') or download_result.get('link_id', '')
@@ -1917,8 +2144,13 @@ class PipelineProcessor:
         output_subdir = self.get_output_subdir(drama_name, submit_order)
         out_dir = os.path.join(CONFIG['output_dir'], output_subdir, drama_name)
         
-        # 去重检查
-        should, reason = self.should_process(drama_name, src_dir, out_dir)
+        # 去重检查：按计划版本数判断是否真的完成，而非“有任意成片就跳过”。
+        downloaded = download_result.get('downloaded_files') or []
+        expected_count = self.determine_version_count(
+            len(self._dedupe_episodes_by_number(downloaded)))
+        should, reason = self.should_process(
+            drama_name, src_dir, out_dir, expected_count=expected_count,
+            force=force)
         if not should:
             self.logger.log(drama_name, 'WARN', f'切片跳过：{reason}')
             self._update_state('idle', '', 0, f'跳过：{reason}')
@@ -2158,6 +2390,8 @@ class PipelineProcessor:
         except Exception as e:
             self.logger.log(drama_name, 'ERROR', f'切片失败：{str(e)}')
             self.state_manager.add_failed(drama_name, str(e))
+            # 状态文件也必须离开 processing，否则历史页/API 会长期显示伪“处理中”。
+            self._update_state('idle', '', 0, f'切片失败：{str(e)[:120]}')
             # P1-A2：失败路径清掉本次 run 的渲染产物，瞬时故障不升级为永久卡死。
             # out_dir 是单剧目录且 run 开始时已清过，此刻的 mp4 全是本次渲染的
             # 未交付半成品；留着它们，重试会被"已有成品/已切完"闸门永久跳过。
@@ -2485,7 +2719,8 @@ class PipelineProcessor:
                                 f'导演方案生成异常，走关键词轮换：{e}')
                 edl_plan = None
         
-        for v_idx in range(min(count, len(ep_nums))):
+        expected_count = min(count, len(ep_nums))
+        for v_idx in range(expected_count):
             self._raise_if_cancelled(cancel_event)
             # 使用AI生成文案
             hook = (edl_plan[v_idx]['angle']
@@ -2546,26 +2781,7 @@ class PipelineProcessor:
                         for f in self._scan_files_recursive(src_dir)
                         if f.endswith('.mp4')][:3]
         if sample_files:
-            # 检查文件名格式
-            first_file = sample_files[0]
-            if "第" in first_file and "集" in first_file:
-                # 检查是否有空格
-                if " - " in first_file:
-                    source_pattern = "{name} - 第{ep}集.mp4"
-                elif "-" in first_file:
-                    source_pattern = "{name}-第{ep}集.mp4"
-                else:
-                    source_pattern = "{name}第{ep}集.mp4"
-            elif re.match(r'\d+\.mp4', first_file):
-                source_pattern = "{ep}.mp4"
-            elif re.search(r'[_-]\d+\.mp4$', first_file):
-                # 剧名-集号.mp4 / 剧名_集号.mp4（如 前夫你来迟了-36.mp4），
-                # 百度网盘下载最常见的命名。原逻辑漏识别落入 {ep}.mp4 fallback，
-                # 渲染端拼出裸名 36.mp4 → 源文件不存在 → 该剧全版本渲染失败。
-                sep = '-' if re.search(r'-\d+\.mp4$', first_file) else '_'
-                source_pattern = f"{{name}}{sep}{{ep}}.mp4"
-            else:
-                source_pattern = "{ep}.mp4"
+            source_pattern = self._detect_source_pattern(sample_files[0])
         else:
             source_pattern = "{ep}.mp4"
 
@@ -2589,7 +2805,7 @@ class PipelineProcessor:
         # 保证任何素材片段在全部版本中最多出现一次。
         used_global = set() if CONFIG['edl'].get('dedup_segments') else None
 
-        for v_idx in range(min(count, len(ep_nums))):
+        for v_idx in range(expected_count):
             self._raise_if_cancelled(cancel_event)
             # 根据倒叙或随机生成segments
             if use_reverse:
@@ -2602,6 +2818,8 @@ class PipelineProcessor:
                                                           used_global=used_global)
             
             if not segments:
+                verdicts[v_idx] = {'status': 'not_rendered',
+                                   'reason': '未能生成EDL片段'}
                 continue
             
             # source_pattern 已在循环外统一计算（fail-fast ①，所有版本共享同一源模式）
@@ -2676,9 +2894,66 @@ class PipelineProcessor:
 
         # P8：渲染报告反映交付结论——render_generic 每版覆写报告（只剩末版），
         # 这里统一按每版 verdict 重写，拒收版标 REJECTED 而非 OK。
-        self._write_render_report(out_dir, drama_name, verdicts)
+        self._write_render_report(out_dir, drama_name, verdicts,
+                                  expected_count=expected_count)
         
         return videos
+
+    @staticmethod
+    def _detect_source_pattern(first_file):
+        """从实际样例文件名推导 render_generic 使用的源文件名模板。"""
+        name = os.path.basename(first_file or '')
+        # 纯“第N集.mp4”不能拼成“剧名第N集.mp4”。若源文件使用前导零
+        # （第01集.mp4），模板必须保留相同宽度，否则数字格式化后会全部失配。
+        cn = re.fullmatch(r'第(\d+)集\.mp4', name, re.IGNORECASE)
+        if cn:
+            width = len(cn.group(1))
+            ep_field = (f'{{ep:0{width}d}}'
+                        if width > 1 and cn.group(1).startswith('0')
+                        else '{ep}')
+            return f'第{ep_field}集.mp4'
+        if "第" in name and "集" in name:
+            cn_any = re.search(r'第(\d+)集', name)
+            digits = cn_any.group(1) if cn_any else ''
+            ep_field = (f'{{ep:0{len(digits)}d}}'
+                        if len(digits) > 1 and digits.startswith('0')
+                        else '{ep}')
+            if " - " in name:
+                return f"{{name}} - 第{ep_field}集.mp4"
+            if "-" in name:
+                return f"{{name}}-第{ep_field}集.mp4"
+            return f"{{name}}第{ep_field}集.mp4"
+        bare = re.fullmatch(r'(\d+)\.mp4', name, re.IGNORECASE)
+        if bare:
+            width = len(bare.group(1))
+            return (f'{{ep:0{width}d}}.mp4'
+                    if width > 1 and bare.group(1).startswith('0')
+                    else '{ep}.mp4')
+        suffix = re.search(r'([_-])(\d+)\.mp4$', name, re.IGNORECASE)
+        if suffix:
+            sep, digits = suffix.group(1), suffix.group(2)
+            ep_field = (f'{{ep:0{len(digits)}d}}'
+                        if len(digits) > 1 and digits.startswith('0')
+                        else '{ep}')
+            return f"{{name}}{sep}{ep_field}.mp4"
+        return "{ep}.mp4"
+
+    def _repair_config_source_pattern(self, config, drama_name):
+        """续跑前按当前真实素材重建 source_pattern，清除旧配置污染。
+
+        旧版本可能把 `第10集.mp4` 误存成 `{name}第{ep}集.mp4`；若原样续跑，
+        修复后的全量路径正常、续跑路径却仍会失败。这里用配置中的 source_dir
+        （失效时回退标准素材目录）重新探测，并原子回写配置。
+        """
+        src_dir = config.get('source_dir') or os.path.join(
+            CONFIG['download_base_dir'], drama_name)
+        files = self._scan_files_recursive(src_dir) if os.path.isdir(src_dir) else []
+        if not files:
+            return config
+        pattern = self._detect_source_pattern(os.path.basename(files[0]))
+        config['source_dir'] = src_dir
+        config['source_pattern'] = pattern
+        return config
     
     def _precheck_source_pattern(self, src_dir, source_pattern, drama_name):
         """fail-fast ①源头预检：source_pattern 能否匹配到实际源文件。
@@ -2783,6 +3058,12 @@ class PipelineProcessor:
                     self._update_config_artifacts(
                         out_dir, v_idx + 1, 'video_path',
                         os.path.join(out_dir, output_file))
+                if video is None:
+                    reason = '渲染命令成功但未找到对应版本产物'
+                    self.logger.log(drama_name, 'ERROR',
+                                    f'V{v_idx+1} 渲染失败：{reason}')
+                    return None, 'other', {
+                        'status': 'render_failed', 'reason': reason}
                 return video, None, {'status': 'accepted', 'reason': ''}
             else:
                 fail_cat = self._classify_render_failure(result.stderr)
@@ -2818,6 +3099,7 @@ class PipelineProcessor:
         # fail-fast ②状态：连续同类别失败计数（≥2 同类失败 = 系统性错误，停止剩余版本）
         consecutive_fail = 0
         last_fail_cat = None
+        verdicts = {}
         for config_path in config_paths:
             self._raise_if_cancelled(cancel_event)
             m = re.search(r'edl_config_v(\d+)\.json$', config_path)
@@ -2825,6 +3107,18 @@ class PipelineProcessor:
             try:
                 with open(config_path, encoding='utf-8') as f:
                     edl_config = json.load(f)
+                before_pattern = edl_config.get('source_pattern')
+                edl_config = self._repair_config_source_pattern(
+                    edl_config, drama_name)
+                if edl_config.get('source_pattern') != before_pattern:
+                    tmp_path = config_path + '.tmp'
+                    with open(tmp_path, 'w', encoding='utf-8') as f:
+                        json.dump(edl_config, f, ensure_ascii=False, indent=2)
+                    os.replace(tmp_path, config_path)
+                    self.logger.log(
+                        drama_name, 'INFO',
+                        f'续跑配置源文件模式已修复：{before_pattern} → '
+                        f'{edl_config.get("source_pattern")}')
                 seg_count = len(edl_config.get('videos', [{}])[0].get('segments', []))
                 self.logger.log(drama_name, 'INFO',
                                 f'续跑 V{v_idx+1}：{seg_count}个片段，配置 {os.path.basename(config_path)}')
@@ -2833,6 +3127,11 @@ class PipelineProcessor:
             video, fail_cat, _verdict = self._run_render_one(
                 drama_name, out_dir, v_idx, config_path,
                 cancel_event=cancel_event)
+            if not _verdict:
+                _verdict = ({'status': 'accepted', 'reason': ''} if video else
+                            {'status': 'render_failed',
+                             'reason': fail_cat or '未知'})
+            verdicts[v_idx] = _verdict
             if video:
                 videos.append(video)
                 consecutive_fail = 0
@@ -2856,6 +3155,8 @@ class PipelineProcessor:
                         f'续跑连续{consecutive_fail}个版本同类失败（{fail_cat}），判定系统性错误，'
                         f'停止剩余版本（已成功{len(videos)}个）')
                     break
+        self._write_render_report(out_dir, drama_name, verdicts,
+                                  expected_count=len(config_paths))
         return videos
     
     # 成片业务窗口 210-300s（见 _select_best_videos）。渲染会跑 atempo=1.05 轻微加速，
@@ -4508,7 +4809,8 @@ class PipelineProcessor:
         except Exception as e:
             self.logger.log('system', 'WARN', f'QC 报告写入失败：{e}')
 
-    def _write_render_report(self, out_dir, drama_name, verdicts):
+    def _write_render_report(self, out_dir, drama_name, verdicts,
+                             expected_count=None):
         """P8：按每版交付 verdict 写渲染报告（覆盖 render_generic 的每版覆写结果）。
 
         render_generic 每次调用都覆写同一份 {drama}_渲染报告.md（只剩最后一版），
@@ -4518,30 +4820,38 @@ class PipelineProcessor:
         """
         try:
             verdicts = verdicts or {}
-            if not verdicts:
+            if not verdicts and not expected_count:
                 return
             ok_n = sum(1 for v in verdicts.values() if v.get('status') == 'accepted')
             rej_n = sum(1 for v in verdicts.values() if v.get('status') == 'rejected')
             fail_n = sum(1 for v in verdicts.values() if v.get('status') == 'render_failed')
+            missing_n = sum(1 for v in verdicts.values()
+                            if v.get('status') == 'not_rendered')
+            expected_count = int(expected_count or len(verdicts))
+            absent_n = max(0, expected_count - len(verdicts))
             lines = [
                 f'# {drama_name} 渲染报告（交付结论）', '',
                 f'- 剧名: {drama_name}',
-                f'- 版本数: {len(verdicts)}',
+                f'- 计划版本数: {expected_count}',
                 f'- 成功: {ok_n}',
                 f'- 拒收: {rej_n}',
-                f'- 渲染失败: {fail_n}', '',
+                f'- 渲染失败: {fail_n}',
+                f'- 未生成/未执行: {missing_n + absent_n}', '',
                 '## 交付质量结论', '',
                 '| 版本 | 结论 |',
                 '|---|---|',
             ]
-            for v_idx in sorted(verdicts.keys()):
-                v = verdicts[v_idx]
+            for v_idx in range(expected_count):
+                v = verdicts.get(v_idx) or {
+                    'status': 'not_rendered', 'reason': '未执行（循环提前结束）'}
                 status = v.get('status', 'unknown')
                 reason = v.get('reason', '')
                 if status == 'accepted':
                     label = '✅ ACCEPTED'
                 elif status == 'rejected':
                     label = f'⛔ REJECTED（{reason}）'
+                elif status == 'not_rendered':
+                    label = f'⚪ NOT_RENDERED（{reason}）'
                 else:
                     label = f'❌ RENDER_FAILED（{reason}）'
                 lines.append(f'| V{v_idx + 1} | {label} |')
@@ -4553,6 +4863,36 @@ class PipelineProcessor:
                             f'渲染报告（交付结论）已写入：{report_path}')
         except Exception as e:
             self.logger.log('system', 'WARN', f'渲染报告（交付结论）写入失败：{e}')
+
+    def _resolve_actual_cover(self, out_dir, drama_name, version_no,
+                              config=None, video_filename=''):
+        """返回实际存在的封面绝对路径；不存在返回 None，不伪造报告路径。"""
+        candidates = []
+        artifacts = (config or {}).get('artifacts') or {}
+        if artifacts.get('cover_path'):
+            candidates.append(artifacts['cover_path'])
+        covers_dir = os.path.join(out_dir, 'covers')
+        candidates.extend([
+            os.path.join(covers_dir, f'{drama_name}_{version_no}_封面.jpg'),
+        ])
+        if video_filename:
+            candidates.append(os.path.join(
+                covers_dir, f'{os.path.splitext(video_filename)[0]}_封面.jpg'))
+        for candidate in candidates:
+            if candidate and os.path.isfile(candidate):
+                return os.path.abspath(candidate)
+        try:
+            patterns = (
+                f'{drama_name}_{version_no}_*.jpg',
+                f'*_{version_no}_封面.jpg',
+            )
+            for pattern in patterns:
+                hits = sorted(glob.glob(os.path.join(covers_dir, pattern)))
+                if hits:
+                    return os.path.abspath(hits[0])
+        except Exception:
+            pass
+        return None
 
     def _write_report(self, out_dir, drama_name, best_videos, cut_method='未知',
                       dedup_report=None):
@@ -4629,13 +4969,17 @@ class PipelineProcessor:
                         topics_str = f'#{topics}'
 
                     fname = delivered.get(vno, '（本版未产出）')
-                    # P9: 封面路径读 artifacts 实际 cover_path（_generate_cover 回写），
-                    # 不再按视频文件名推导（两套命名不一致导致路径不存在）。
+                    # P9: 只写磁盘上实际存在的封面；不再拼一个不存在的推测路径。
                     cover_rel = ''
-                    if isinstance(config, dict) and config.get('artifacts', {}).get('cover_path'):
-                        cover_rel = 'covers/' + os.path.basename(config['artifacts']['cover_path'])
-                    elif fname != '（本版未产出）':
-                        cover_rel = f"covers/{os.path.splitext(fname)[0]}_封面.jpg"
+                    cover_abs = self._resolve_actual_cover(
+                        out_dir, drama_name, vno, config,
+                        '' if fname == '（本版未产出）' else fname)
+                    if cover_abs:
+                        cover_rel = os.path.relpath(cover_abs, out_dir).replace(
+                            os.sep, '/')
+                    else:
+                        self.logger.log('system', 'WARN',
+                                        f'V{vno} 交付报告未找到实际封面，标记未产出')
                     report += f"**标题：** {title}\n"
                     report += f"**描述：** {description}\n"
                     report += f"**话题：** {topics_str}\n"
@@ -4649,7 +4993,7 @@ class PipelineProcessor:
                     report += f"**描述：** 待补充\n"
                     report += f"**话题：** #短剧 #短剧推荐 #追剧 #热门短剧 #好剧推荐\n"
                     report += f"**文件：** {fname}\n"
-                    report += f"**封面：** " + (f"covers/{os.path.splitext(fname)[0]}_封面.jpg" if fname != '（本版未产出）' else "（本版未产出）") + "\n"
+                    report += "**封面：** （未找到实际封面）\n"
                     self.logger.log('system', 'WARN', f'读取V{vno}配置失败：{str(e)}')
 
             # R9：内容去重检测结果（写入交付报告，便于溯源）
@@ -4705,12 +5049,18 @@ class PipelineProcessor:
     
     def _acquire_lock(self, lock_path):
         """获取文件锁"""
+        f = None
         try:
             import msvcrt
             f = open(lock_path, 'w')
             msvcrt.locking(f.fileno(), msvcrt.LK_NBLCK, 1)
             return f
         except Exception:
+            if f is not None:
+                try:
+                    f.close()
+                except Exception:
+                    pass
             return None
     
     def _release_lock(self, lock_file):

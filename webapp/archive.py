@@ -211,8 +211,10 @@ def should_download(drama_name, local_dir, source_url=None):
             conn.close()
         if same_source:
             return False, f'同一来源已下载成功（{same_source[1] or ""}）'
-    if row and row['download_state'] == 'failed':
-        return True, '上次下载失败，可重试'
+    if row and row['download_state'] in ('failed', 'downloading'):
+        return True, ('上次下载失败，可重试'
+                      if row['download_state'] == 'failed'
+                      else '上次下载未完成，可续传')
     if row and row['download_state'] == 'done':
         return False, f'历史记录已下载成功（{row.get("downloaded_at") or ""}）'
     if os.path.isdir(local_dir):
