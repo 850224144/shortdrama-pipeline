@@ -1239,6 +1239,10 @@ class PipelineProcessor:
                     stop_monitor.set()
                     monitor_thread.join(timeout=5)
             
+            # P1：本地展平——下载产物若形成 剧名/剧名/ 嵌套（分享链接内容本身是目录），
+            # 把内层内容上移一层并删除空目录，保证素材结构扁平（用户要求 E:\短剧素材\剧名\）。
+            self._flatten_local_dir(target_dir, dir_name)
+            
             # 6. 扫描下载的文件
             downloaded_files = self._scan_files_recursive(target_dir)
             # 去重：网盘源若同时含顶层文件与 {剧名}/ 子目录副本，递归扫描得 2N 个文件；
@@ -1584,6 +1588,60 @@ class PipelineProcessor:
         finally:
             self.logger.log(dir_name, 'INFO', f'监控线程结束')
     
+    def _flatten_local_dir(self, target_dir, dir_name):
+        """P1：下载产物若形成 剧名/剧名/ 嵌套（分享链接内容本身是目录时，
+        BaiduPCS-Go 转存会形成 /短剧素材/剧名/剧名/ 结构），把内层内容上移一层
+        并删除空目录，保证素材结构扁平（用户要求 E:\\短剧素材\\剧名\\）。
+
+        幂等；与网盘侧展平不同，本方法无条件在本地执行，不依赖 ls 输出解析。
+        同名顶层冲突跳过（由集号去重 _dedupe_episodes_by_number 兜底，不覆盖）。
+        Returns: 是否发生展平。
+        """
+        flattened = False
+        try:
+            for entry in os.listdir(target_dir):
+                sub = os.path.join(target_dir, entry)
+                if not os.path.isdir(sub):
+                    continue
+                try:
+                    inner = os.listdir(sub)
+                except OSError:
+                    continue
+                if not inner:
+                    # 空目录直接清掉（嵌套结构残留）
+                    try:
+                        os.rmdir(sub)
+                    except OSError:
+                        pass
+                    continue
+                moved = 0
+                for item in inner:
+                    src = os.path.join(sub, item)
+                    dst = os.path.join(target_dir, item)
+                    if os.path.exists(dst):
+                        continue  # 顶层已有同名，不覆盖，交给集号去重
+                    try:
+                        shutil.move(src, dst)
+                        moved += 1
+                    except OSError as e:
+                        self.logger.log(dir_name, 'WARN',
+                                        f'P1 展平移动失败 {item}: {e}')
+                if moved:
+                    flattened = True
+                    self.logger.log(
+                        dir_name, 'INFO',
+                        f'P1 本地展平：{entry}/ 内 {moved} 项已上移到 '
+                        f'{os.path.basename(target_dir)}/')
+                # 删除已空的嵌套目录
+                try:
+                    if not os.listdir(sub):
+                        os.rmdir(sub)
+                except OSError:
+                    pass
+        except OSError as e:
+            self.logger.log(dir_name, 'WARN', f'P1 展平异常（可忽略）：{e}')
+        return flattened
+
     def _scan_files_recursive(self, directory):
         """递归扫描文件"""
         files = []
@@ -1689,6 +1747,8 @@ class PipelineProcessor:
                     continue
                 if keep_filenames is not None and f in keep_filenames:
                     continue
+                if '_REJECTED' in f:
+                    continue  # P5: 拒收成片保留供复核/补齐，不删（名如 *_REJECTED.mp4）
                 is_mp4 = f.endswith('.mp4') or f.endswith('.mp4.tmp')
                 is_cfg = include_configs and f.startswith('edl_config_v') and f.endswith('.json')
                 if is_mp4 or is_cfg:
@@ -2039,7 +2099,14 @@ class PipelineProcessor:
             
             # 标记完成
             self._raise_if_cancelled(cancel_event)
-            account = self.assign_account(drama_name)
+            # P7: 账号取实际输出目录（output/{账号}/{剧名}），与交付报告/水印一致
+            try:
+                acc_dir = os.path.dirname(out_dir.rstrip('/\\'))
+                account = os.path.basename(acc_dir)
+                if not account or account == 'output':
+                    account = self.assign_account(drama_name)
+            except Exception:
+                account = self.assign_account(drama_name)
             self.state_manager.add_completed(drama_name, account, {
                 'ai': len(ai_videos),
                 'edl': len(edl_videos),
@@ -2055,7 +2122,7 @@ class PipelineProcessor:
             if swept:
                 self.logger.log(drama_name, 'WARN', f'交付清理：删除{swept}个未交付渲染产物')
             
-            self._update_state('idle', '', 100, '完成')
+            self._update_state('idle', '', 100, '完成，可上传')
             
             # 创建素材标记
             try:
@@ -2064,7 +2131,7 @@ class PipelineProcessor:
             except Exception as e:
                 self.logger.log('system', 'WARN', f'写已切完标记失败：{str(e)}')
             
-            self.logger.log(drama_name, 'INFO', f'完成：{len(best_videos)}个版本')
+            self.logger.log(drama_name, 'INFO', f'完成：{len(best_videos)}个版本，可上传（账号 {account}，见交付报告）')
             
             return {
                 'name': drama_name,
@@ -2515,6 +2582,8 @@ class PipelineProcessor:
         # fail-fast ②状态：连续同类别失败计数（≥2 同类失败 = 系统性错误，停止剩余版本）
         consecutive_fail = 0
         last_fail_cat = None
+        # P8: 每版交付 verdict（accepted/rejected/render_failed）→ 循环后写渲染报告
+        verdicts = {}
 
         # 方案B：跨版本 (集,起点) 零复用——所有版本共享一个全局已用集合，
         # 保证任何素材片段在全部版本中最多出现一次。
@@ -2582,9 +2651,11 @@ class PipelineProcessor:
                                                  f'规划合计{sum(s["duration"] for s in segments):.0f}s')
             
             # 调用render_generic.py（公共渲染方法，失败续跑也复用）
-            video, fail_cat = self._run_render_one(
+            video, fail_cat, verdict = self._run_render_one(
                 drama_name, out_dir, v_idx, config_path,
                 cancel_event=cancel_event)
+            # P8: 记录本版交付 verdict（accepted/rejected/render_failed）供报告反映
+            verdicts[v_idx] = verdict
             if video:
                 videos.append(video)
                 consecutive_fail = 0
@@ -2597,11 +2668,15 @@ class PipelineProcessor:
                 else:
                     consecutive_fail = 1
                     last_fail_cat = fail_cat
-                if fail_cat and fail_cat != 'other' and consecutive_fail >= 2:
+                if fail_cat and fail_cat not in ('other', 'quality') and consecutive_fail >= 2:
                     self.logger.log(drama_name, 'ERROR',
                         f'连续{consecutive_fail}个版本同类失败（{fail_cat}），判定系统性错误，'
                         f'停止剩余版本（已成功{len(videos)}个）')
                     break
+
+        # P8：渲染报告反映交付结论——render_generic 每版覆写报告（只剩末版），
+        # 这里统一按每版 verdict 重写，拒收版标 REJECTED 而非 OK。
+        self._write_render_report(out_dir, drama_name, verdicts)
         
         return videos
     
@@ -2684,21 +2759,36 @@ class PipelineProcessor:
                     # R6 媒体质量门禁：拒收 0 字节/无视频流/无音轨/时长异常产物
                     quality = self._validate_delivery_media(video['path'])
                     if not quality.get('ok'):
+                        reason = quality.get('reason', '未知')
                         self.logger.log(
                             drama_name, 'ERROR',
-                            f'V{v_idx+1} 交付质量拒收（{quality.get("reason", "未知")}）：'
-                            f'{output_file}')
-                        return None, 'quality'
+                            f'V{v_idx+1} 交付质量拒收（{reason}）：{output_file}')
+                        # P5：禁止删除未交付成片——拒收不删，重命名 *_REJECTED.mp4
+                        # 保留供人工复核或补齐时长；交付清理会跳过 *_REJECTED_ 文件。
+                        try:
+                            src_p = video['path']
+                            if src_p.endswith('.mp4'):
+                                rej_p = src_p[:-4] + '_REJECTED.mp4'
+                                os.rename(src_p, rej_p)
+                                self.logger.log(
+                                    drama_name, 'WARN',
+                                    f'V{v_idx+1} 拒收成片保留为 '
+                                    f'{os.path.basename(rej_p)}（供复核/补齐）')
+                        except OSError as e:
+                            self.logger.log(
+                                drama_name, 'WARN',
+                                f'V{v_idx+1} 保留拒收成片失败（可忽略）：{e}')
+                        return None, 'quality', {'status': 'rejected', 'reason': reason}
                     # 回写实际 video_path 到 artifacts（钩子可能与预判不同）
                     self._update_config_artifacts(
                         out_dir, v_idx + 1, 'video_path',
                         os.path.join(out_dir, output_file))
-                return video, None
+                return video, None, {'status': 'accepted', 'reason': ''}
             else:
                 fail_cat = self._classify_render_failure(result.stderr)
                 self.logger.log(drama_name, 'ERROR',
                                 f'V{v_idx+1} EDL渲染失败（{fail_cat}）：{result.stderr[:200]}')
-                return None, fail_cat
+                return None, fail_cat, {'status': 'render_failed', 'reason': fail_cat or '未知'}
 
         except CutCancelled:
             self.logger.log(drama_name, 'INFO', f'V{v_idx+1} 渲染已停止')
@@ -2707,7 +2797,7 @@ class PipelineProcessor:
             fail_cat = self._classify_render_failure('', e)
             self.logger.log(drama_name, 'ERROR',
                             f'V{v_idx+1} EDL异常（{fail_cat}）：{str(e)}')
-            return None, fail_cat
+            return None, fail_cat, {'status': 'render_failed', 'reason': fail_cat or '未知'}
 
     def _re_render_from_configs(self, drama_name, out_dir, cancel_event=None):
         """失败续跑：读 out_dir 里保留的 edl_config_v*.json，只重渲染，不重新生成 EDL。
@@ -2740,7 +2830,7 @@ class PipelineProcessor:
                                 f'续跑 V{v_idx+1}：{seg_count}个片段，配置 {os.path.basename(config_path)}')
             except Exception as e:
                 self.logger.log(drama_name, 'WARN', f'续跑读取配置失败 {os.path.basename(config_path)}: {e}')
-            video, fail_cat = self._run_render_one(
+            video, fail_cat, _verdict = self._run_render_one(
                 drama_name, out_dir, v_idx, config_path,
                 cancel_event=cancel_event)
             if video:
@@ -2761,7 +2851,7 @@ class PipelineProcessor:
                 else:
                     consecutive_fail = 1
                     last_fail_cat = fail_cat
-                if fail_cat and fail_cat != 'other' and consecutive_fail >= 2:
+                if fail_cat and fail_cat not in ('other', 'quality') and consecutive_fail >= 2:
                     self.logger.log(drama_name, 'ERROR',
                         f'续跑连续{consecutive_fail}个版本同类失败（{fail_cat}），判定系统性错误，'
                         f'停止剩余版本（已成功{len(videos)}个）')
@@ -2840,11 +2930,17 @@ class PipelineProcessor:
             total = 0
         if total <= 0:
             return self.determine_version_count(len(edl_eps))
+        desired = self.determine_version_count(len(edl_eps))
+        zero_reuse_cap = total // segs_per_version
+        # P4 方案1：目标版本数按集数判定（>=30→8），零复用只决定「前几版可零复用」；
+        # 素材容量不足时不再把版本数压到 4（否则 30 集剧只出 4 版，达不到 8 版标准），
+        # 不足部分由 _generate_reverse_segments 的受控复用（限重复率）补足。
         count = max(int(cfg.get('min_versions', 4)),
-                    min(int(cfg.get('max_versions', 8)), total // segs_per_version))
+                    min(int(cfg.get('max_versions', 8)), desired))
         self.logger.log(drama_name, 'INFO',
                         f'方案B容量：素材{total}段 / 每版{segs_per_version}段 '
-                        f'→ {count}版（零复用）')
+                        f'零复用上限{zero_reuse_cap}版 → 目标{count}版'
+                        f'（{max(0, count - zero_reuse_cap)}版受控复用补足）')
         return count
 
     # 冲突/悬念词库：LLM 不可用时的兜底打分
@@ -2861,16 +2957,35 @@ class PipelineProcessor:
     # 4 类 32 个真实短剧叙事主题，每版取不同角度 → 版本主题/文案/钩子差异化。
     # GLM 按各集实际剧情匹配角度，不硬套；校验白名单与 prompt 选项同源。
     ARC_ANGLES = [
-        # ① 冲突逆袭（核心爆点，保留基础六类）
+        # ① 冲突逆袭（26）：11 核心 + 15 扩展
         "逆袭", "打脸", "真相", "反转", "高潮", "泪目",
-        # ② 情感关系
+        "复仇", "觉醒", "扮猪吃虎", "双强", "救赎",
+        "时间循环", "读心术", "规则怪谈", "断亲反杀", "摆烂通关",
+        "鉴宝捡漏", "风水打脸", "神豪开挂", "系统逆袭", "记忆错位",
+        "身份互换", "密室逃脱", "监控盲区", "匿名复仇", "反PUA逆袭",
+        # ② 情感关系（39）：21 核心 + 18 扩展
         "甜宠", "虐恋", "误会", "破镜重圆", "替身", "契约婚姻",
-        "闪婚", "追妻", "团宠",
-        # ③ 身份觉醒
-        "重生", "复仇", "觉醒", "扮猪吃虎", "双强", "马甲",
-        "隐藏身份", "千金归来", "弃女", "赘婿",
-        # ④ 题材类型
-        "悬疑", "惊险", "商战", "职场逆袭", "神医", "战神", "救赎",
+        "闪婚", "追妻", "团宠", "先婚后爱", "追妻火葬场",
+        "双向奔赴", "隐婚", "娇妻", "姐弟恋", "年下",
+        "白月光", "竹马", "死对头", "宿敌", "天降",
+        "疯批男主", "偏执霸总", "长嫂如母", "继亲和解", "养恩反哺",
+        "妯娌斗法", "师徒虐恋", "忘年之交", "隔代亲救赎", "闺蜜反目",
+        "家长里短", "嘴替吐槽", "发疯文学", "社恐追爱", "直女拆台",
+        "冤种情侣", "沙雕一家人", "双向暗恋",
+        # ③ 身份觉醒（23）：11 核心 + 12 扩展
+        "重生", "马甲", "隐藏身份", "千金归来", "弃女", "赘婿",
+        "大女主", "复仇归来", "逆天改命", "宫斗", "宅斗",
+        "穿书逆袭", "双穿联动", "古物觉醒", "末世重生", "星际大佬",
+        "平行世界", "相师下山", "国运觉醒", "非遗守艺人", "退休重启",
+        "下岗逆袭", "代驾大佬",
+        # ④ 题材类型（34）：12 核心 + 22 扩展
+        "悬疑", "惊险", "商战", "职场逆袭", "神医", "战神",
+        "豪门", "霸总", "带球跑", "萌宝", "绿茶", "渣男",
+        "年代怀旧", "乡村振兴", "民国奇案", "民俗志怪", "AI伦理",
+        "外卖侠", "网约车谜案", "快递疑云", "社区网格员", "彩礼反杀",
+        "文物说话", "古风美食", "书院日常", "敦煌修复", "戏曲破圈",
+        "中医下山", "榫卯匠人", "古画修复", "剧本杀DM", "二手车评估师",
+        "入殓师", "宠物侦探",
     ]
 
     _HIGHLIGHT_PROMPT = (
@@ -3412,7 +3527,8 @@ class PipelineProcessor:
         angles = set(self.ARC_ANGLES) | {'平淡'}
         orders = {'reverse', 'flashback', 'forward'}
         versions = []
-        used = set()
+        used = set()          # 已用开头集（opening_ep 互异）
+        used_angles = set()   # P2: 已用角度（同方案内 angle 必须互不相同）
         for v in data['versions'][:count]:
             if not isinstance(v, dict):
                 continue
@@ -3425,12 +3541,18 @@ class PipelineProcessor:
             angle = str(v.get('angle') or '')
             if angle not in angles:
                 angle = '高潮'
+            # P2: angle 已用 → 从池取一个未用的（确定性兜底），保证版本角度差异化
+            if angle in used_angles:
+                angle = next((a for a in self.ARC_ANGLES if a not in used_angles), None)
+                if angle is None:
+                    continue  # 池已无未用角度，跳过该版（版本不足 → 触发重生成）
             order_type = str(v.get('order_type') or 'reverse')
             if order_type not in orders:
                 order_type = 'reverse'
             versions.append({'opening_ep': ep, 'angle': angle,
                              'order_type': order_type})
             used.add(ep)
+            used_angles.add(angle)
         return versions if len(versions) >= count else None
 
     def _build_arc_order(self, eps_hl, opening_ep, order_type='reverse'):
@@ -3554,8 +3676,10 @@ class PipelineProcessor:
 
         segments = []
 
-        def add(ep_num, start, dur):
-            """按累计时长预算追加片段；预算耗尽或全局已用返回 False"""
+        def add(ep_num, start, dur, reuse=False):
+            """按累计时长预算追加片段；预算耗尽返回 False。
+            reuse=True（P4 方案1受控复用）：忽略全局已用集，允许次轮版本复用首轮素材
+            （调用方已在 fill-up 里按 reuse_ratio 限额，本函数只管落地）。"""
             left = self._seg_budget_left(segments)
             if left <= self.MIN_SEG_DUR:
                 return False
@@ -3568,8 +3692,9 @@ class PipelineProcessor:
             s = self._snap_segment_start(ep_num, s, d, eps_hl)
             if s is None:   # 防御：吸附异常/类型推断，绝不把 None 写进片段
                 s = 0.0
-            # 方案B：跨版本零复用——同一 (集,起点) 全局只允许用一次（吸附后键）
-            if used_global is not None:
+            # 方案B：跨版本零复用——同一 (集,起点) 全局只允许用一次（吸附后键）；
+            # reuse=True 跳过该检查（受控复用由调用方限额，避免整版复刻）。
+            if used_global is not None and not reuse:
                 key = (ep_num, round(float(s), 1))
                 if key in used_global:
                     return False
@@ -3620,11 +3745,14 @@ class PipelineProcessor:
                 f'开头钩子：第{opening["episode"]}集 {oc["score"]}分 '
                 f'[{oc.get("hook_type", "")}] {oc.get("reason", "")}')
         if not add(opening["episode"], oc["start"], oc["dur"]):
-            # P2-3: LLM 候选只过滤 dur>=8.0，但 add 要求 >=MIN_SEG_DUR(15s)，
-            # 8-15s 候选会静默丢失导致开头退化为非计划集——显式告警不再静默。
-            self.logger.log('system', 'WARN',
-                            f'开头钩子第{opening["episode"]}集 {oc["start"]}s/{oc["dur"]}s '
-                            f'未入段（<{self.MIN_SEG_DUR}s 最短段或预算耗尽），开头钩子跳过')
+            # P4 方案1：零复用失败（该开头段已被前面版本占用）时受控复用兜底，
+            # 保证次轮版本也有开头钩子；预算耗尽则仍失败（reuse 也救不了）。
+            if not add(opening["episode"], oc["start"], oc["dur"], reuse=True):
+                # P2-3: LLM 候选只过滤 dur>=8.0，但 add 要求 >=MIN_SEG_DUR(15s)，
+                # 8-15s 候选会静默丢失导致开头退化为非计划集——显式告警不再静默。
+                self.logger.log('system', 'WARN',
+                                f'开头钩子第{opening["episode"]}集 {oc["start"]}s/{oc["dur"]}s '
+                                f'未入段（<{self.MIN_SEG_DUR}s 最短段或预算耗尽），开头钩子跳过')
 
         # 2. 叙事顺序：导演方案 order_type（钩子→前因闪回→顺叙结局）；
         #    无方案回退集号逆序（原逻辑）。
@@ -3676,7 +3804,20 @@ class PipelineProcessor:
             ranked = sorted(eps_hl,
                             key=lambda x: -max((c['score'] for c in x['cands']),
                                                default=0))
-            for allow_reused_ep in (False, True):
+            # P4 方案1：受控复用限额——按目标段数而非当前段数计算，
+            # 保证次轮版本能补足到目标时长（当前 len(segments) 可能只有开头 1 段，
+            # 若按它算 max_reused 会=0，导致复用版本无法补足到 3 分钟）。
+            # 0.9 让复用版本补足到 ~200s（渲染后 ~190s，安全高于 180s 门限，
+            # 避免重蹈 V3 171.6s<180s 被拒的覆辙）；R9 内容去重负责剔除克隆。
+            reuse_ratio = float(CONFIG['edl'].get('reuse_ratio', 0.9))
+            target_segs = max(1, int(math.ceil(
+                float(CONFIG['edl'].get('target_dur', 200.0)) /
+                float(CONFIG['edl'].get('segment_dur', 20.0)))))
+            max_reused = int(reuse_ratio * target_segs)
+            reused = 0
+            # 两遍零复用（先本版未用集、再放宽同集），仍不足则第三遍受控复用全局已用段。
+            for allow_reused_ep, allow_global_reuse in (
+                    (False, False), (True, False), (True, True)):
                 if self._seg_budget_left(segments) <= self.MIN_SEG_DUR:
                     break
                 for e in ranked:
@@ -3688,10 +3829,16 @@ class PipelineProcessor:
                         continue
                     for c in e['cands']:
                         key = (e['episode'], round(float(c['start']), 1))
-                        if used_global is not None and key in used_global:
+                        is_reuse = (used_global is not None and key in used_global)
+                        if is_reuse and not allow_global_reuse:
                             continue
-                        if add(e['episode'], c['start'], c['dur']):
+                        if is_reuse and reused >= max_reused:
+                            continue
+                        if add(e['episode'], c['start'], c['dur'],
+                               reuse=allow_global_reuse):
                             used_eps.add(e['episode'])
+                            if is_reuse:
+                                reused += 1
                             break
 
         return segments
@@ -4361,6 +4508,52 @@ class PipelineProcessor:
         except Exception as e:
             self.logger.log('system', 'WARN', f'QC 报告写入失败：{e}')
 
+    def _write_render_report(self, out_dir, drama_name, verdicts):
+        """P8：按每版交付 verdict 写渲染报告（覆盖 render_generic 的每版覆写结果）。
+
+        render_generic 每次调用都覆写同一份 {drama}_渲染报告.md（只剩最后一版），
+        且只写「渲染成功」，不反映交付质量门禁的拒收结论。本方法在版本循环
+        结束后统一重写：每版标注 accepted/rejected/render_failed，拒收版标
+        REJECTED（含原因）而非 OK。
+        """
+        try:
+            verdicts = verdicts or {}
+            if not verdicts:
+                return
+            ok_n = sum(1 for v in verdicts.values() if v.get('status') == 'accepted')
+            rej_n = sum(1 for v in verdicts.values() if v.get('status') == 'rejected')
+            fail_n = sum(1 for v in verdicts.values() if v.get('status') == 'render_failed')
+            lines = [
+                f'# {drama_name} 渲染报告（交付结论）', '',
+                f'- 剧名: {drama_name}',
+                f'- 版本数: {len(verdicts)}',
+                f'- 成功: {ok_n}',
+                f'- 拒收: {rej_n}',
+                f'- 渲染失败: {fail_n}', '',
+                '## 交付质量结论', '',
+                '| 版本 | 结论 |',
+                '|---|---|',
+            ]
+            for v_idx in sorted(verdicts.keys()):
+                v = verdicts[v_idx]
+                status = v.get('status', 'unknown')
+                reason = v.get('reason', '')
+                if status == 'accepted':
+                    label = '✅ ACCEPTED'
+                elif status == 'rejected':
+                    label = f'⛔ REJECTED（{reason}）'
+                else:
+                    label = f'❌ RENDER_FAILED（{reason}）'
+                lines.append(f'| V{v_idx + 1} | {label} |')
+            report = '\n'.join(lines) + '\n'
+            report_path = os.path.join(out_dir, f'{drama_name}_渲染报告.md')
+            with open(report_path, 'w', encoding='utf-8') as f:
+                f.write(report)
+            self.logger.log('system', 'INFO',
+                            f'渲染报告（交付结论）已写入：{report_path}')
+        except Exception as e:
+            self.logger.log('system', 'WARN', f'渲染报告（交付结论）写入失败：{e}')
+
     def _write_report(self, out_dir, drama_name, best_videos, cut_method='未知',
                       dedup_report=None):
         """写交付报告 - 从 edl_config_v{i}.json 读取实际文案
@@ -4390,8 +4583,17 @@ class PipelineProcessor:
                         delivered[idx] = fname
             count = len(delivered)
             sorted_vnos = sorted(delivered.keys())
+            # P7: 账号取实际输出目录（output/{账号}/{剧名}），不再用独立分配
+            # （assign_account 可能与实际目录不符——本剧目录福桃说剧却曾写小桃追剧中）。
+            try:
+                acc_dir = os.path.dirname(out_dir.rstrip('/\\'))
+                account = os.path.basename(acc_dir)
+                if not account or account == 'output':
+                    account = self.assign_account(drama_name)
+            except Exception:
+                account = self.assign_account(drama_name)
             report = f"""# {drama_name} 交付报告
-- 账号：{self.assign_account(drama_name)}
+- 账号：{account}
 - 切完时间：{datetime.now().strftime('%Y-%m-%d %H:%M')}
 - 共{count}条成片
 - 切法：{cut_method}
@@ -4427,11 +4629,18 @@ class PipelineProcessor:
                         topics_str = f'#{topics}'
 
                     fname = delivered.get(vno, '（本版未产出）')
+                    # P9: 封面路径读 artifacts 实际 cover_path（_generate_cover 回写），
+                    # 不再按视频文件名推导（两套命名不一致导致路径不存在）。
+                    cover_rel = ''
+                    if isinstance(config, dict) and config.get('artifacts', {}).get('cover_path'):
+                        cover_rel = 'covers/' + os.path.basename(config['artifacts']['cover_path'])
+                    elif fname != '（本版未产出）':
+                        cover_rel = f"covers/{os.path.splitext(fname)[0]}_封面.jpg"
                     report += f"**标题：** {title}\n"
                     report += f"**描述：** {description}\n"
                     report += f"**话题：** {topics_str}\n"
                     report += f"**文件：** {fname}\n"
-                    report += f"**封面：** " + (f"covers/{os.path.splitext(fname)[0]}_封面.jpg" if fname != '（本版未产出）' else "（本版未产出）") + "\n"
+                    report += f"**封面：** {cover_rel if cover_rel else '（本版未产出）'}\n"
 
                 except Exception as e:
                     # 如果读取配置失败，使用默认值
@@ -4505,7 +4714,7 @@ class PipelineProcessor:
             return None
     
     def _release_lock(self, lock_file):
-        """释放文件锁"""
+        """释放文件锁（P10: 同时删除锁文件，避免 .processing.lock 0 字节残留）"""
         if lock_file:
             try:
                 import msvcrt
@@ -4514,5 +4723,10 @@ class PipelineProcessor:
                 pass
             try:
                 lock_file.close()
+            except Exception:
+                pass
+            # P10: 释放后删除锁文件，不留 0 字节残留；下一进程获取时会重建。
+            try:
+                os.remove(lock_file.name)
             except Exception:
                 pass
