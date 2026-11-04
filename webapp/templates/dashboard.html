@@ -1780,13 +1780,12 @@
             const account = document.getElementById('uploadAccount').value;
             const container = document.getElementById('dramaList');
             
-            if (!account) {
-                container.innerHTML = '<div style="padding: 20px; text-align: center; color: #666;">请选择账号后刷新列表</div>';
-                return;
-            }
-            
+            // 空账号=查看全部剧（不按归属过滤），符合"剧在列表就能上传"
             try {
-                const response = await fetch(`/api/upload/dramas?account=${account}`);
+                const url = account
+                    ? `/api/upload/dramas?account=${encodeURIComponent(account)}`
+                    : '/api/upload/dramas';
+                const response = await fetch(url);
                 const data = await response.json();
                 const dramas = data.dramas || [];
                 const diagnostics = data.diagnostics || [];
@@ -1879,22 +1878,19 @@
         // 开始上传
         async function startUpload() {
             console.log('startUpload 被调用');
+            // 账号仅用于浏览过滤，不强制、不校验归属；
+            // 实际上传账号跟随每部剧所在目录（见下方 items.push）。
             const account = document.getElementById('uploadAccount').value;
-            console.log('选择账号:', account);
+            console.log('浏览账号:', account);
             
-            if (!account) {
-                showNotification('请选择账号', 'error');
+            if (Object.keys(selectedDramas).length === 0) {
+                showNotification('请选择至少一部剧', 'error');
                 return;
             }
             
             console.log('selectedDramas:', selectedDramas);
             console.log('selectedDramas keys:', Object.keys(selectedDramas));
             console.log('window.dramasData:', window.dramasData);
-            
-            if (Object.keys(selectedDramas).length === 0) {
-                showNotification('请选择至少一部剧', 'error');
-                return;
-            }
             
             // 生成批次 ID（时间戳），供清理计划器按批次聚合
             const batchId = 'batch_' + Date.now() + '_' + Math.floor(Math.random() * 1000);
@@ -1936,7 +1932,8 @@
                     items.push({
                         drama_name: dramaName,
                         video_path: `${dramaDir}/${videoFile}`,
-                        account: account,
+                        // 上传账号跟随剧实际所在目录，不校验 plan_account 归属
+                        account: drama.account || account,
                         version: version,
                         batch_id: batchId,
                         output_dir: dramaDir,
