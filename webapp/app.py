@@ -707,48 +707,107 @@ def cleanup_jobs():
         return Response(json.dumps({'status': 'failed', 'error': str(e)},
                                    ensure_ascii=False), mimetype='application/json', status=500)
 
-@app.route('/api/upload/dramas')
-def get_uploadable_dramas():
-    """获取可上传的剧列表 - 支持按账号过滤"""
-    # 从output目录扫描剧目录
+@app.route('/api/upload/accounts')
+def get_upload_accounts():
+    """返回实际存在的上传账号目录 + 每个账号下可上传剧数。
+
+    供上传页账号下拉使用（不再前端硬编码账号集合）。
+    账号来自 output 目录实际子目录，保证与切片结果目录一致。
+    """
     output_dir = CONFIG.get('output_dir', 'output')
-    account_filter = request.args.get('account')  # 获取账号参数
-    dramas = []
-    
+    accounts = []
     if os.path.exists(output_dir):
-        for account in os.listdir(output_dir):
-            # 如果指定了账号，只扫描该账号
-            if account_filter and account != account_filter:
-                continue
-            
+        for account in sorted(os.listdir(output_dir)):
             account_dir = os.path.join(output_dir, account)
             if not os.path.isdir(account_dir):
                 continue
-            
-            for drama in os.listdir(account_dir):
+            count = sum(
+                1 for drama in os.listdir(account_dir)
+                if os.path.isdir(os.path.join(account_dir, drama)))
+            accounts.append({'account': account, 'drama_count': count})
+    return jsonify({'accounts': accounts})
+
+
+@app.route('/api/upload/dramas')
+def get_uploadable_dramas():
+    """获取可上传的剧列表 - 支持按账号过滤，带可解释的空状态诊断。
+
+    除成品列表外，为每个账号返回：
+    - plan_account: 后端 assign_account 计划归属（与切片决策一致）
+    - edl_pending:  已有 EDL 方案但成品缺失（切片完成后尚未渲染/后处理）
+    - stuck_tmp:    成品仍卡在 .mp4.tmp 临时文件（后处理中断）
+    - unparsed:     存在 mp4 但版本号解析失败（文件名不符合 _N_ 约定）
+    前端据此解释"为什么没有剧集"，而不是只显示空文案。
+    """
+    output_dir = CONFIG.get('output_dir', 'output')
+    account_filter = request.args.get('account')
+    submit_order = processor.get_submit_order()
+    dramas = []
+    diagnostics = []
+
+    if os.path.exists(output_dir):
+        for account in sorted(os.listdir(output_dir)):
+            account_dir = os.path.join(output_dir, account)
+            if not os.path.isdir(account_dir):
+                continue
+
+            for drama in sorted(os.listdir(account_dir)):
                 drama_dir = os.path.join(account_dir, drama)
                 if not os.path.isdir(drama_dir):
                     continue
-                
-                # 统计版本数量 - 只统计实际存在的视频文件
+
+                plan_account = processor.assign_account(drama, submit_order)
                 versions = []
+                unparsed = []
+                stuck_tmp = []
+                edl_pending = False
+
                 for file in os.listdir(drama_dir):
-                    if file.endswith('.mp4') and 'test' not in file.lower():
-                        # 提取版本号
-                        match = re.search(r'_(\d+)_', file)
-                        if match:
-                            versions.append(int(match.group(1)))
-                
-                if versions:
-                    dramas.append({
+                    lower = file.lower()
+                    if lower.endswith('.mp4.tmp'):
+                        stuck_tmp.append(file)
+                        continue
+                    if not lower.endswith('.mp4') or 'test' in lower:
+                        continue
+                    match = re.search(r'_(\d+)_', file)
+                    if match:
+                        versions.append(int(match.group(1)))
+                    else:
+                        unparsed.append(file)
+
+                # EDL 方案存在但无成品 → 规划了但未渲染完成
+                if not versions and not unparsed:
+                    edl_pending = any(
+                        name.startswith('edl_config_v') and name.endswith('.json')
+                        for name in os.listdir(drama_dir))
+
+                if versions or edl_pending or stuck_tmp or unparsed:
+                    entry = {
                         'account': account,
                         'name': drama,
-                        'versions': sorted(versions),
-                        'version_count': len(versions),
-                        'path': drama_dir
-                    })
-    
-    return jsonify({'dramas': dramas})
+                        'versions': sorted(set(versions)),
+                        'version_count': len(set(versions)),
+                        'plan_account': plan_account,
+                        'path': drama_dir,
+                        'edl_pending': edl_pending,
+                        'stuck_tmp_count': len(stuck_tmp),
+                        'unparsed_count': len(unparsed),
+                    }
+                    # 仅在请求账号范围内返回；诊断信息随每项附带
+                    if not account_filter or account == account_filter:
+                        dramas.append(entry)
+
+                # 全局诊断：计划账号与实际所在目录不一致
+                if account_filter and account == account_filter:
+                    if plan_account and plan_account != account:
+                        diagnostics.append({
+                            'drama': drama,
+                            'actual_account': account,
+                            'plan_account': plan_account,
+                            'reason': f'该剧计划归属 {plan_account}，实际成片在 {account} 目录',
+                        })
+
+    return jsonify({'dramas': dramas, 'diagnostics': diagnostics})
 
 @app.route('/api/files')
 def get_files():

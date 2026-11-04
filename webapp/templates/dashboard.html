@@ -1070,8 +1070,6 @@
                     <div class="upload-controls">
                         <select id="uploadAccount" onchange="loadDramas()">
                             <option value="">选择账号</option>
-                            <option value="福桃说剧">福桃说剧</option>
-                            <option value="小桃追剧中">小桃追剧中</option>
                         </select>
                         <button class="btn btn-secondary" onclick="checkLoginStatus()">🔐 检查登录</button>
                         <button class="btn btn-secondary" onclick="loginAccount()">🔓 登录账号</button>
@@ -1397,6 +1395,9 @@
             if (tab === 'cut') {
                 updateCutUI();
                 refreshCutDramas();
+            }
+            if (tab === 'upload') {
+                loadUploadAccounts();
             }
         }
         
@@ -1751,6 +1752,29 @@
             showNotification('等待登录中...（每5秒检查一次）', 'info');
         }
 
+        // 加载上传账号下拉（来自后端实际目录，不再硬编码）
+        async function loadUploadAccounts() {
+            try {
+                const response = await fetch('/api/upload/accounts');
+                const data = await response.json();
+                const select = document.getElementById('uploadAccount');
+                const current = select.value;
+                const accounts = data.accounts || [];
+                select.innerHTML = '<option value="">选择账号</option>' +
+                    accounts.map(a =>
+                        `<option value="${escapeHtml(a.account)}">${escapeHtml(a.account)} (${Number(a.drama_count) || 0}剧)</option>`
+                    ).join('');
+                if (current && accounts.some(a => a.account === current)) {
+                    select.value = current;
+                } else if (accounts.length > 0) {
+                    select.value = accounts[0].account;
+                    loadDramas();
+                }
+            } catch (error) {
+                console.error('加载账号失败:', error);
+            }
+        }
+
         // 加载剧列表
         async function loadDramas() {
             const account = document.getElementById('uploadAccount').value;
@@ -1764,20 +1788,52 @@
             try {
                 const response = await fetch(`/api/upload/dramas?account=${account}`);
                 const data = await response.json();
-                const dramas = data.dramas.filter(d => d.account === account);
+                const dramas = data.dramas || [];
+                const diagnostics = data.diagnostics || [];
                 
                 if (dramas.length === 0) {
-                    container.innerHTML = '<div style="padding: 20px; text-align: center; color: #666;">暂无可上传的剧集</div>';
+                    // 可解释的空状态：按诊断渲染，而不是只给一句空文案
+                    if (diagnostics.length > 0) {
+                        const diagHtml = diagnostics.map(d => `
+                            <div style="padding: 8px 0; color: #b45309;">
+                                ⚠️ ${escapeHtml(d.reason || '')}
+                            </div>`).join('');
+                        container.innerHTML = `<div style="padding: 20px; text-align: center; color: #666;">
+                            暂无可上传的剧集<br><br>${diagHtml || ''}
+                            <div style="margin-top: 10px; color: #888; font-size: 13px;">
+                                提示：可在上方切换账号，或在切片页重新为该剧指定账号。
+                            </div>
+                        </div>`;
+                    } else {
+                        container.innerHTML = `<div style="padding: 20px; text-align: center; color: #666;">
+                            暂无可上传的剧集<br>
+                            <div style="margin-top: 10px; color: #888; font-size: 13px;">
+                                ${escapeHtml(account)} 目录下暂无已渲染成片。若切片已完成，请检查是否卡在后处理或落在其他账号目录。
+                            </div>
+                        </div>`;
+                    }
+                    window.dramasData = [];
+                    selectedDramas = {};
                     return;
                 }
                 
                 container.innerHTML = dramas.map(drama => {
                     const name = escapeHtml(drama.name);
+                    const planBadge = (drama.plan_account && drama.plan_account !== drama.account)
+                        ? `<span class="plan-mismatch" style="color:#b45309;margin-left:6px;font-size:12px;">计划归 ${escapeHtml(drama.plan_account)}</span>`
+                        : '';
+                    const pendingBadge = drama.edl_pending
+                        ? `<span class="edl-pending" style="color:#6b7280;margin-left:6px;font-size:12px;">EDL已定·待渲染</span>`
+                        : '';
+                    const stuckBadge = drama.stuck_tmp_count > 0
+                        ? `<span class="stuck-tmp" style="color:#b91c1c;margin-left:6px;font-size:12px;">${drama.stuck_tmp_count}个卡临时</span>`
+                        : '';
                     return `
                     <div class="drama-item">
                         <input type="checkbox" class="upload-drama-cb" data-name="${name}">
                         <span class="drama-name">${name}</span>
                         <span class="version-count">${drama.version_count}个版本</span>
+                        ${planBadge}${pendingBadge}${stuckBadge}
                     </div>`;
                 }).join('');
                 // 事件委托替代剧名内联 onchange（防剧名含引号/HTML 的 DOM XSS）
@@ -2748,6 +2804,7 @@
             checkBaidupcsStatus();
             refreshUploadStats();
             refreshCutStats();
+            loadUploadAccounts();
             
             // 加载最近日志
             fetch('/api/logs?limit=50')
