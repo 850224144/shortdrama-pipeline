@@ -450,13 +450,25 @@ class PipelineProcessor:
         返回值即最终输出目录名/水印名，三者（账号/水印/output）统一，
         不再有 "福桃追剧"（逻辑名）与 "福桃说剧"（目录名）的错位。
 
+        稳定性：已切过的剧（state.completed 有记录）复用其历史账号，
+        保证重切/续跑不因 submit_order 漂移到另一账号；新剧才按
+        submit_order 交叉交替。
+
         Args:
-            drama_name: 剧名（保留参数以兼容调用方）
+            drama_name: 剧名
             submit_order: 提交顺序（从0开始），决定交叉轮询的落点
 
         Returns:
             账号名称："小桃追剧中" 或 "福桃说剧"
         """
+        # 已切过的剧：复用历史账号，保证归属稳定（重切不漂移）
+        try:
+            state = self.state_manager.load()
+            for c in state.get('completed', []):
+                if (c.get('name') or '') == drama_name and c.get('account'):
+                    return c['account']
+        except Exception:
+            pass
         if submit_order is not None:
             return "小桃追剧中" if submit_order % 2 == 0 else "福桃说剧"
         # 无序号时按已完成剧数继续交叉（保持轮询连贯）
@@ -2896,6 +2908,10 @@ class PipelineProcessor:
                 "source_dir": src_dir,
                 "source_pattern": source_pattern,
                 "output_dir": out_dir,
+                # 水印文本 = 输出目录的账号名（output/{账号}/{剧名} 的 {账号}），
+                # 与交叉轮询 assign_account 产出一致；render_generic.py 读不到时
+                # 才落回默认"福桃说剧"，这里显式写入保证 账号/水印/输出 三者统一。
+                "watermark_text": os.path.basename(os.path.dirname(out_dir)),
                 "artifacts": artifacts,
                 "videos": [
                     {
@@ -3180,6 +3196,11 @@ class PipelineProcessor:
                 before_pattern = edl_config.get('source_pattern')
                 edl_config = self._repair_config_source_pattern(
                     edl_config, drama_name)
+                # 续跑兼容：旧 config 缺 watermark_text 时补写为输出目录账号名，
+                # 否则 render_generic.py 落回默认"福桃说剧"，水印与账号脱节。
+                if not edl_config.get('watermark_text'):
+                    edl_config['watermark_text'] = os.path.basename(
+                        os.path.dirname(out_dir))
                 if edl_config.get('source_pattern') != before_pattern:
                     tmp_path = config_path + '.tmp'
                     with open(tmp_path, 'w', encoding='utf-8') as f:

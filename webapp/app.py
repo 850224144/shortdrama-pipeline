@@ -933,11 +933,12 @@ def add_cut_task():
         
         drama_name = data.get('drama_name')
         account = data.get('account', '小桃追剧中')
+        force = data.get('force', False)
         
         if not drama_name:
             return jsonify({'status': 'failed', 'error': '缺少剧名'}), 400
         
-        result = batch_cut_manager.add_to_queue(drama_name, account)
+        result = batch_cut_manager.add_to_queue(drama_name, account, force=force)
         
         from flask import Response
         import json
