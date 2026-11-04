@@ -746,6 +746,7 @@ def get_uploadable_dramas():
     diagnostics = []
 
     if os.path.exists(output_dir):
+        _order = submit_order
         for account in sorted(os.listdir(output_dir)):
             account_dir = os.path.join(output_dir, account)
             if not os.path.isdir(account_dir):
@@ -756,7 +757,9 @@ def get_uploadable_dramas():
                 if not os.path.isdir(drama_dir):
                     continue
 
-                plan_account = processor.assign_account(drama, submit_order)
+                # 交叉轮询：每个剧递增序号，模拟「下一个会切到的剧」的归属
+                plan_account = processor.assign_account(drama, _order)
+                _order += 1
                 versions = []
                 unparsed = []
                 stuck_tmp = []
@@ -855,7 +858,7 @@ def get_cuttable_dramas():
         submit_order = processor.get_submit_order()
         
         if os.path.exists(source_dir):
-            for drama in os.listdir(source_dir):
+            for drama in sorted(os.listdir(source_dir)):
                 drama_dir = os.path.join(source_dir, drama)
                 if not os.path.isdir(drama_dir):
                     continue
@@ -867,7 +870,10 @@ def get_cuttable_dramas():
                              if f.lower().endswith('.mp4')]
                 
                 if len(mp4_files) >= 2:
-                    planned_account = processor.assign_account(drama, submit_order)
+                    # 交叉轮询：基于已入选剧数递增序号（而非目录位置），
+                    # 保证列表里严格「一个剧小桃、下一个福桃」循环。
+                    planned_account = processor.assign_account(
+                        drama, submit_order + len(dramas))
                     dramas.append({
                         'name': drama,
                         'episodes': len(mp4_files),

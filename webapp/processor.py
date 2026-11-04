@@ -117,20 +117,6 @@ class DownloadStalled(Exception):
     pass
 
 
-# 题材分类规则
-GENRE_RULES = [
-    (["萌宝", "三宝", "崽", "双胞胎", "找爹", "三岁"], "小桃追剧中"),
-    (["糙汉", "宠妻", "甜宠", "二婚", "闪婚", "先婚后爱"], "小桃追剧中"),
-    (["婆婆", "妈", "娘家", "养母", "孝道", "亲情"], "小桃追剧中"),
-    (["年代", "七零", "八零", "种田", "山村", "农村"], "小桃追剧中"),
-    (["真千金", "假千金", "抱错", "认亲"], "福桃追剧"),
-    (["打脸", "逆袭", "复仇", "重生", "离婚"], "福桃追剧"),
-    (["前夫", "追妻", "后悔", "复婚", "前妻"], "福桃追剧"),
-    (["总裁", "豪门", "陆总", "傅少"], "福桃追剧"),
-    (["战神", "兵王", "赘婿", "龙王", "回归"], "福桃追剧"),
-]
-
-
 class Logger:
     """日志记录器"""
     
@@ -458,27 +444,27 @@ class PipelineProcessor:
         return True, "可以处理"
     
     def assign_account(self, drama_name, submit_order=None):
-        """按题材分配账号（方案3：关键词匹配 + 交替分配）
-        
+        """按交叉顺序分配账号（纯轮询，不再按剧情分类）
+
+        一个剧归小桃追剧中，下一个归福桃说剧，循环。
+        返回值即最终输出目录名/水印名，三者（账号/水印/output）统一，
+        不再有 "福桃追剧"（逻辑名）与 "福桃说剧"（目录名）的错位。
+
         Args:
-            drama_name: 剧名
-            submit_order: 提交顺序（从0开始），用于交替分配
-            
+            drama_name: 剧名（保留参数以兼容调用方）
+            submit_order: 提交顺序（从0开始），决定交叉轮询的落点
+
         Returns:
-            账号名称："小桃追剧中" 或 "福桃追剧"
+            账号名称："小桃追剧中" 或 "福桃说剧"
         """
-        # 1. 关键词精确匹配（优先级最高）
-        for keywords, account in GENRE_RULES:
-            for kw in keywords:
-                if kw in drama_name:
-                    return account
-        
-        # 2. 按提交顺序交替分配（保证均衡）
         if submit_order is not None:
-            return "小桃追剧中" if submit_order % 2 == 0 else "福桃追剧"
-        
-        # 3. 兜底默认
-        return "小桃追剧中"
+            return "小桃追剧中" if submit_order % 2 == 0 else "福桃说剧"
+        # 无序号时按已完成剧数继续交叉（保持轮询连贯）
+        try:
+            order = self.get_submit_order()
+            return "小桃追剧中" if order % 2 == 0 else "福桃说剧"
+        except Exception:
+            return "小桃追剧中"
     
     def get_submit_order(self):
         """获取当前提交顺序"""
