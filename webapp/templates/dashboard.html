@@ -918,16 +918,6 @@
             gap: 12px;
             flex-wrap: wrap;
         }
-        .queue-item .publish-time-badge {
-            display: inline-flex;
-            align-items: center;
-            gap: 4px;
-            background: #e8f4ff;
-            color: #0b6bbd;
-            padding: 1px 8px;
-            border-radius: 10px;
-            font-size: 12px;
-        }
         .queue-item .edit-tip {
             color: #b0b0b0;
             font-size: 11px;
@@ -1875,6 +1865,18 @@
             }
         }
         
+        // 开始上传期间的繁忙标志：提交任务+内容指纹+预检登录可长达分钟级，
+        // 期间禁用按钮并提示，避免"点了没反应"（后台实际在跑）。
+        let startUploadBusy = false;
+        function setStartUploadBusy(busy, text) {
+            startUploadBusy = busy;
+            const btn = document.getElementById('startUploadBtn');
+            if (btn) {
+                btn.disabled = busy;
+                btn.textContent = busy ? (text || '⏳ 正在提交…') : '▶️ 开始上传';
+            }
+        }
+
         // 开始上传
         async function startUpload() {
             console.log('startUpload 被调用');
@@ -1888,6 +1890,11 @@
                 return;
             }
             
+            // 立即反馈：禁用按钮 + 提示，后台在算内容指纹/预检登录（可达分钟级）
+            setStartUploadBusy(true, '⏳ 正在提交任务…');
+            showNotification('正在提交任务并计算内容指纹…', 'info');
+            
+            try {
             console.log('selectedDramas:', selectedDramas);
             console.log('selectedDramas keys:', Object.keys(selectedDramas));
             console.log('window.dramasData:', window.dramasData);
@@ -1950,6 +1957,7 @@
             // 一次请求整批提交（R4：原子批量，无半批次）
             let addedCount = 0;
             let detailMsg = '';
+            let lastResult = null;
             try {
                 const response = await fetch('/api/upload/batches', {
                     method: 'POST',
@@ -1965,6 +1973,7 @@
                 }
                 
                 if (result.status === 'success') {
+                    lastResult = result;
                     addedCount = result.accepted || 0;
                     const dupN = (result.duplicates || []).length;
                     const missN = (result.missing || []).length;
@@ -1988,6 +1997,30 @@
             console.log('总计添加: ' + addedCount + '个任务');
             
             if (addedCount === 0) {
+                // 全部被拒且均为「已在待上传队列中」类型（无 reason = 非内容级查重），
+                // 通常是上次服务重启后 worker 未启动的残留批次：给出清队列提示，
+                // 避免用户点「开始上传」陷入死胡同（重新提交永远被判重）。
+                const dups = (lastResult && lastResult.duplicates) || [];
+                const missN2 = (lastResult && lastResult.missing) ? lastResult.missing.length : 0;
+                const rejN2 = (lastResult && lastResult.rejected) ? lastResult.rejected.length : 0;
+                const allAlreadyQueued = dups.length > 0 &&
+                    dups.every(d => !d.reason) &&
+                    missN2 === 0 && rejN2 === 0;
+                if (allAlreadyQueued) {
+                    const ok = confirm(`检测到 ${dups.length} 个视频已在待上传队列中（可能是上次服务重启残留，worker 未启动）。\n是否清空待上传队列后重新提交？`);
+                    if (ok) {
+                        try {
+                            await fetch('/api/upload/clear', {
+                                method: 'POST',
+                                headers: { 'Content-Type': 'application/json' },
+                                body: JSON.stringify({ status: 'pending' })
+                            });
+                        } catch (e) { /* 清理失败也继续尝试重新提交 */ }
+                        showNotification(`已清空待上传队列，重新提交...`, 'info');
+                        startUpload();
+                        return;
+                    }
+                }
                 showNotification(`没有可上传的视频文件 ${detailMsg}`.trim(), 'error');
                 return;
             }
@@ -2012,6 +2045,10 @@
                 }
             } catch (error) {
                 showNotification('开始上传失败: ' + error.message, 'error');
+            }
+            } finally {
+                // 复位按钮（成功/失败/提前返回都会走到这里）
+                setStartUploadBusy(false);
             }
         }
         
@@ -2109,21 +2146,6 @@
         }
         
         // 更新上传界面
-        // 计划发表时间展示：今天/明天 相对化，其余显示 M-D HH:MM
-        function formatPublishTime(publishTime) {
-            if (!publishTime) return '未设置';
-            const m = String(publishTime).match(/^(\d{4})-(\d{2})-(\d{2})[ T](\d{2}):(\d{2})/);
-            if (!m) return publishTime;
-            const d = new Date(+m[1], +m[2] - 1, +m[3]);
-            const now = new Date();
-            const today = new Date(now.getFullYear(), now.getMonth(), now.getDate());
-            const tomorrow = new Date(today.getTime() + 86400000);
-            const hm = `${m[4]}:${m[5]}`;
-            if (d.getTime() === today.getTime()) return `今天 ${hm}`;
-            if (d.getTime() === tomorrow.getTime()) return `明天 ${hm}`;
-            return `${+m[2]}-${+m[3]} ${hm}`;
-        }
-
         // 上传前手动覆盖任务短标题（仅待上传任务；覆盖值优先于 edl_config）
         async function updateTaskTitle(id, value) {
             const title = (value || '').trim();
@@ -2182,8 +2204,9 @@
                         pauseBtn.onclick = pauseUpload;
                     }
                 } else {
-                    // 不禁用开始上传按钮，让 startUpload 方法检查条件
-                    startBtn.disabled = false;
+                    // 不禁用开始上传按钮，让 startUpload 方法检查条件；
+                    // 但提交任务期间（startUploadBusy）保持禁用，防重复点击。
+                    startBtn.disabled = startUploadBusy;
                     pauseBtn.disabled = true;
                     stopBtn.disabled = true;
                     pauseBtn.textContent = '⏸️ 暂停';
@@ -2200,10 +2223,11 @@
                 // 焦点保护：用户正在编辑标题输入框时，记住 id 与光标位置，重渲染后恢复，
                 // 避免 2s 轮询重新渲染把正在输入的表单冲掉（失焦导致输入中断）。
                 const activeEl = document.activeElement;
-                const editingTaskId = (activeEl && activeEl.tagName === 'INPUT'
-                    && activeEl.dataset && activeEl.dataset.role === 'task-title')
-                    ? activeEl.dataset.id : null;
-                const caretPos = editingTaskId ? activeEl.selectionStart : null;
+                const editingRole = (activeEl && activeEl.dataset &&
+                    activeEl.dataset.role === 'task-title')
+                    ? activeEl.dataset.role : null;
+                const editingTaskId = editingRole ? activeEl.dataset.id : null;
+                const caretPos = (editingRole === 'task-title') ? activeEl.selectionStart : null;
                 
                 if (allTasks.length === 0) {
                     queueContainer.innerHTML = '<div style="padding: 20px; text-align: center; color: #666;">队列为空</div>';
@@ -2228,23 +2252,21 @@
                                 <div class="queue-info">
                                     <div>${escapeHtml(task.drama_name)} V${escapeHtml(task.version)}</div>
                                     <div style="margin-top:3px;">${titleHtml}</div>
-                                    <div class="task-meta-row">
-                                        <span class="publish-time-badge">🕐 计划发表：${escapeHtml(formatPublishTime(task.publish_time))}</span>
-                                        ${isPending ? '<span class="edit-tip">短标题可点击编辑</span>' : ''}
-                                    </div>
                                     ${task.error_message ? `<div class="queue-progress">错误: ${escapeHtml(task.error_message)}</div>` : ''}
                                 </div>
                             </div>`;
                     }).join('');
                 }
                 
-                // 恢复正在编辑的标题输入框焦点与光标位置
-                if (editingTaskId) {
+                // 恢复正在编辑的标题输入框焦点与光标位置；
+                if (editingTaskId && editingRole) {
                     const restored = queueContainer.querySelector(
-                        `input[data-role="task-title"][data-id="${editingTaskId}"]`);
+                        `[data-role="${editingRole}"][data-id="${editingTaskId}"]`);
                     if (restored) {
                         restored.focus();
-                        try { restored.setSelectionRange(caretPos, caretPos); } catch (e) {}
+                        if (editingRole === 'task-title' && caretPos != null) {
+                            try { restored.setSelectionRange(caretPos, caretPos); } catch (e) {}
+                        }
                     }
                 }
                 

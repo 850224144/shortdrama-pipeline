@@ -15,6 +15,7 @@ import sys
 import threading
 import random
 import uuid
+import hashlib
 from datetime import datetime
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
@@ -74,6 +75,32 @@ CONFIG = {
         'reuse_ratio': 0.0,
     },
 
+    # 成品时长：剧情驱动 + 随机（替代固定 target_dur）。
+    # enabled=False → 退回 edl.target_dur 固定行为。min_final/max_final 是
+    # 成片秒数下限/上限（上限 1200 = 20 分钟）。剧情量 = 导演方案叙事单元数
+    # × per_unit + 弧线跨度 × per_spread + 角度加成，每版加 jitter 随机抖动，
+    # 避免所有版本同长（对账号/平台不友好）。渲染会 atempo=1.05 轻微压缩，
+    # 规划预算需 ×1.05 并在预算下限预留 MIN_SEG_DUR 停手间隙。
+    'duration': {
+        'enabled': True,
+        'min_final': 210,      # 成片下限（s），对齐原业务窗口下界
+        'max_final': 1200,     # 成片上限（s）= 20 分钟
+        'per_unit': 32,        # 每叙事单元（集）基础秒数
+        'per_spread': 8,       # 每集弧线跨度加成（s）
+        'jitter': (20, 55),    # 每版随机抖动范围（s）
+        'angle_bonus': {'高潮': 30, '反转': 45, '虐心': 15,
+                        '逆袭': 40, '甜宠': 10, '平淡': 0},
+    },
+
+    # 叙事逻辑因果链校验（报告提案3）：对每版片段拼接顺序做因果链/时间线
+    # 校验，排查逻辑断层/前后矛盾，自动替换破坏连贯性的片段。fail-open：
+    # LLM 失败/无效 → 原样放行，绝不阻塞切片（与 R10 保守放行哲学一致）。
+    'causal_check': {
+        'enabled': True,
+        'max_replace': 2,   # 每版最多自动替换段数（限制成本/改动幅度）
+        'retry': 1,         # LLM 失败重试次数
+    },
+
     # 上传计划发表时间：入队时按版本号自动计算（当天+day_offset 日，times 槽位循环）。
     # V1→times[0]，V2→times[1]…，同批多版本错峰发表；仅计算/记录/展示，不自动定时发表。
     'upload': {
@@ -94,7 +121,9 @@ CONFIG = {
 
     'quality': {
         'min_duration': 180,
-        'max_duration': 300,
+        # 上限放宽到 1260s（20min×1.05 余量）：剧情驱动时长允许长片，
+        # 严格 20min 上限由 _select_best_videos 按 duration.max_final 执行。
+        'max_duration': 1260,
         'min_size_mb': 10
     },
     
@@ -1975,6 +2004,26 @@ class PipelineProcessor:
             self.logger.log('system', 'WARN', f'检查集数连续性失败：{str(e)}')
             return True, [], 0, f'检查失败：{str(e)}'
     
+    def _valid_delivered_filenames(self, out_dir):
+        """返回 out_dir 里通过质量校验的 _去重版.mp4 文件名集合（供清理保留）。
+
+        用于断点续跑：真实成品（已合格）不当作"假成品"删除，崩溃/停止后
+        _re_render_from_configs 的逐版跳过可复用，不必重渲。返回 None 表示
+        扫描失败（调用方回退全清，保守）。只有整集合格成品才可能触发
+        should_process 的"已有成品"闸门，而那只在整剧确实完成时成立。
+        """
+        try:
+            kept = []
+            for f in os.listdir(out_dir):
+                if f.endswith('_去重版.mp4'):
+                    q = self._validate_delivery_media(os.path.join(out_dir, f))
+                    if q.get('ok'):
+                        kept.append(f)
+            return set(kept) if kept else None
+        except Exception as e:
+            self.logger.log('system', 'WARN', f'成品扫描失败（全清）：{e}')
+            return None
+
     def _clean_partial_outputs(self, out_dir, keep_filenames=None, include_configs=True):
         """清理 out_dir 里的渲染产物（P1-A2/A3）。
 
@@ -2219,7 +2268,17 @@ class PipelineProcessor:
             # 子串还会把旧件混进本次交付。
             # include_configs=False：保留历史 edl_config 作为续跑现场，
             # 若本剧之前失败过，_re_render_from_configs 可直接续跑。
-            swept = self._clean_partial_outputs(out_dir, include_configs=False)
+            # 断点续跑增强：保留已通过质量校验的 _去重版.mp4（真实成品而非
+            # 假成品），崩溃后 _re_render_from_configs 的逐版跳过可复用它们，
+            # 不必重渲。should_process 已确认本剧未完成，故保留的只是部分成品，
+            # 不会误判为整剧完成。
+            resume_keep = self._valid_delivered_filenames(out_dir)
+            if resume_keep:
+                self.logger.log(
+                    drama_name, 'INFO',
+                    f'run开始：保留{len(resume_keep)}个已合格成品待续跑复用')
+            swept = self._clean_partial_outputs(out_dir, include_configs=False,
+                                                keep_filenames=resume_keep)
             if swept:
                 self.logger.log(drama_name, 'WARN', f'run开始清理：删除{swept}个历史残留渲染产物（保留EDL配置）')
             
@@ -2236,6 +2295,14 @@ class PipelineProcessor:
             
             # ASR转写（失败续跑时跳过：直接用保留的 edl_config 重渲染，不重新生成）
             resume = bool(resume)
+            # 断点续跑：自动识别有效现场（保留 config + 清单源签名匹配），
+            # 即便传入 resume=False 也接管为续跑，避免崩溃后全量重切白干。
+            # 无清单/源签名不匹配的旧现场 → _resume_scene_valid=False → 全量。
+            if not resume and self._resume_scene_valid(out_dir, src_dir):
+                self.logger.log(
+                    drama_name, 'INFO',
+                    '检测到有效续跑现场（EDL配置+素材签名匹配），自动续跑')
+                resume = True
             if resume:
                 ai_videos = []
                 self._update_state('processing', drama_name, 30, '续跑重渲染中')
@@ -2433,11 +2500,13 @@ class PipelineProcessor:
             self.logger.log(drama_name, 'INFO', f'切片已停止：{str(e)}')
             self._emit_cut_progress('cancelled', 0, '收到停止请求')
             self._update_state('idle', '', 0, '已停止')
-            swept = self._clean_partial_outputs(out_dir, include_configs=False)
+            swept = self._clean_partial_outputs(
+                out_dir, include_configs=False,
+                keep_filenames=self._valid_delivered_filenames(out_dir))
             if swept:
                 self.logger.log(
                     drama_name, 'INFO',
-                    f'停止清理：已删除{swept}个未交付渲染产物（保留EDL配置可续跑）')
+                    f'停止清理：已删除{swept}个未交付渲染产物（保留EDL配置与已合格成品可续跑）')
             return {
                 'name': drama_name,
                 'success': False,
@@ -2456,9 +2525,11 @@ class PipelineProcessor:
             # 未交付半成品；留着它们，重试会被"已有成品/已切完"闸门永久跳过。
             # include_configs=False：保留 edl_config_v*.json 作为失败现场，
             # 供 _re_render_from_configs 续跑（失败可继续处理），不重新生成 EDL。
-            swept = self._clean_partial_outputs(out_dir, include_configs=False)
+            swept = self._clean_partial_outputs(
+                out_dir, include_configs=False,
+                keep_filenames=self._valid_delivered_filenames(out_dir))
             if swept:
-                self.logger.log(drama_name, 'WARN', f'失败清理：已删除{swept}个未交付渲染产物（保留EDL配置可续跑）')
+                self.logger.log(drama_name, 'WARN', f'失败清理：已删除{swept}个未交付渲染产物（保留EDL配置与已合格成品可续跑）')
             return {
                 'name': drama_name,
                 'success': False,
@@ -2679,7 +2750,43 @@ class PipelineProcessor:
         except Exception as e:
             self.logger.log('system', 'ERROR', f'提取台词失败：{str(e)}')
             return [], []
-    
+
+    @staticmethod
+    def _sanitize_short_title(title, max_len=16, min_len=4):
+        """强制短标题规范：去标点/空白 → 截断到 max_len 字，≥min_len 字。
+
+        视频号短标题要求短、无标点、抓人。AI 标题通常已 6-16 字无标点，但
+        AI 失效/去重兜底用『剧名+hook+瞬间』可能超长或带标点；ASR 抽取的
+        16 字金句是更优兜底。本函数对任何来源做最终规范，保证落库标题合规。
+        """
+        import re as _re
+        s = _re.sub(r'[\s\u3000\uff0c\u3001\u3002\uff01\uff1f\uff1b\uff1a\u201c'
+                    r'\u201d\u2018\u2019\u2014\u2013\u2026\uff08\uff09\u3010'
+                    r'\u3011《》【】\[\]\(\)\{\}<>、,.;:!?\'\"|·~\-_]', '',
+                    str(title or ''))
+        s = s.strip()
+        if not s:
+            return ''
+        return s[:max_len] if len(s) >= min_len else s
+
+    def _pick_version_title(self, short_titles, long_titles, v_idx, drama_name,
+                            hook, ai_title=None):
+        """选取本版短标题：优先 AI 标题（6-16字无标点），失效时用 ASR 金句，
+        最后兜底『剧名+hook+瞬间』，统一经 _sanitize_short_title 规范。"""
+        s = self._sanitize_short_title(ai_title) if ai_title else ''
+        if not s and short_titles:
+            s = self._sanitize_short_title(
+                short_titles[v_idx % len(short_titles)])
+        if not s and long_titles:
+            s = self._sanitize_short_title(
+                long_titles[v_idx % len(long_titles)])
+        if not s:
+            s = self._sanitize_short_title(f'{drama_name}{hook}瞬间')
+        if not s:
+            s = '精彩瞬间'
+        return s
+
+
     def parse_episode_number(self, filename):
         """解析文件名中的集数，兼容 '1.mp4' 和 '第1集.mp4' 等格式"""
         # 格式1: 第X集.mp4
@@ -2750,7 +2857,13 @@ class PipelineProcessor:
         if not ep_nums:
             self.logger.log(drama_name, 'ERROR', '未找到有效的剧集文件')
             return []
-        
+        # 断点续跑：记录素材签名 + 初始化清单。若本次中途崩溃，_cut_once 据此
+        # 自动识别有效现场并续跑（源签名匹配才续，素材变了则全量重切）。
+        self._save_resume_manifest(out_dir, {
+            'source_sig': self._source_signature(src_dir),
+            'versions': {},
+        })
+
         # 使用AI生成文案
         titles = []
         descriptions = []
@@ -2823,16 +2936,22 @@ class PipelineProcessor:
                         except Exception:
                             continue
                     if not dedup_ok:
-                        ai_result['title'] = f'{drama_name}{hook}瞬间'
+                        ai_result['title'] = self._pick_version_title(
+                            short_titles, long_titles, v_idx, drama_name, hook)
                         self.logger.log(drama_name, 'WARN', f'V{v_idx+1} 标题去重兜底为模板')
-                titles.append(ai_result['title'])
+                # 短标题规范：任何来源统一 ≤16 字无标点（AI 失效/超长都兜住）
+                _st = self._pick_version_title(
+                    short_titles, long_titles, v_idx, drama_name, hook,
+                    ai_title=ai_result.get('title'))
+                titles.append(_st)
                 descriptions.append(ai_result['description'])
                 hashtags_list.append(ai_result['hashtags'])
                 self.logger.log(drama_name, 'INFO', f'V{v_idx+1} AI文案生成成功')
             except Exception as e:
-                # AI失败时使用模板
+                # AI失败时使用模板（优先 ASR 金句短标题）
                 self.logger.log(drama_name, 'WARN', f'V{v_idx+1} AI文案生成失败，使用模板: {e}')
-                titles.append(f'{drama_name}{hook}瞬间')
+                titles.append(self._pick_version_title(
+                    short_titles, long_titles, v_idx, drama_name, hook))
                 descriptions.append(f'{drama_name}精彩剧情，{hook}瞬间，不容错过！')
                 hashtags_list.append(["#短剧", "#短剧推荐", "#热门", f"#{hook}"])
         
@@ -2880,6 +2999,9 @@ class PipelineProcessor:
                                                            plan=edl_plan,
                                                            used_global=used_global)
             else:
+                # 随机兜底路径也按剧情驱动预算（_generate_reverse_segments 内部已设）
+                self._active_seg_target = self._compute_version_budget(
+                    edl_plan, v_idx, None)
                 segments = self._generate_random_segments(edl_eps, v_idx,
                                                           used_global=used_global)
             
@@ -2887,7 +3009,24 @@ class PipelineProcessor:
                 verdicts[v_idx] = {'status': 'not_rendered',
                                    'reason': '未能生成EDL片段'}
                 continue
-            
+
+            # 因果链校验（报告提案3）：对段序列做相邻因果/时间线校验，自动替换
+            # 断层段。fail-open：LLM 失败/无台词 → 原样放行，绝不阻塞版本生成。
+            if use_reverse and CONFIG.get('causal_check', {}).get('enabled', True):
+                try:
+                    _hl = self._load_episode_highlights(
+                        edl_eps, drama_name=drama_name)
+                    segments = self._causal_check_segments(
+                        segments, _hl, drama_name, out_dir, v_idx,
+                        used_global=used_global)
+                except Exception as _e:
+                    self.logger.log(drama_name, 'WARN',
+                                    f'因果链校验跳过（原样放行）：{_e}')
+            if not segments:
+                verdicts[v_idx] = {'status': 'not_rendered',
+                                   'reason': '因果链替换后无片段'}
+                continue
+
             # source_pattern 已在循环外统一计算（fail-fast ①，所有版本共享同一源模式）
             # 交付文件名的安全剧名（与 render_generic 一致：全角/半角逗号、空格 → _）
             drama_safe = drama_name.replace('，', '_').replace(',', '_').replace(' ', '_')
@@ -2961,6 +3100,10 @@ class PipelineProcessor:
                 videos.append(video)
                 consecutive_fail = 0
                 last_fail_cat = None
+                # 断点续跑：标记本版完成（主路径不删 config，靠清单+文件存在性幂等）
+                self._mark_resume_version(
+                    out_dir, v_idx, status='post_done',
+                    artifact=video.get('filename'))
             else:
                 # fail-fast ②：连续同类别失败 = 系统性错误（源文件缺失/编码器故障等），
                 # 剩余版本必然同样失败，立即停止。不同类或单次失败视为偶发，继续。
@@ -3163,6 +3306,90 @@ class PipelineProcessor:
                             f'V{v_idx+1} EDL异常（{fail_cat}）：{str(e)}')
             return None, fail_cat, {'status': 'render_failed', 'reason': fail_cat or '未知'}
 
+    # ------------------------------------------------------------------
+    # 断点续跑：版本级 checkpoint 清单（.resume_state.json）
+    # 清单记录 source_sig + 每版本阶段状态，崩溃后 _cut_once 自动识别
+    # 有效现场并续跑；无清单/源签名不匹配的旧现场回退全量重切（保守）。
+    # 文件存在性校验是权威（清单只是提示），_clean_partial_outputs 删了
+    # 产物后清单虽标 done 但仍会按文件缺失重渲，不会误跳过。
+    # ------------------------------------------------------------------
+    @staticmethod
+    def _resume_manifest_path(out_dir):
+        return os.path.join(out_dir, '.resume_state.json')
+
+    def _load_resume_manifest(self, out_dir):
+        try:
+            with open(self._resume_manifest_path(out_dir), 'r',
+                      encoding='utf-8') as f:
+                data = json.load(f)
+            if isinstance(data, dict):
+                return data
+        except Exception:
+            pass
+        return {}
+
+    def _save_resume_manifest(self, out_dir, manifest):
+        try:
+            path = self._resume_manifest_path(out_dir)
+            tmp = path + '.tmp'
+            with open(tmp, 'w', encoding='utf-8') as f:
+                json.dump(manifest, f, ensure_ascii=False, indent=1)
+            os.replace(tmp, path)
+        except Exception as e:
+            self.logger.log('system', 'WARN', f'续跑清单写入失败：{e}')
+
+    def _mark_resume_version(self, out_dir, v_idx, status='post_done', **extra):
+        """记录某版本阶段完成（原子更新清单）。status: post_done/qc_done。"""
+        manifest = self._load_resume_manifest(out_dir)
+        versions = manifest.setdefault('versions', {})
+        entry = versions.setdefault(str(v_idx), {})
+        entry['status'] = status
+        entry['ts'] = datetime.now().isoformat(timespec='seconds')
+        for k, v in extra.items():
+            entry[k] = v
+        self._save_resume_manifest(out_dir, manifest)
+
+    def _source_signature(self, src_dir):
+        """素材签名：集号 + 文件 mtime，识别素材是否变化（防旧 config 续跑错乱）。"""
+        try:
+            episodes = self.list_episodes(src_dir)
+            return {
+                'eps': [int(e[0]) for e in episodes],
+                'mtimes': [int(os.path.getmtime(e[1])) for e in episodes],
+            }
+        except Exception as e:
+            self.logger.log('system', 'WARN', f'素材签名计算失败：{e}')
+            return None
+
+    def _resume_scene_valid(self, out_dir, src_dir):
+        """是否有可续跑的现场：有保留 config 且清单源签名匹配当前素材。
+
+        无清单（改造前的旧失败现场）→ 不自动接管，回退全量重切（保守），
+        避免素材已变却拿旧 config 续跑出错误成片。签名算不出 → 放行续跑。
+        """
+        configs = sorted(glob.glob(os.path.join(out_dir, 'edl_config_v*.json')))
+        if not configs:
+            return False
+        manifest = self._load_resume_manifest(out_dir)
+        stored = manifest.get('source_sig')
+        if not stored:
+            return False
+        cur = self._source_signature(src_dir)
+        if cur is None:
+            return True
+        return stored == cur
+
+    def _find_version_final(self, out_dir, v_idx):
+        """按版本号锚定查找最终成品（与 _run_render_one 相同正则）。"""
+        pat = re.compile(rf'_{v_idx + 1}_[^_]*_去重版\.mp4$|V{v_idx + 1}\.mp4$')
+        try:
+            for f in os.listdir(out_dir):
+                if f.endswith('.mp4') and pat.search(f):
+                    return os.path.join(out_dir, f)
+        except OSError:
+            pass
+        return None
+
     def _re_render_from_configs(self, drama_name, out_dir, cancel_event=None):
         """失败续跑：读 out_dir 里保留的 edl_config_v*.json，只重渲染，不重新生成 EDL。
 
@@ -3190,6 +3417,7 @@ class PipelineProcessor:
             self._emit_cut_progress(
                 'render', min(88, 45 + int(40 * v_idx / max(1, len(config_paths)))),
                 f'续跑渲染 V{v_idx + 1}', version=v_idx + 1)
+            edl_config = None
             try:
                 with open(config_path, encoding='utf-8') as f:
                     edl_config = json.load(f)
@@ -3215,6 +3443,42 @@ class PipelineProcessor:
                                 f'续跑 V{v_idx+1}：{seg_count}个片段，配置 {os.path.basename(config_path)}')
             except Exception as e:
                 self.logger.log(drama_name, 'WARN', f'续跑读取配置失败 {os.path.basename(config_path)}: {e}')
+            # 断点续跑：该版本最终成品已存在且通过质量校验 → 跳过重渲染。
+            # 覆盖两种崩溃场景：①渲染成功、config 删除前崩溃；②成功交付后再
+            # 触发续跑（幂等）。文件存在性+质量校验是权威，清单只是提示。
+            final_path = None
+            if isinstance(edl_config, dict):
+                try:
+                    cfg_final = edl_config.get('artifacts', {}).get('video_path')
+                    if cfg_final and os.path.exists(cfg_final):
+                        final_path = cfg_final
+                except Exception:
+                    final_path = None
+            if not final_path:
+                final_path = self._find_version_final(out_dir, v_idx)
+            if final_path and os.path.exists(final_path):
+                try:
+                    q = self._validate_delivery_media(final_path)
+                except Exception:
+                    q = {'ok': False}
+                if q.get('ok'):
+                    self.logger.log(
+                        drama_name, 'INFO',
+                        f'续跑 V{v_idx+1} 成品已存在且合格，跳过重渲染：'
+                        f'{os.path.basename(final_path)}')
+                    videos.append({'path': final_path, 'final_path': final_path,
+                                   'filename': os.path.basename(final_path),
+                                   'type': 'edl'})
+                    verdicts[v_idx] = {'status': 'accepted',
+                                       'reason': '已存在(跳过重渲)'}
+                    self._mark_resume_version(
+                        out_dir, v_idx, status='post_done',
+                        artifact=os.path.basename(final_path))
+                    try:
+                        os.remove(config_path)
+                    except OSError:
+                        pass
+                    continue
             video, fail_cat, _verdict = self._run_render_one(
                 drama_name, out_dir, v_idx, config_path,
                 cancel_event=cancel_event)
@@ -3232,6 +3496,10 @@ class PipelineProcessor:
                 videos.append(video)
                 consecutive_fail = 0
                 last_fail_cat = None
+                # 断点续跑：标记本版完成（清单源签名+状态，供 _cut_once 自动识别现场）
+                self._mark_resume_version(
+                    out_dir, v_idx, status='post_done',
+                    artifact=video.get('filename'))
                 # P2-4: 渲染成功即删除该版本 config——失败路径保留 config 以便续跑，
                 # 成功删除避免 stale config 跨 run 累积、下次续跑重复渲染抬高 real_count
                 try:
@@ -3267,17 +3535,278 @@ class PipelineProcessor:
     # 18 个 15s 碎段；30s 更接近“前铺垫+完整冲突+后反应”的可观看单元。
     HIGHLIGHT_WINDOW_MIN = 30.0
 
+    def _compute_version_budget(self, plan, v_idx, eps_hl):
+        """剧情驱动 + 随机：计算本版 EDL 规划预算（秒）。
+
+        剧情量 = 导演方案叙事单元数（集数）× per_unit + 弧线跨度 × per_spread
+        + 角度加成；每版加 jitter 随机抖动（避免所有版本同长），clamp 到
+        [min_final, max_final]（成片秒数）。渲染会 atempo=1.05 轻微压缩，故
+        预算 = 成片目标 × 1.05；且预算下限预留 MIN_SEG_DUR 停手间隙，保证
+        成片 ≥ min_final（add() 在预算剩 ≤MIN_SEG_DUR 时停手）。
+
+        enabled=False 或 plan 缺失 → 退回固定 CONFIG['edl']['target_dur']。
+        """
+        cfg = CONFIG.get('duration', {})
+        if not cfg.get('enabled', True):
+            return float(CONFIG['edl'].get('target_dur', 200.0))
+        min_final = float(cfg.get('min_final', 210))
+        max_final = float(cfg.get('max_final', 1200))
+        per_unit = float(cfg.get('per_unit', 32))
+        per_spread = float(cfg.get('per_spread', 8))
+        angle_bonus = cfg.get('angle_bonus', {}) or {}
+        jl, jh = cfg.get('jitter', (20, 55))
+        # 剧情量：导演方案的叙事集序列 → 单元数 + 时间线跨度
+        order = []
+        vplan = plan[v_idx] if (plan and v_idx < len(plan)) else None
+        if vplan and eps_hl:
+            try:
+                order = self._build_arc_order(
+                    eps_hl, vplan.get('opening_ep'),
+                    vplan.get('order_type', 'reverse'))
+            except Exception:
+                order = []
+        units = max(1, len(order))
+        spread = 1
+        if order:
+            spread = max(order) - min(order) + 1
+        ab = 0.0
+        if vplan:
+            try:
+                ab = float(angle_bonus.get(vplan.get('angle', ''), 0) or 0)
+            except (TypeError, ValueError):
+                ab = 0.0
+        base = per_unit * units + per_spread * spread + ab
+        try:
+            jitter = random.uniform(float(jl), float(jh))
+        except (TypeError, ValueError):
+            jitter = 0.0
+        final_target = min(max(base + jitter, min_final), max_final)
+        # 预算下限：保证成片 ≥ min_final（add 停手最大间隙 = MIN_SEG_DUR）
+        min_budget = min_final * 1.05 + self.MIN_SEG_DUR
+        budget = min(max(final_target * 1.05, min_budget), max_final * 1.05)
+        self.logger.log(
+            'system', 'INFO',
+            f'时长规划 V{v_idx+1}：剧情 {units}集×{per_unit}s + 跨度'
+            f'{spread}×{per_spread}s + 角度{ab:.0f}s + 抖动{jitter:.0f}s'
+            f' → 成片目标 {final_target:.0f}s（预算 {budget:.0f}s）')
+        return round(budget, 1)
+
     def _seg_budget_left(self, segments):
         """规划总时长预算还剩多少秒。
 
-        方案B（non_overlap）：预算 = CONFIG['edl']['target_dur']（如 200s）。
+        方案B（non_overlap）：预算 = _active_seg_target（剧情驱动，由
+        _compute_version_budget 按版本设定）或 CONFIG['edl']['target_dur']。
         否则用 PLANNED_SEGS_MAX（285s）原逻辑。
         """
-        if CONFIG['edl'].get('non_overlap'):
-            target = float(CONFIG['edl'].get('target_dur', 200.0))
-        else:
-            target = self.PLANNED_SEGS_MAX
+        target = getattr(self, '_active_seg_target', None)
+        if target is None:
+            if CONFIG['edl'].get('non_overlap'):
+                target = float(CONFIG['edl'].get('target_dur', 200.0))
+            else:
+                target = self.PLANNED_SEGS_MAX
         return target - sum(s["duration"] for s in segments)
+
+    def _causal_check_segments(self, segments, eps_hl, drama_name, out_dir,
+                               v_idx, used_global=None):
+        """叙事逻辑因果链校验（报告提案3）。
+
+        对有序段序列做相邻因果链/时间线校验：LLM 判定断层位置，自动用同集
+        未用候选替换（≤max_replace/版），并维护 used_global 跨版本去重不变量。
+        fail-open：LLM 失败/超时/无效 → 原样放行；无台词段/全无台词 → 视为
+        连贯放行。结果按段序列哈希缓存于 out_dir/causal_check_v{n}.json，
+        命中不重复调 API（重跑 0 成本）。
+
+        Returns: 修改后的 segments（或原样）。
+        """
+        cfg = CONFIG.get('causal_check', {})
+        if not cfg.get('enabled', True):
+            return segments
+        if not segments or len(segments) < 2:
+            return segments
+        max_replace = int(cfg.get('max_replace', 2))
+        retry = int(cfg.get('retry', 1))
+
+        raw_cache = {}
+
+        def ep_raw(ep_num):
+            e = next((x for x in eps_hl if x.get('episode') == ep_num), None)
+            if e is None or not e.get('path'):
+                return []
+            if ep_num not in raw_cache:
+                try:
+                    jp = os.path.join(
+                        os.path.dirname(os.path.abspath(e['path'])), 'transcribe',
+                        'EP' + os.path.splitext(
+                            os.path.basename(e['path']))[0] + '.json')
+                    with open(jp, 'r', encoding='utf-8') as f:
+                        raw_cache[ep_num] = json.load(f) or []
+                except Exception:
+                    raw_cache[ep_num] = []
+            return raw_cache[ep_num]
+
+        def seg_text(seg):
+            raw = ep_raw(seg.get('episode'))
+            if not raw:
+                return ''
+            st = float(seg.get('start', 0))
+            en = st + float(seg.get('duration', 0))
+            return ' '.join(s.get('text', '') for s in raw
+                            if float(s.get('start', 0)) < en
+                            and float(s.get('end', st)) > st).strip()[:160]
+
+        try:
+            seg_lines = []
+            for i, seg in enumerate(segments):
+                t = seg_text(seg)
+                st = float(seg.get('start', 0))
+                seg_lines.append(
+                    f"[{i}] 第{seg.get('episode')}集 [{st:.0f}-"
+                    f"{st + float(seg.get('duration', 0)):.0f}s] {t or '（无台词）'}")
+            if not any(seg_text(s) for s in segments):
+                return segments  # 全无台词（关键词兜底），无法判断 → 放行
+
+            sig = hashlib.md5(json.dumps([
+                {'ep': s.get('episode'),
+                 'st': round(float(s.get('start', 0)), 1),
+                 'd': round(float(s.get('duration', 0)), 1)}
+                for s in segments], ensure_ascii=False).encode('utf-8')).hexdigest()[:16]
+            cache_path = os.path.join(
+                out_dir, f'{self.CAUSAL_CACHE_PREFIX}{v_idx + 1}.json')
+            breaks = None
+            try:
+                with open(cache_path, 'r', encoding='utf-8') as f:
+                    c = json.load(f)
+                if isinstance(c, dict) and c.get('sig') == sig:
+                    breaks = c.get('breaks')
+            except Exception:
+                pass
+            if breaks is None:
+                breaks = self._causal_check_llm(drama_name, seg_lines, retry)
+                if breaks is None:
+                    return segments  # fail-open：LLM 失败 → 原样放行
+                try:
+                    tmp = cache_path + '.tmp'
+                    with open(tmp, 'w', encoding='utf-8') as f:
+                        json.dump({'sig': sig, 'breaks': breaks,
+                                   'ts': datetime.now().isoformat(
+                                       timespec='seconds')},
+                                  f, ensure_ascii=False, indent=1)
+                    os.replace(tmp, cache_path)
+                except Exception:
+                    pass
+            if not breaks:
+                return segments
+
+            segs = list(segments)
+            replaced = 0
+            for b in breaks:
+                if replaced >= max_replace:
+                    break
+                try:
+                    idx = int(b.get('index'))
+                except (TypeError, ValueError, AttributeError):
+                    continue
+                if not (0 <= idx < len(segs)):
+                    continue
+                old = segs[idx]
+                cands = self._causal_replacement_cands(
+                    eps_hl, old, segs, used_global)
+                if not cands:
+                    self.logger.log(
+                        drama_name, 'INFO',
+                        f'因果链 V{v_idx+1} 段{idx} 断层'
+                        f'（{str(b.get("reason", ""))[:40]}）但同集无未用候选，保留')
+                    continue
+                new = cands[0]
+                if used_global is not None:
+                    used_global.discard((old.get('episode'),
+                                         round(float(old.get('start', 0)), 1)))
+                    used_global.add((new['episode'], round(float(new['start']), 1)))
+                self.logger.log(
+                    drama_name, 'INFO',
+                    f'因果链 V{v_idx+1} 段{idx} 替换：第{old.get("episode")}集'
+                    f'[{float(old.get("start", 0)):.0f}s] → 第{new["episode"]}集'
+                    f'[{float(new["start"]):.0f}s]'
+                    f'（{str(b.get("reason", ""))[:40]}）')
+                segs[idx] = {'episode': new['episode'],
+                             'start': round(float(new['start']), 1),
+                             'duration': round(float(new['dur']), 1)}
+                replaced += 1
+            return segs
+        except Exception as e:
+            self.logger.log('system', 'WARN',
+                            f'因果链校验异常（原样放行）：{e}')
+            return segments
+
+    def _causal_check_llm(self, drama_name, seg_lines, retry=1):
+        """调 GLM 因果链校验，返回 breaks 列表；失败/无效 → None（fail-open）。"""
+        try:
+            ai = AICopyGenerator()
+            if not ai.enabled:
+                return None
+            prompt = self._CAUSAL_PROMPT.format(
+                count=len(seg_lines), seg_lines='\n'.join(seg_lines))
+            for _ in range(int(retry) + 1):
+                try:
+                    content = ai.chat_json(prompt)
+                except Exception:
+                    content = None
+                if not content:
+                    continue
+                try:
+                    data = json.loads(content)
+                except json.JSONDecodeError:
+                    i, j = content.find('{'), content.rfind('}')
+                    if i < 0 or j <= i:
+                        continue
+                    try:
+                        data = json.loads(content[i:j + 1])
+                    except json.JSONDecodeError:
+                        continue
+                if not isinstance(data, dict):
+                    continue
+                breaks = data.get('breaks')
+                if isinstance(breaks, list):
+                    out = []
+                    for b in breaks:
+                        if isinstance(b, dict):
+                            try:
+                                out.append({'index': int(b['index']),
+                                            'reason': str(
+                                                b.get('reason', ''))[:80]})
+                            except (KeyError, TypeError, ValueError):
+                                continue
+                    return out
+                return []
+            return None
+        except Exception:
+            return None
+
+    def _causal_replacement_cands(self, eps_hl, old_seg, segs, used_global):
+        """为断层次找替换候选：仅同集未用候选（保守，避免引入新跨集跳切）。
+
+        同集优先保证叙事邻近；同集无未用候选 → []（调用方保留原段）。
+        候选必须未在 used_global（维持跨版本零复用）。返回按 score 降序。
+        """
+        out = []
+        for e in eps_hl:
+            if e.get('episode') != old_seg.get('episode'):
+                continue
+            for c in e.get('cands', []):
+                try:
+                    st = float(c.get('start', 0))
+                    dur = float(c.get('dur', c.get('duration', 20)))
+                except (TypeError, ValueError):
+                    continue
+                if dur < self.MIN_SEG_DUR:
+                    continue
+                if used_global is not None and \
+                        (e.get('episode'), round(st, 1)) in used_global:
+                    continue
+                out.append({'episode': e.get('episode'), 'start': st,
+                            'dur': dur, 'score': float(c.get('score', 0))})
+        out.sort(key=lambda x: -x['score'])
+        return out
 
     def _nonoverlap_cands(self, llm_cands, ep_dur, seg_dur):
         """方案B：把 LLM 候选（可能互相重叠的窗口）重排为互不重叠的 seg_dur 段。
@@ -3469,6 +3998,26 @@ class PipelineProcessor:
         "- feedback 必须具体可执行（如'版本2 开头集平淡，换到第12集反转'）\n"
         "- 无重大问题的给 score ≥ 0.75；只有明显缺陷才给 <0.65\n"
     )
+
+    _CAUSAL_PROMPT = (
+        "你是短剧叙事逻辑审稿人。下面是一版成片的有序片段拼接序列，每段是"
+        "某集的一个时间窗（含台词摘要）。请判断相邻片段是否构成因果连贯的"
+        "叙事链：前一段的剧情/台词是否自然引出后一段，有无逻辑断层、前后"
+        "矛盾、时间线冲突（后段时间早于前段却无闪回交代、台词指涉的人物/"
+        "事件前文未出现、情绪或情节突兀跳跃）。\n\n"
+        "片段序列（{count} 段）：\n{seg_lines}\n\n"
+        "只输出一个 JSON 对象：\n"
+        '{{"breaks": [{{"index": 3, "reason": "第3段接第4段断层：…"}}]}}\n\n'
+        "说明：\n"
+        "- breaks 里 index 表示『从段 index-1 过渡到段 index 时不连贯』（1..count-1；"
+        "index=0 表示开头钩子自身突兀）；index 唯一。\n"
+        "- 全链连贯则 breaks 为空数组 []。\n"
+        "- 只标真正的断层（台词/事件接不上、矛盾、时间倒挂），不要因节奏慢或"
+        "情绪平而标。\n"
+    )
+
+    # 因果链校验：段序列哈希缓存文件名（out_dir 下），命中不重复调 API。
+    CAUSAL_CACHE_PREFIX = 'causal_check_v'
 
     # A3 审稿通过线（5 维均分）。低于此反馈 Director 重试。
     REVIEW_SCORE_MIN = 0.65
@@ -4087,6 +4636,9 @@ class PipelineProcessor:
         任何版本都跳过已用段 → 版本间零复用同一个素材片段。None 关闭。
         """
         eps_hl = self._load_episode_highlights(edl_eps, drama_name=drama_name)
+        # 剧情驱动时长：按本版导演方案计算规划预算（随机兜底路径也用它）
+        self._active_seg_target = self._compute_version_budget(
+            plan, v_idx, eps_hl)
         if not eps_hl:
             # 没有 ASR 转写（未跑通或素材缺转写）：退回随机逻辑，保证版本开得出
             return self._generate_random_segments(edl_eps, v_idx,
@@ -4172,12 +4724,20 @@ class PipelineProcessor:
         if not add(opening["episode"], oc["start"], oc["dur"]):
             # P4 方案1：零复用失败（该开头段已被前面版本占用）时受控复用兜底，
             # 保证次轮版本也有开头钩子；预算耗尽则仍失败（reuse 也救不了）。
-            if not add(opening["episode"], oc["start"], oc["dur"], reuse=True):
+            # 兜底须受 allow_controlled_reuse 门控：默认 False（禁止跨版本复用）
+            # 时保持绝对零复用，不因开头占用而强制复刻（否则违背用户去重配置）。
+            allow_reuse = bool(CONFIG['edl'].get('allow_controlled_reuse', False))
+            if allow_reuse and not add(opening["episode"], oc["start"],
+                                       oc["dur"], reuse=True):
                 # P2-3: LLM 候选只过滤 dur>=8.0，但 add 要求 >=MIN_SEG_DUR(15s)，
                 # 8-15s 候选会静默丢失导致开头退化为非计划集——显式告警不再静默。
                 self.logger.log('system', 'WARN',
                                 f'开头钩子第{opening["episode"]}集 {oc["start"]}s/{oc["dur"]}s '
                                 f'未入段（<{self.MIN_SEG_DUR}s 最短段或预算耗尽），开头钩子跳过')
+            elif not allow_reuse:
+                self.logger.log('system', 'INFO',
+                                f'开头钩子第{opening["episode"]}集 {oc["start"]}s/{oc["dur"]}s '
+                                f'已被占用且禁止跨版本复用，跳过（保持零复用）')
 
         # 2. 叙事顺序：导演方案 order_type（钩子→前因闪回→顺叙结局）；
         #    无方案回退集号逆序（原逻辑）。
@@ -4361,8 +4921,13 @@ class PipelineProcessor:
         valid_videos = []
         for v in videos:
             duration = self._get_video_duration(v.get("path", ""))
-            # 业务要求成片>=210秒(3.5分钟)，原来错写成110-130，会把短的当最佳
-            if 210 <= duration <= 300:
+            # 业务要求成片在 [min_final, max_final]（剧情驱动时长，默认
+            # 210s-20min）；原来错写成110-130会把短的当最佳。渲染会
+            # atempo=1.05 压缩，故以成片实测 duration 判定。
+            _dcfg = CONFIG.get('duration', {})
+            _lo = float(_dcfg.get('min_final', 210))
+            _hi = float(_dcfg.get('max_final', 1200))
+            if _lo <= duration <= _hi:
                 v["duration"] = duration
                 valid_videos.append(v)
         

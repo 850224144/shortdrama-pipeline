@@ -99,6 +99,14 @@ class TestReRenderFromConfigs(unittest.TestCase):
         with tempfile.TemporaryDirectory() as d:
             _write_config(d, 1)
             _write_config(d, 2)
+            # _write_config 预置了 V1/V2 成品 mp4。断点续跑新增的"已存在成品
+            # 跳过重渲"逻辑会读 config.artifacts.video_path 把它当成功成品接受，
+            # 抢在渲染失败判定前。要测 V1 真实渲染失败路径：只删 V1 成品（强制
+            # 走渲染→fake_run returncode=1→失败跳过），保留 V2 成品（走"已存在
+            # 成品接受"→成功）。这样 videos 应只含 V2。
+            v1_mp4 = os.path.join(d, '测试剧_1_打脸_去重版.mp4')
+            if os.path.exists(v1_mp4):
+                os.remove(v1_mp4)
             def fake_run(cmd, **kw):
                 m = mock.MagicMock()
                 m.returncode = 1 if 'edl_config_v1' in cmd[-1] else 0
@@ -107,9 +115,12 @@ class TestReRenderFromConfigs(unittest.TestCase):
             with mock.patch('processor.subprocess.run', side_effect=fake_run), \
                  mock.patch.object(p, '_update_config_artifacts'), \
                  mock.patch.object(p, '_validate_delivery_media',
-                                   return_value={'ok': True, 'reason': ''}):
+                                   return_value={'ok': True, 'reason': ''}), \
+                 mock.patch.object(p, '_find_version_final',
+                                   return_value=None) as mff:
                 videos = p._re_render_from_configs('测试剧', d)
             self.assertEqual(len(videos), 1, 'V1 失败应跳过，V2 成功')
+            mff.assert_called()
 
     def test_manual_cut_resume_falls_back_to_full(self):
         """无保留 config → manual_cut(resume=True) 回退全量（不抛）"""
