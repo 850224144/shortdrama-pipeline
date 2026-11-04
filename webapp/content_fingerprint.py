@@ -302,7 +302,10 @@ class FingerprintStore:
 
     def find_similar(self, account, seq, threshold, exclude_path=None,
                      include_pending=False):
-        """同账号下与 seq 内容相似（≥threshold）的已上传/已入队指纹。
+        """查找与 seq 内容相似（≥threshold）的已上传/已入队指纹。
+
+        account=None 时跨全部账号查询，用于防止同一作品换账号重复发布；
+        传入账号时保持原有同账号语义。
 
         include_pending: 是否包含未上传（pending/uploading）记录（入队查重用）。
         返回 [{drama_name, version, account, video_path, filename, uploaded,
@@ -313,15 +316,18 @@ class FingerprintStore:
             conn = self._connect()
             try:
                 conn.row_factory = sqlite3.Row
+                where = []
+                values = []
+                if account is not None:
+                    where.append('account=?')
+                    values.append(account)
                 if exclude_path:
-                    rows = conn.execute('''
-                        SELECT * FROM content_fingerprints
-                        WHERE account=? AND video_path != ?
-                    ''', (account, exclude_path)).fetchall()
-                else:
-                    rows = conn.execute('''
-                        SELECT * FROM content_fingerprints WHERE account=?
-                    ''', (account,)).fetchall()
+                    where.append('video_path != ?')
+                    values.append(exclude_path)
+                sql = 'SELECT * FROM content_fingerprints'
+                if where:
+                    sql += ' WHERE ' + ' AND '.join(where)
+                rows = conn.execute(sql, tuple(values)).fetchall()
             finally:
                 conn.close()
         out = []

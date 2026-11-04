@@ -415,14 +415,15 @@ class TestPlanBNonOverlap(unittest.TestCase):
         p, eps = self._eps_hl(10)   # 10集 × 2段 = 20段
         with mock.patch.object(p, '_load_episode_highlights', return_value=eps):
             vc = p._capacity_version_count(['x'], '测试剧')
-        # 10 集按集数判定为 6 版；不足部分将由受控复用补足。
-        self.assertEqual(vc, 6, '增量策略按集数目标，不再压到 4 版')
+        # 20 个独立段 / 每版 10 段 = 最多 2 版；默认禁止跨版本复用。
+        self.assertEqual(vc, 2, '容量不足时应减少版本数，而不是复用凑 6 版')
 
     def test_capacity_version_count_30eps_targets_8(self):
         p, eps = self._eps_hl(30)
         with mock.patch.object(p, '_load_episode_highlights', return_value=eps):
             vc = p._capacity_version_count([f'x{i}' for i in range(30)], '测试剧')
-        self.assertEqual(vc, 8)
+        # 30 集 × 2 段 = 60 段，只够 6 个零复用版本。
+        self.assertEqual(vc, 6)
 
     def test_cross_version_no_reuse(self):
         p, eps = self._eps_hl(10)

@@ -60,15 +60,27 @@ CONFIG = {
         'count': 5,
         'retry': 2,
         'segment_duration': [30, 75],
-        # 方案B（用户确认）：非重叠分段 + 跨版本 (集,起点) 去重 + 素材容量版本数。
-        # 每集按 segment_dur 切互不重叠段（36集×~45s → 63段），跨版本禁止复用同一
-        # (集,起点)，版本数 = 素材段数 // 每版段数（clamp[min_versions,max_versions]）。
+        # 非重叠分段 + 跨版本 (集,起点) 去重 + 素材容量版本数。
+        # 独立素材不足时减少版本数，不用高比例复用硬凑 6/8 版。
         'non_overlap': True,      # 每集切互不重叠段（替代 LLM 重叠窗口）
         'dedup_segments': True,   # 跨版本禁止复用同一 (集,起点)
         'segment_dur': 20.0,      # 非重叠段长（s）
-        'target_dur': 200.0,      # 每版目标时长（s）→ 6版×200s 零复用（3分20s）
-        'min_versions': 4,
+        'target_dur': 200.0,      # 每版目标时长（s）
+        'min_versions': 1,
         'max_versions': 8,
+        # 默认禁止跨版本复用；只有显式开启 allow_controlled_reuse 才使用
+        # reuse_ratio。历史实现默认 0.9，会把同剧后段版本变成近似复刻。
+        'allow_controlled_reuse': False,
+        'reuse_ratio': 0.0,
+    },
+
+    # 上传计划发表时间：入队时按版本号自动计算（当天+day_offset 日，times 槽位循环）。
+    # V1→times[0]，V2→times[1]…，同批多版本错峰发表；仅计算/记录/展示，不自动定时发表。
+    'upload': {
+        'publish_schedule': {
+            'day_offset': 1,   # 发表日期 = 当天 + 1 天
+            'times': ['06:00', '09:00', '12:00', '15:00', '18:00', '21:00'],  # 错峰槽位循环
+        },
     },
 
     # A1 镜头边界吸附：切点若落在镜头中间（半帧切/转写 start 带前镜头），
@@ -344,11 +356,27 @@ class PipelineProcessor:
         self.state_manager = state_manager
         self.processing = False
         self._job_store = None  # P3: 下载任务持久化（惰性）
+        self._cut_progress_callback = None
         self.lock = threading.Lock()
         
         # 初始化目录
         os.makedirs(CONFIG['download_base_dir'], exist_ok=True)
         os.makedirs(CONFIG['output_dir'], exist_ok=True)
+
+    def set_cut_progress_callback(self, callback):
+        """注册切片阶段回调（BatchCutManager 用于实时 Web 进度）。"""
+        self._cut_progress_callback = callback if callable(callback) else None
+
+    def _emit_cut_progress(self, stage, progress, message='', **metadata):
+        """发送可审计的阶段事件；回调异常绝不能中断切片。"""
+        callback = getattr(self, '_cut_progress_callback', None)
+        if not callback:
+            return
+        try:
+            callback(stage, max(0, min(100, int(progress))),
+                     str(message or ''), metadata)
+        except Exception:
+            pass
     
     def check_resources(self):
         """检查资源"""
@@ -468,10 +496,13 @@ class PipelineProcessor:
             return "福桃说剧"
         return "小桃追剧中"
     
-    def get_output_subdir(self, drama_name, submit_order=None):
-        """获取输出目录的子目录（按发布账号分类，产出直接放上传账号目录）"""
-        # 选择A：水印=发布账号=福桃说剧，产出目录也应=福桃说剧（上传账号目录）才一致
-        upload_account = CONFIG.get('upload_account', '福桃说剧')
+    def get_output_subdir(self, drama_name, submit_order=None, account=None):
+        """获取输出目录的子目录。
+
+        优先使用本次实际分配账号；未传入时才回退全局 upload_account。
+        这样 Web 展示的账号、水印和输出目录来自同一决策，不会各写各的。
+        """
+        upload_account = account or CONFIG.get('upload_account', '福桃说剧')
         return self.get_watermark_name(upload_account)
     
     def check_drama_id(self, drama_name):
@@ -2107,6 +2138,7 @@ class PipelineProcessor:
         """单次切片"""
         # 从下载目录提取实际剧名
         drama_name = download_result.get('drama_name') or download_result.get('link_id', '')
+        self._emit_cut_progress('material_scan', 2, f'扫描素材：{drama_name}')
         if cancel_event is not None and cancel_event.is_set():
             return {
                 'name': drama_name,
@@ -2141,7 +2173,8 @@ class PipelineProcessor:
         submit_order = self.get_submit_order()
         account = self.assign_account(drama_name, submit_order)
         # 输出目录按水印分类：output/福桃说剧/ 或 output/小桃追剧中/
-        output_subdir = self.get_output_subdir(drama_name, submit_order)
+        output_subdir = self.get_output_subdir(
+            drama_name, submit_order, account=account)
         out_dir = os.path.join(CONFIG['output_dir'], output_subdir, drama_name)
         
         # 去重检查：按计划版本数判断是否真的完成，而非“有任意成片就跳过”。
@@ -2198,6 +2231,8 @@ class PipelineProcessor:
             
             ep_count = len(all_eps)
             version_count = self.determine_version_count(ep_count)
+            self._emit_cut_progress('material_scan', 8,
+                                    f'识别 {ep_count} 集素材', episodes=ep_count)
             
             self.logger.log(drama_name, 'INFO', f'总集数：{ep_count}，计划生成{version_count}个版本')
             
@@ -2206,6 +2241,8 @@ class PipelineProcessor:
             if resume:
                 ai_videos = []
                 self._update_state('processing', drama_name, 30, '续跑重渲染中')
+                self._emit_cut_progress('render', 45,
+                                        '读取保留的 EDL，准备续跑重渲染')
                 self._raise_if_cancelled(cancel_event)
                 edl_videos = self._re_render_from_configs(
                     drama_name, out_dir, cancel_event=cancel_event)
@@ -2217,10 +2254,13 @@ class PipelineProcessor:
             if not resume:
                 # 全量路径：ASR + 重新生成 EDL
                 self._update_state('processing', drama_name, 10, 'ASR转写中')
+                self._emit_cut_progress('asr', 10,
+                                        f'开始逐集 ASR（共 {ep_count} 集）')
                 self._raise_if_cancelled(cancel_event)
                 transcript_path = self._run_asr(src_dir, drama_name,
                                                 cancel_event=cancel_event)
                 self._raise_if_cancelled(cancel_event)
+                self._emit_cut_progress('asr', 24, 'ASR 转写完成')
                 short_titles, long_titles = self._extract_quotes(transcript_path, 10)
                 
                 # 全部素材交给 EDL 切片。
@@ -2236,6 +2276,9 @@ class PipelineProcessor:
                 # 素材容量导致被迫复用同一素材片段。
                 if CONFIG['edl'].get('non_overlap'):
                     try:
+                        self._emit_cut_progress(
+                            'version_budget', 27,
+                            '按独立素材容量计算安全版本数')
                         version_count = self._capacity_version_count(
                             edl_eps, drama_name)
                     except Exception as e:
@@ -2254,6 +2297,10 @@ class PipelineProcessor:
                 ai_videos = []
                 edl_count = version_count
                 self._update_state('processing', drama_name, 30, 'EDL切片中')
+                self._emit_cut_progress(
+                    'version_budget', 42,
+                    f'计划生成 {version_count} 版',
+                    version_count=version_count)
                 self._raise_if_cancelled(cancel_event)
                 edl_videos = self._generate_edl_versions(
                     drama_name, src_dir, edl_eps, edl_count, out_dir,
@@ -2275,6 +2322,8 @@ class PipelineProcessor:
             # 内容级去重（R9）：版本间感知哈希相似度 → 剔除高重复版本，
             # 规避"成片重复度很高"被平台判重。剔除只在交付集内进行，
             # 被剔除文件保留在 out_dir 供人工核查。
+            self._emit_cut_progress('content_dedup', 90,
+                                    '计算成片指纹并比较版本重合')
             best_videos, dedup_report = self._dedup_versions_by_content(
                 best_videos, drama_name, out_dir, src_dir)
 
@@ -2283,6 +2332,10 @@ class PipelineProcessor:
             processed_videos = []
             for i, video in enumerate(best_videos):
                 self._raise_if_cancelled(cancel_event)
+                pct = 92 + int(4 * (i / max(1, len(best_videos))))
+                self._emit_cut_progress('post_process', pct,
+                                        f'后处理 V{i + 1}/{len(best_videos)}',
+                                        version=i + 1)
                 ok = self._post_process(video['path'], video['final_path'],
                                         src_dir=src_dir, drama_name=drama_name)
                 if ok and os.path.exists(video['final_path']):
@@ -2321,8 +2374,10 @@ class PipelineProcessor:
 
             # 写交付报告
             self._raise_if_cancelled(cancel_event)
+            self._emit_cut_progress('report', 97, '生成交付与质量报告')
             self._write_report(out_dir, drama_name, best_videos, cut_method,
                                dedup_report=dedup_report)
+            self._write_content_risk_audit(out_dir, drama_name)
 
             # A7 QC 报告：blackdetect/响度/词中切断（审计非门禁）
             self._raise_if_cancelled(cancel_event)
@@ -2355,6 +2410,10 @@ class PipelineProcessor:
                 self.logger.log(drama_name, 'WARN', f'交付清理：删除{swept}个未交付渲染产物')
             
             self._update_state('idle', '', 100, '完成，可上传')
+            self._emit_cut_progress(
+                'completed', 100,
+                f'完成：交付 {len(best_videos)} 版，可进入内容风险复核',
+                delivered=len(best_videos), output_dir=out_dir)
             
             # 创建素材标记
             try:
@@ -2374,6 +2433,7 @@ class PipelineProcessor:
         
         except CutCancelled as e:
             self.logger.log(drama_name, 'INFO', f'切片已停止：{str(e)}')
+            self._emit_cut_progress('cancelled', 0, '收到停止请求')
             self._update_state('idle', '', 0, '已停止')
             swept = self._clean_partial_outputs(out_dir, include_configs=False)
             if swept:
@@ -2389,6 +2449,7 @@ class PipelineProcessor:
             }
         except Exception as e:
             self.logger.log(drama_name, 'ERROR', f'切片失败：{str(e)}')
+            self._emit_cut_progress('failed', 0, f'切片失败：{str(e)[:160]}')
             self.state_manager.add_failed(drama_name, str(e))
             # 状态文件也必须离开 processing，否则历史页/API 会长期显示伪“处理中”。
             self._update_state('idle', '', 0, f'切片失败：{str(e)[:120]}')
@@ -2678,6 +2739,8 @@ class PipelineProcessor:
         """生成EDL版本 - 优先导演叙事结构，高光缺失时随机兜底。"""
         self._raise_if_cancelled(cancel_event)
         self.logger.log(drama_name, 'INFO', f'生成EDL版本（{count}个）')
+        self._emit_cut_progress('version_plan', 40,
+                                f'生成 {count} 个版本的叙事与文案方案')
         
         # 初始化AI文案生成器
         ai_copy = AICopyGenerator()
@@ -2807,6 +2870,11 @@ class PipelineProcessor:
 
         for v_idx in range(expected_count):
             self._raise_if_cancelled(cancel_event)
+            select_pct = 43 + int(5 * v_idx / max(1, expected_count))
+            self._emit_cut_progress(
+                'segment_select', select_pct,
+                f'规划 V{v_idx + 1}/{expected_count} 的素材片段',
+                version=v_idx + 1)
             # 根据倒叙或随机生成segments
             if use_reverse:
                 segments = self._generate_reverse_segments(edl_eps, v_idx,
@@ -2869,9 +2937,22 @@ class PipelineProcessor:
                                                  f'规划合计{sum(s["duration"] for s in segments):.0f}s')
             
             # 调用render_generic.py（公共渲染方法，失败续跑也复用）
+            render_pct = 48 + int(40 * v_idx / max(1, expected_count))
+            self._emit_cut_progress(
+                'render', render_pct,
+                f'渲染 V{v_idx + 1}/{expected_count}',
+                version=v_idx + 1,
+                segments=len(segments), duration=round(sum(s['duration'] for s in segments), 1))
             video, fail_cat, verdict = self._run_render_one(
                 drama_name, out_dir, v_idx, config_path,
                 cancel_event=cancel_event)
+            render_done_pct = 48 + int(40 * (v_idx + 1) / max(1, expected_count))
+            self._emit_cut_progress(
+                'render', render_done_pct,
+                f'V{v_idx + 1}/{expected_count} '
+                f'{"渲染完成" if video else "渲染未通过"}',
+                version=v_idx + 1,
+                accepted=bool(video))
             # P8: 记录本版交付 verdict（accepted/rejected/render_failed）供报告反映
             verdicts[v_idx] = verdict
             if video:
@@ -3104,6 +3185,9 @@ class PipelineProcessor:
             self._raise_if_cancelled(cancel_event)
             m = re.search(r'edl_config_v(\d+)\.json$', config_path)
             v_idx = (int(m.group(1)) - 1) if m else len(videos)
+            self._emit_cut_progress(
+                'render', min(88, 45 + int(40 * v_idx / max(1, len(config_paths)))),
+                f'续跑渲染 V{v_idx + 1}', version=v_idx + 1)
             try:
                 with open(config_path, encoding='utf-8') as f:
                     edl_config = json.load(f)
@@ -3127,6 +3211,11 @@ class PipelineProcessor:
             video, fail_cat, _verdict = self._run_render_one(
                 drama_name, out_dir, v_idx, config_path,
                 cancel_event=cancel_event)
+            self._emit_cut_progress(
+                'render', min(89, 45 + int(40 * (v_idx + 1) / max(1, len(config_paths)))),
+                f'续跑 V{v_idx + 1} '
+                f'{"渲染完成" if video else "渲染未通过"}',
+                version=v_idx + 1, accepted=bool(video))
             if not _verdict:
                 _verdict = ({'status': 'accepted', 'reason': ''} if video else
                             {'status': 'render_failed',
@@ -3187,35 +3276,45 @@ class PipelineProcessor:
         """方案B：把 LLM 候选（可能互相重叠的窗口）重排为互不重叠的 seg_dur 段。
 
         从 0 起连续切 [i*seg, (i+1)*seg]，段数 = floor(ep_dur / seg_dur)。
-        每段携带对应 LLM 候选的 score/hook_type/reason（按分数降序对齐；
-        候选不够时用最高分候选兜底，保证段有可用的钩子标签）。无候选也按
-        ep_dur 切（score 0 兜底）。返回新 cands 列表。
+        每段选择与它时间重叠最多的 LLM 候选，避免“高分窗口在第 3 段，
+        标签却套到第 1 段”的错位。没有候选重叠的容量补齐段标记为 score=0。
         """
         seg_dur = float(seg_dur)
         out = []
         i = 0
         while (i + 1) * seg_dur <= ep_dur + 0.05:
             st = round(i * seg_dur, 1)
-            src = (llm_cands[i] if i < len(llm_cands)
-                   else (llm_cands[0] if llm_cands else {}))
+            en = st + seg_dur
+            best = None
+            best_overlap = 0.0
+            for cand in llm_cands:
+                try:
+                    cst = float(cand.get('start', 0) or 0)
+                    cen = (float(cand['end']) if 'end' in cand else
+                           cst + float(cand.get('dur', 0) or 0))
+                except (TypeError, ValueError):
+                    continue
+                overlap = max(0.0, min(en, cen) - max(st, cst))
+                if overlap > best_overlap:
+                    best, best_overlap = cand, overlap
+            src = best or {}
             out.append({
                 'score': src.get('score', 0),
                 'start': st,
                 'dur': round(seg_dur, 1),
-                'src': src.get('src', 'llm'),
+                'src': src.get('src', 'capacity'),
                 'hook_type': src.get('hook_type', ''),
-                'reason': src.get('reason', ''),
+                'reason': (src.get('reason', '') if best else
+                           '未命中高光窗口，仅用于容量补齐'),
             })
             i += 1
         return out
 
     def _capacity_version_count(self, edl_eps, drama_name):
-        """方案B：素材容量决定版本数（零复用前提）。
+        """素材容量决定版本数。
 
-        版本数 = 总非重叠段数 // 每版段数，clamp[min_versions, max_versions]。
-        素材段数 = Σ floor(ep_dur / segment_dur)（_load_episode_highlights 已按
-        方案B生成非重叠候选）。段数不足以支撑 min_versions 时降到 min_versions
-        （此时无法完全零复用，由跨版本去重尽力避免重复）。
+        默认版本数 = min(集数目标, 独立素材可支撑版本数)，最少保留 1 版。
+        只有显式开启 allow_controlled_reuse 时才允许为了达到集数目标而复用。
         """
         cfg = CONFIG['edl']
         seg_dur = float(cfg.get('segment_dur', 20.0))
@@ -3233,15 +3332,18 @@ class PipelineProcessor:
             return self.determine_version_count(len(edl_eps))
         desired = self.determine_version_count(len(edl_eps))
         zero_reuse_cap = total // segs_per_version
-        # P4 方案1：目标版本数按集数判定（>=30→8），零复用只决定「前几版可零复用」；
-        # 素材容量不足时不再把版本数压到 4（否则 30 集剧只出 4 版，达不到 8 版标准），
-        # 不足部分由 _generate_reverse_segments 的受控复用（限重复率）补足。
-        count = max(int(cfg.get('min_versions', 4)),
-                    min(int(cfg.get('max_versions', 8)), desired))
+        allow_reuse = bool(cfg.get('allow_controlled_reuse', False))
+        if allow_reuse:
+            count = max(int(cfg.get('min_versions', 1)),
+                        min(int(cfg.get('max_versions', 8)), desired))
+        else:
+            count = max(1, min(int(cfg.get('max_versions', 8)),
+                               desired, zero_reuse_cap))
         self.logger.log(drama_name, 'INFO',
                         f'方案B容量：素材{total}段 / 每版{segs_per_version}段 '
-                        f'零复用上限{zero_reuse_cap}版 → 目标{count}版'
-                        f'（{max(0, count - zero_reuse_cap)}版受控复用补足）')
+                        f'零复用上限{zero_reuse_cap}版，集数目标{desired}版 '
+                        f'→ 计划{count}版'
+                        f'（{"允许受控复用" if allow_reuse else "禁止跨版本复用"}）')
         return count
 
     # 冲突/悬念词库：LLM 不可用时的兜底打分
@@ -3501,6 +3603,7 @@ class PipelineProcessor:
         """
         if not edl_eps:
             return []
+        self._emit_cut_progress('highlight', 28, '读取 ASR 与高光候选缓存')
         hi_dir = os.path.join(os.path.dirname(os.path.abspath(edl_eps[0])),
                               "transcribe")
         cache_path = os.path.join(hi_dir, "highlight_scores.json")
@@ -3547,7 +3650,12 @@ class PipelineProcessor:
             ai = AICopyGenerator()
             if ai.enabled:
                 hits = 0
-                for ep_num, ep_file, raw, ep_dur in todo:
+                for done_idx, (ep_num, ep_file, raw, ep_dur) in enumerate(todo, 1):
+                    pct = 28 + int(10 * done_idx / max(1, len(todo)))
+                    self._emit_cut_progress(
+                        'highlight', pct,
+                        f'高光分析 {done_idx}/{len(todo)}：第{ep_num}集',
+                        episode=ep_num)
                     cands = self._score_episode_llm(ai, drama_name, ep_num, raw, ep_dur)
                     if cands:
                         cached[ep_num] = {"cands": cands, "src": "llm"}
@@ -3572,6 +3680,8 @@ class PipelineProcessor:
         else:
             self.logger.log('system', 'INFO',
                             f'高光打分：{len(eps_data)} 集全部命中缓存，不调用 API')
+        self._emit_cut_progress('highlight', 38,
+                                f'高光候选就绪：{len(eps_data)} 集')
 
         # 4) 组装候选窗口（每集 1-N 个：LLM 多候选，版本轮换用；关键词兜底）
         out = []
@@ -4025,12 +4135,19 @@ class PipelineProcessor:
                 ratio = last["cands"][0]["score"] / best["cands"][0]["score"]
                 if ratio >= 0.7:
                     opening = last
-        # 候选轮换：不同版本取不同候选段（V1 候选0、V2 候选1…）
-        oc = opening["cands"][v_idx % len(opening["cands"])]
+        # 候选轮换：优先匹配本版 angle 的实际 hook_type；没有匹配标签时再按
+        # 版本偏移轮换。这样 angle 不只是标题标签，也会影响开头素材选择。
+        opening_cands = opening["cands"]
+        if vplan:
+            matched = [c for c in opening_cands
+                       if c.get('hook_type') == vplan.get('angle')]
+            if matched:
+                opening_cands = matched
+        oc = opening_cands[v_idx % len(opening_cands)]
         # 方案B：开头钩子段被全局（其他版本）占用 → 顺延该集下一个未用段，
         # 保证每个版本的开头钩子都是独立的素材片段。
         if used_global is not None and len(opening["cands"]) > 1:
-            for c2 in opening["cands"]:
+            for c2 in opening_cands:
                 if (opening["episode"], round(float(c2["start"]), 1)) not in used_global:
                     oc = c2
                     break
@@ -4039,7 +4156,7 @@ class PipelineProcessor:
                 'system', 'INFO',
                 f'开头钩子：第{opening["episode"]}集 {oc["score"]}分 '
                 f'[{oc.get("hook_type", "")}] {oc.get("reason", "")}'
-                f'（方案v{v_idx + 1} {vplan["angle"]}，候选{v_idx % len(opening["cands"]) + 1}）')
+                f'（方案v{v_idx + 1} {vplan["angle"]}，候选{v_idx % len(opening_cands) + 1}）')
         else:
             self.logger.log(
                 'system', 'INFO',
@@ -4110,15 +4227,20 @@ class PipelineProcessor:
             # 若按它算 max_reused 会=0，导致复用版本无法补足到 3 分钟）。
             # 0.9 让复用版本补足到 ~200s（渲染后 ~190s，安全高于 180s 门限，
             # 避免重蹈 V3 171.6s<180s 被拒的覆辙）；R9 内容去重负责剔除克隆。
-            reuse_ratio = float(CONFIG['edl'].get('reuse_ratio', 0.9))
+            allow_controlled_reuse = bool(
+                CONFIG['edl'].get('allow_controlled_reuse', False))
+            reuse_ratio = float(CONFIG['edl'].get('reuse_ratio', 0.0))
             target_segs = max(1, int(math.ceil(
                 float(CONFIG['edl'].get('target_dur', 200.0)) /
                 float(CONFIG['edl'].get('segment_dur', 20.0)))))
             max_reused = int(reuse_ratio * target_segs)
             reused = 0
-            # 两遍零复用（先本版未用集、再放宽同集），仍不足则第三遍受控复用全局已用段。
-            for allow_reused_ep, allow_global_reuse in (
-                    (False, False), (True, False), (True, True)):
+            # 两遍零复用（先本版未用集、再放宽同集）；只有显式开启配置时
+            # 才增加第三遍受控复用，避免默认用 90% 已用片段硬凑版本数。
+            passes = [(False, False), (True, False)]
+            if allow_controlled_reuse and max_reused > 0:
+                passes.append((True, True))
+            for allow_reused_ep, allow_global_reuse in passes:
                 if self._seg_budget_left(segments) <= self.MIN_SEG_DUR:
                     break
                 for e in ranked:
@@ -4402,6 +4524,26 @@ class PipelineProcessor:
             return float(result.stdout.strip())
         except Exception:
             return 0
+
+    def _write_content_risk_audit(self, out_dir, drama_name):
+        """把 Web 同源的内容风险审计快照落到剧目录，便于离线复核。"""
+        try:
+            from cut_insights import build_cut_insights
+            data = build_cut_insights(
+                CONFIG['output_dir'], drama_name,
+                source_root=CONFIG.get('download_base_dir'),
+                db_path=os.path.join(CONFIG.get('data_dir', 'data'),
+                                     'upload.db'))
+            if data is None:
+                return
+            path = os.path.join(out_dir, '内容风险审计.json')
+            tmp = path + '.tmp'
+            with open(tmp, 'w', encoding='utf-8') as f:
+                json.dump(data, f, ensure_ascii=False, indent=2)
+            os.replace(tmp, path)
+        except Exception as e:
+            self.logger.log(drama_name, 'WARN',
+                            f'内容风险审计快照写入失败（不阻断交付）：{e}')
 
     def _validate_delivery_media(self, video_path):
         """R6 媒体质量门禁：拒收 0 字节/无视频流/无音轨/时长异常的产物。

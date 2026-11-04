@@ -35,6 +35,7 @@ from archive import init_database as _archive_init, search_archive, get_archive,
 
 # 只读切片方案预览（不触发渲染/上传）
 from cut_preview import build_cut_preview
+from cut_insights import build_cut_insights
 
 # 配置环境变量覆盖 + 健康检查（R5）。须在任何组件读 CONFIG 前应用。
 from health import apply_env_overrides, run_health_checks
@@ -530,6 +531,32 @@ def add_upload_batch():
         import json
         return Response(json.dumps({'status': 'failed', 'error': str(e)}, ensure_ascii=False), mimetype='application/json', status=500)
 
+@app.route('/api/upload/title', methods=['POST'])
+def update_upload_title():
+    """手动覆盖任务短标题（dashboard 上传前编辑）。
+
+    请求体：{id: int, title: str}。仅 pending 任务可改；同步内存队列与
+    upload_records，覆盖值在 _execute_upload 生效并入库留痕。
+    """
+    try:
+        data = request.get_json(force=True) or {}
+        record_id = data.get('id')
+        title = data.get('title')
+        if record_id is None or not title:
+            from flask import Response
+            import json as _json
+            return Response(_json.dumps({'status': 'failed', 'error': '缺少 id 或 title'},
+                                        ensure_ascii=False), mimetype='application/json', status=400)
+        result = upload_manager.update_task_title(int(record_id), str(title))
+        from flask import Response
+        import json as _json
+        return Response(_json.dumps(result, ensure_ascii=False), mimetype='application/json')
+    except Exception as e:
+        from flask import Response
+        import json as _json
+        return Response(_json.dumps({'status': 'failed', 'error': str(e)},
+                                    ensure_ascii=False), mimetype='application/json', status=500)
+
 @app.route('/api/upload/open-draft', methods=['POST'])
 def open_draft_box():
     """打开草稿箱浏览器窗口"""
@@ -766,6 +793,7 @@ def get_cuttable_dramas():
     try:
         source_dir = CONFIG.get('download_base_dir', r'E:\短剧素材')
         dramas = []
+        submit_order = processor.get_submit_order()
         
         if os.path.exists(source_dir):
             for drama in os.listdir(source_dir):
@@ -780,10 +808,13 @@ def get_cuttable_dramas():
                              if f.lower().endswith('.mp4')]
                 
                 if len(mp4_files) >= 2:
+                    planned_account = processor.assign_account(drama, submit_order)
                     dramas.append({
                         'name': drama,
                         'episodes': len(mp4_files),
-                        'path': drama_dir
+                        'path': drama_dir,
+                        'account': processor.get_output_subdir(
+                            drama, submit_order, account=planned_account),
                     })
         
         return jsonify({'dramas': dramas})
@@ -807,6 +838,26 @@ def get_cut_preview():
         return jsonify({'status': 'not_found', 'error': '尚无切片方案'}), 404
     from flask import Response
     return Response(json.dumps(preview, ensure_ascii=False),
+                    mimetype='application/json')
+
+
+@app.route('/api/cut/insights')
+def get_cut_insights():
+    """版本差异、来源覆盖和内容风险只读报告。"""
+    drama_name = request.args.get('drama_name', '')
+    try:
+        insights = build_cut_insights(
+            CONFIG['output_dir'], drama_name,
+            source_root=CONFIG.get('download_base_dir'),
+            db_path=os.path.join(CONFIG.get('data_dir', 'data'), 'upload.db'))
+    except ValueError as exc:
+        return jsonify({'status': 'failed', 'error': str(exc)}), 400
+    except Exception as exc:
+        return jsonify({'status': 'failed', 'error': str(exc)}), 500
+    if insights is None:
+        return jsonify({'status': 'not_found', 'error': '尚无切片方案'}), 404
+    from flask import Response
+    return Response(json.dumps(insights, ensure_ascii=False),
                     mimetype='application/json')
 
 @app.route('/api/cut/add', methods=['POST'])

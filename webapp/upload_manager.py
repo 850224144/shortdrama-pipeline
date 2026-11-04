@@ -7,7 +7,7 @@ import os
 import json
 import threading
 import time
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import List, Dict, Optional
 import sqlite3
 
@@ -132,6 +132,7 @@ class UploadManager:
                     'batch_id': row['batch_id'],
                     'source_dir': row['source_dir'],
                     'output_dir': row['output_dir'],
+                    'publish_time': row['publish_time'],
                     'cover_status': row['cover_status'] or 'not_requested',
                     'draft_saved': bool(row['draft_saved']),
                     'restored_after_restart': True,
@@ -179,6 +180,7 @@ class UploadManager:
             'draft_verified_at': 'TIMESTAMP',
             'cleanup_status': "TEXT DEFAULT 'none'",
             'cleanup_error': 'TEXT',
+            'publish_time': 'TEXT',  # 计划发表时间（当天+day_offset 日，槽位按版本号循环）
         }
         existing_cols = {row[1] for row in cursor.execute('PRAGMA table_info(upload_records)').fetchall()}
         for col, ddl in new_columns.items():
@@ -288,10 +290,16 @@ class UploadManager:
 
         
     def _check_content_duplicate(self, video_path, account):
-        """R9 上传前内容查重：同账号已上传/已入队的内容相似成片 → 冲突 dict。
+        """上传前内容查重：跨账号的已上传/已入队成片相似时返回冲突 dict。
 
+        查重范围不再局限于目标账号：同一作品换账号发布同样可能被平台判重。
         跨剧同样命中（堵同素材被多剧复用 / 同一作品重传）。指纹计算失败
         返回 None（保守放行，不因检测故障阻塞上传）。
+
+        只拦截「真正上传过（uploaded=1 或 upload_records 有 completed 记录）
+        或当前入队中（pending/uploading）」的内容。纯生成期指纹（从未入队/
+        上传）不拦截——否则从未上传的成片会被自己生成期的指纹自匹配
+        （相似度 1.0）误拒，表现为「点了上传却不开始」。
         """
         if not video_path or not os.path.isfile(video_path):
             return None
@@ -305,14 +313,39 @@ class UploadManager:
             th = dedup_thresholds(CONFIG)
             store = FingerprintStore(
                 os.path.join(CONFIG.get('data_dir', 'data'), 'upload.db'))
-            hits = store.find_similar(account, seq, th['upload'],
+            # account=None：同时检查本机两个发布账号，避免 A 账号发过、B 账号
+            # 再发同一内容仍通过本地查重。
+            hits = store.find_similar(None, seq, th['upload'],
                                       exclude_path=video_path,
                                       include_pending=True)
-            if hits:
-                return hits[0]
+            for h in hits:
+                if self._fingerprint_blocks(h):
+                    return h
         except Exception as e:
             self._log('warn', f'内容查重异常，放行：{e}')
         return None
+
+    def _fingerprint_blocks(self, hit):
+        """指纹是否代表「已上传或已入队」的内容（纯生成期指纹不拦截）。
+
+        upload_records 是「已传/入队」的可靠来源（指纹表的 uploaded 标志
+        因路径不一致长期为 0，不可依赖）；查询失败保守放行（返回 False）。
+        """
+        if hit.get('uploaded'):
+            return True
+        try:
+            with _connect_db(self.db_path) as conn:
+                cur = conn.cursor()
+                cur.execute('''
+                    SELECT 1 FROM upload_records
+                    WHERE drama_name=? AND version=? AND account=?
+                      AND status IN ('pending','uploading','completed')
+                    LIMIT 1
+                ''', (hit.get('drama_name'), hit.get('version'),
+                      hit.get('account')))
+                return cur.fetchone() is not None
+        except Exception:
+            return False
 
     def _mark_fingerprint_uploaded(self, video_path):
         """R9 上传成功后登记指纹 uploaded=1（失败不阻断流程）。"""
@@ -324,17 +357,78 @@ class UploadManager:
         except Exception:
             pass
 
+    @staticmethod
+    def _compute_publish_time(version) -> str:
+        """按版本号计算计划发表时间：当天+day_offset 日的 times 槽位循环。
+
+        槽位按 (版本号-1) % len(times) 取，V1→times[0]，V2→times[1]…循环，
+        使同批多版本错峰发表。CONFIG['upload']['publish_schedule'] 可调；
+        缺省/配置异常回退 当天+1 日、09:00/12:00/15:00/18:00/21:00 五档。
+        """
+        try:
+            cfg = CONFIG.get('upload', {}) or {}
+            sched = cfg.get('publish_schedule') or {}
+        except Exception:
+            sched = {}
+        day_offset = int(sched.get('day_offset', 1) or 1)
+        times = sched.get('times') or ['06:00', '09:00', '12:00', '15:00', '18:00', '21:00']
+        try:
+            slot = times[(int(version) - 1) % len(times)]
+        except Exception:
+            slot = times[0]
+        target = (datetime.now() + timedelta(days=day_offset)).date()
+        return f'{target.isoformat()} {slot}'
+
+    @staticmethod
+    def _read_edl_title(video_path, version):
+        """从同目录 edl_config_v{version}.json 读取 AI 生成标题；无则返回 None。
+
+        标题嵌在 config['videos'][0]['title']（旧扁平结构回退 config['title']）。
+        """
+        try:
+            config_path = os.path.join(
+                os.path.dirname(video_path), f'edl_config_v{version}.json')
+            if os.path.exists(config_path):
+                with open(config_path, 'r', encoding='utf-8') as f:
+                    config = json.load(f)
+                if isinstance(config, dict):
+                    vi = config.get('videos') or [{}]
+                    title = (vi[0] if isinstance(vi, list) and vi else {}).get('title') \
+                        or config.get('title')
+                    if title:
+                        return str(title).strip()
+        except Exception:
+            pass
+        return None
+
+    @staticmethod
+    def _fallback_title(drama_name, version) -> str:
+        """edl_config 缺失时的兜底标题：剧名(去标点截断)+第N集，6-16 字无标点。"""
+        import re as _re
+        base = _re.sub(r'[^\w\u4e00-\u9fff]', '', str(drama_name or ''))
+        title = f'{base[:9]}第{version}集'
+        return title[:16] if len(title) > 16 else (title if len(title) >= 6 else f'第{version}集精彩片段')
+
     def add_to_queue(self, drama_name: str, video_path: str, cover_path: str = None,
                      title: str = None, description: str = None, topics: str = None,
                      account: str = None, version: int = 1,
                      batch_id: str = None, source_dir: str = None,
                      output_dir: str = None,
+                     publish_time: str = None,
                      expected_versions: Optional[list] = None) -> Dict:
         """添加到上传队列
 
         expected_versions: 该组本次应上传的全部版本（透传进任务字典，
         供批次完成标记/清理门槛使用；默认 None 表示未提供）。
+        publish_time: 计划发表时间（YYYY-MM-DD HH:MM）。缺省时按 CONFIG
+        upload.publish_schedule 自动计算（当天+day_offset 日，times 槽位按版本号循环）。
         """
+        # 标题缺省时从 edl_config_v{version}.json 读取（切片时 AI 生成的文案）
+        if not title:
+            title = self._read_edl_title(video_path, version)
+        # 计划发表时间缺省时自动计算（当天+1 日，错峰槽位循环）
+        if not publish_time:
+            publish_time = self._compute_publish_time(version)
         with self.lock:
             # 检查是否已存在（按 account 去重，两个号可以发同一部剧）
             _account = account or '福桃说剧'
@@ -355,7 +449,8 @@ class UploadManager:
                 up_th = CONFIG.get('content_dedup', {}).get('upload', 0.6)
                 return {'status': 'failed',
                         'error': (f'内容查重拒绝：与已传/已入队的'
-                                  f'[{cdup["drama_name"]} V{cdup["version"]}] '
+                                  f'[{cdup.get("account")}] '
+                                  f'{cdup["drama_name"]} V{cdup["version"]} '
                                   f'相似度 {cdup["similarity"]} ≥ {up_th}，'
                                   f'拒绝重复上传（宁可少传不可封号）')}
 
@@ -374,10 +469,10 @@ class UploadManager:
                 cursor.execute('''
                     INSERT INTO upload_records 
                     (drama_name, version, video_path, cover_path, title, description, topics, account, status,
-                     batch_id, source_dir, output_dir)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?, ?, ?)
+                     batch_id, source_dir, output_dir, publish_time)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?, ?, ?, ?)
                 ''', (drama_name, version, video_path, cover_path, title, description, topics_db, _account,
-                      batch_id, source_dir, output_dir))
+                      batch_id, source_dir, output_dir, publish_time))
                 record_id = cursor.lastrowid
             
             # 添加到内存队列
@@ -396,6 +491,7 @@ class UploadManager:
                 'batch_id': batch_id,
                 'source_dir': source_dir,
                 'output_dir': output_dir,
+                'publish_time': publish_time,
                 'expected_versions': expected_versions,
                 'cover_status': 'not_requested',
                 'draft_saved': 0,
@@ -461,12 +557,14 @@ class UploadManager:
                         'index': idx, 'drama_name': drama,
                         'version': version, 'account': account,
                         'reason': 'content_duplicate',
-                        'conflict': f'{cdup["drama_name"]} V{cdup["version"]}',
+                        'conflict': (f'[{cdup.get("account")}] '
+                                     f'{cdup["drama_name"]} V{cdup["version"]}'),
                         'similarity': cdup['similarity'],
                         'threshold': up_th,
                     })
                     self._log('warn',
-                              f'内容查重拒收：{drama} V{version} 与 '
+                              f'内容查重拒收：{account} {drama} V{version} 与 '
+                              f'{cdup.get("account")} '
                               f'{cdup["drama_name"]} V{cdup["version"]} '
                               f'相似度 {cdup["similarity"]} ≥ {up_th}')
                     continue
@@ -495,17 +593,21 @@ class UploadManager:
                 for (item, drama, video_path, version, account,
                      topics_list) in accepted:
                     topics_db = json.dumps(topics_list, ensure_ascii=False)
+                    # 标题缺省读 edl_config，计划时间缺省按版本号自动计算
+                    title = item.get('title') or self._read_edl_title(video_path, version)
+                    publish_time = item.get('publish_time') or self._compute_publish_time(version)
                     cur = conn.cursor()
                     cur.execute('''
                         INSERT INTO upload_records
                         (drama_name, version, video_path, cover_path, title,
                          description, topics, account, status,
-                         batch_id, source_dir, output_dir)
-                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?, ?, ?)
+                         batch_id, source_dir, output_dir, publish_time)
+                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?, ?, ?, ?)
                     ''', (drama, version, video_path, item.get('cover_path'),
-                          item.get('title'), item.get('description'), topics_db,
+                          title, item.get('description'), topics_db,
                           account, item.get('batch_id'),
-                          item.get('source_dir'), item.get('output_dir')))
+                          item.get('source_dir'), item.get('output_dir'),
+                          publish_time))
                     record_id = cur.lastrowid
                     ids.append(record_id)
 
@@ -517,7 +619,7 @@ class UploadManager:
                         'version': version,
                         'video_path': video_path,
                         'cover_path': item.get('cover_path'),
-                        'title': item.get('title'),
+                        'title': title,
                         'description': item.get('description'),
                         'topics': topics_list,
                         'account': account,
@@ -526,6 +628,7 @@ class UploadManager:
                         'batch_id': item.get('batch_id'),
                         'source_dir': item.get('source_dir'),
                         'output_dir': item.get('output_dir'),
+                        'publish_time': publish_time,
                         'expected_versions': exp_versions,
                         'cover_status': 'not_requested',
                         'draft_saved': 0,
@@ -690,6 +793,39 @@ class UploadManager:
                 'logs': self.logs[-50:]  # 最近50条日志
             }
     
+    def update_task_title(self, record_id: int, title: str) -> Dict:
+        """手动覆盖任务短标题（dashboard 上传前编辑）。
+
+        同步内存队列（queue/completed/failed 中的任务对象）与 upload_records，
+        使覆盖值在 _execute_upload 生效并入库留痕。仅对 pending 任务允许覆盖；
+        已在上传/已完成的任务不修改（上传值已在浏览器页面中，改内存无意义）。
+        """
+        title = (title or '').strip()
+        if not title:
+            return {'status': 'failed', 'error': '标题不能为空'}
+        with self.lock:
+            target = None
+            for t in list(self.queue) + list(self.completed) + list(self.failed):
+                if t.get('id') == record_id:
+                    target = t
+                    break
+            if target is None:
+                return {'status': 'failed', 'error': f'任务 {record_id} 不存在'}
+            if target.get('status') not in ('pending',):
+                return {'status': 'failed',
+                        'error': f'任务 {record_id} 状态为 {target.get("status")}，仅待上传可改标题'}
+            target['title'] = title
+        try:
+            with _connect_db(self.db_path) as conn:
+                conn.execute(
+                    "UPDATE upload_records SET title=? WHERE id=?",
+                    (title, record_id))
+                conn.commit()
+        except Exception as e:
+            return {'status': 'failed', 'error': f'更新数据库失败: {e}'}
+        self._log('info', f'任务 {record_id} 标题已改为：{title}')
+        return {'status': 'success', 'id': record_id, 'title': title}
+    
     def get_history(self, limit: int = 100) -> List[Dict]:
         """获取上传历史"""
         conn = _connect_db(self.db_path)
@@ -807,13 +943,13 @@ class UploadManager:
                         SET status=?, completed_at=?, error_message=?,
                             title=?, description=?, topics=?, cover_path=?,
                             cover_status=?, draft_saved=?, draft_verified_at=?,
-                            source_dir=?, output_dir=?
+                            source_dir=?, output_dir=?, publish_time=?
                         WHERE id=?
                     ''', (task['status'], task['completed_at'], task.get('error_message'),
                           task.get('title'), task.get('description'), _topics_db,
                           task.get('cover_path'), _cover_status, _draft_saved,
                           _draft_verified_at, task.get('source_dir'), task.get('output_dir'),
-                          task['id']))
+                          task.get('publish_time'), task['id']))
             
                 # 检查账号切换（短暂持锁）
                 with self.lock:
@@ -1090,6 +1226,13 @@ class UploadManager:
                     self._log('info', f'V{task["version"]} 文案：{title}')
                 except Exception as e:
                     self._log('warn', f'V{task["version"]} 读取edl_config失败：{e}')
+
+            # 标题仍未确定（无任务覆盖 + 无 edl_config）→ 用剧名+版本生成兜底标题，
+            # 不再退化为笼统的「短剧精彩片段」。
+            if not title:
+                title = self._fallback_title(task.get('drama_name'), task.get('version'))
+                task['title'] = title
+                self._log('info', f'V{task["version"]} 使用兜底标题：{title}')
 
             # 从 artifacts/根级补齐 source_dir、output_dir（供清理计划器聚合）
             if isinstance(config, dict):

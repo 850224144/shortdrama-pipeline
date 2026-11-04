@@ -619,6 +619,177 @@
             padding-left: 10px;
         }
 
+        .cut-live {
+            margin: 14px 0;
+            border: 1px solid #dfe5ef;
+            border-radius: 10px;
+            background: linear-gradient(135deg, #fbfcff, #f4f7fc);
+            padding: 14px;
+        }
+
+        .cut-live-head {
+            display: flex;
+            justify-content: space-between;
+            gap: 12px;
+            align-items: baseline;
+            margin-bottom: 10px;
+        }
+
+        .cut-live-title {
+            font-size: 15px;
+            font-weight: 700;
+            color: #23324d;
+        }
+
+        .cut-live-message {
+            font-size: 12px;
+            color: #667085;
+            text-align: right;
+        }
+
+        .cut-progress-track {
+            height: 9px;
+            border-radius: 99px;
+            overflow: hidden;
+            background: #e8edf5;
+        }
+
+        .cut-progress-fill {
+            height: 100%;
+            width: 0;
+            background: linear-gradient(90deg, #6172f3, #9b8afb);
+            transition: width .25s ease;
+        }
+
+        .cut-stage-list {
+            display: grid;
+            grid-template-columns: repeat(8, minmax(82px, 1fr));
+            gap: 7px;
+            margin-top: 12px;
+            overflow-x: auto;
+        }
+
+        .cut-stage {
+            border: 1px solid #dfe5ef;
+            border-radius: 7px;
+            padding: 7px 8px;
+            color: #7a8496;
+            background: #fff;
+            font-size: 11px;
+            white-space: nowrap;
+        }
+
+        .cut-stage.done {
+            color: #087443;
+            border-color: #a9e3c2;
+            background: #ecfdf3;
+        }
+
+        .cut-stage.active {
+            color: #3448c5;
+            border-color: #a8b4ff;
+            background: #eef0ff;
+            font-weight: 700;
+        }
+
+        .cut-live-meta {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 8px 18px;
+            margin-top: 10px;
+            color: #596579;
+            font-size: 12px;
+        }
+
+        .risk-banner {
+            border-radius: 8px;
+            padding: 11px 13px;
+            margin: 10px 0;
+            border: 1px solid #e6c36a;
+            background: #fff8e6;
+            color: #6b4d00;
+            font-size: 13px;
+            line-height: 1.55;
+        }
+
+        .risk-banner.high {
+            border-color: #efb4ae;
+            background: #fff1f0;
+            color: #8f2119;
+        }
+
+        .risk-banner.low {
+            border-color: #a9e3c2;
+            background: #ecfdf3;
+            color: #087443;
+        }
+
+        .insight-summary {
+            display: grid;
+            grid-template-columns: repeat(4, minmax(130px, 1fr));
+            gap: 8px;
+            margin: 10px 0 14px;
+        }
+
+        .insight-metric {
+            background: #f7f9fc;
+            border: 1px solid #e8edf5;
+            border-radius: 7px;
+            padding: 9px 10px;
+        }
+
+        .insight-metric strong {
+            display: block;
+            color: #23324d;
+            font-size: 17px;
+        }
+
+        .insight-metric span {
+            color: #6b7280;
+            font-size: 11px;
+        }
+
+        .version-risk {
+            display: inline-flex;
+            align-items: center;
+            border-radius: 99px;
+            padding: 2px 8px;
+            font-size: 11px;
+            font-weight: 700;
+        }
+
+        .version-risk.high {
+            color: #a30f0f;
+            background: #fee4e2;
+        }
+
+        .version-risk.medium {
+            color: #854a0e;
+            background: #fef0c7;
+        }
+
+        .version-risk.low {
+            color: #087443;
+            background: #d1fadf;
+        }
+
+        .risk-reasons {
+            margin: 7px 0 8px 18px;
+            color: #7a3f3a;
+            font-size: 12px;
+            line-height: 1.55;
+        }
+
+        .dialogue-excerpt {
+            margin: 8px 0;
+            padding: 7px 9px;
+            background: #f8fafc;
+            border-left: 3px solid #b8c1d1;
+            color: #566173;
+            font-size: 12px;
+            line-height: 1.5;
+        }
+
         @media (max-width: 720px) {
             .cut-preview {
                 overflow-x: auto;
@@ -626,6 +797,10 @@
 
             .cut-preview-table {
                 min-width: 560px;
+            }
+
+            .insight-summary {
+                grid-template-columns: repeat(2, 1fr);
             }
         }
         
@@ -712,6 +887,50 @@
             margin-top: 5px;
             font-size: 12px;
             color: #666;
+        }
+        
+        .queue-item .task-title-input {
+            display: inline-block;
+            width: 260px;
+            max-width: 60%;
+            font-size: 13px;
+            padding: 3px 8px;
+            border: 1px solid #d9d9d9;
+            border-radius: 4px;
+            background: #fff;
+            color: #333;
+            outline: none;
+        }
+        .queue-item .task-title-input:focus {
+            border-color: #4a90e2;
+            box-shadow: 0 0 0 2px rgba(74, 144, 226, .15);
+        }
+        .queue-item .task-title-static {
+            font-weight: 600;
+            color: #333;
+        }
+        .queue-item .task-meta-row {
+            margin-top: 4px;
+            font-size: 12px;
+            color: #888;
+            display: flex;
+            align-items: center;
+            gap: 12px;
+            flex-wrap: wrap;
+        }
+        .queue-item .publish-time-badge {
+            display: inline-flex;
+            align-items: center;
+            gap: 4px;
+            background: #e8f4ff;
+            color: #0b6bbd;
+            padding: 1px 8px;
+            border-radius: 10px;
+            font-size: 12px;
+        }
+        .queue-item .edit-tip {
+            color: #b0b0b0;
+            font-size: 11px;
         }
         
         .upload-log {
@@ -948,6 +1167,20 @@
                             </div>
                         </div>
                     </div>
+
+                    <div class="cut-live" id="cutLivePanel">
+                        <div class="cut-live-head">
+                            <div>
+                                <div class="cut-live-title" id="cutLiveTitle">切片流水线</div>
+                                <div class="cut-live-meta" id="cutLiveMeta">等待任务</div>
+                            </div>
+                            <div class="cut-live-message" id="cutLiveMessage">选择剧集后开始切片</div>
+                        </div>
+                        <div class="cut-progress-track">
+                            <div class="cut-progress-fill" id="cutProgressFill"></div>
+                        </div>
+                        <div class="cut-stage-list" id="cutStageList"></div>
+                    </div>
                     
                     <div class="upload-queue" id="cutQueue">
                         <div style="padding: 20px; text-align: center; color: #666;">队列为空</div>
@@ -956,7 +1189,10 @@
                     <div class="cut-preview" id="cutPreviewPanel" hidden>
                         <div class="cut-preview-head">
                             <h3 id="cutPreviewHeading">方案预览</h3>
-                            <button class="btn btn-secondary btn-small" onclick="closeCutPreview()">关闭</button>
+                            <div>
+                                <button class="btn btn-secondary btn-small" id="cutPreviewRefreshBtn" data-drama-name="" onclick="reloadCutPreview()">刷新审计</button>
+                                <button class="btn btn-secondary btn-small" onclick="closeCutPreview()">关闭</button>
+                            </div>
                         </div>
                         <div id="cutPreviewBody"></div>
                     </div>
@@ -1157,6 +1393,10 @@
             
             if (tab === 'history') {
                 loadHistory();
+            }
+            if (tab === 'cut') {
+                updateCutUI();
+                refreshCutDramas();
             }
         }
         
@@ -1816,6 +2056,45 @@
         }
         
         // 更新上传界面
+        // 计划发表时间展示：今天/明天 相对化，其余显示 M-D HH:MM
+        function formatPublishTime(publishTime) {
+            if (!publishTime) return '未设置';
+            const m = String(publishTime).match(/^(\d{4})-(\d{2})-(\d{2})[ T](\d{2}):(\d{2})/);
+            if (!m) return publishTime;
+            const d = new Date(+m[1], +m[2] - 1, +m[3]);
+            const now = new Date();
+            const today = new Date(now.getFullYear(), now.getMonth(), now.getDate());
+            const tomorrow = new Date(today.getTime() + 86400000);
+            const hm = `${m[4]}:${m[5]}`;
+            if (d.getTime() === today.getTime()) return `今天 ${hm}`;
+            if (d.getTime() === tomorrow.getTime()) return `明天 ${hm}`;
+            return `${+m[2]}-${+m[3]} ${hm}`;
+        }
+
+        // 上传前手动覆盖任务短标题（仅待上传任务；覆盖值优先于 edl_config）
+        async function updateTaskTitle(id, value) {
+            const title = (value || '').trim();
+            if (!title) {
+                // 空值不提交，重新拉取状态恢复原显示
+                updateUploadUI();
+                return;
+            }
+            try {
+                const resp = await fetch('/api/upload/title', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ id: id, title: title })
+                });
+                const res = await resp.json();
+                if (res.status !== 'success') {
+                    console.warn('更新标题失败:', res.error);
+                    updateUploadUI();
+                }
+            } catch (e) {
+                console.warn('更新标题异常:', e);
+            }
+        }
+
         async function updateUploadUI() {
             try {
                 const response = await fetch('/api/upload/status');
@@ -1865,22 +2144,55 @@
                 const queueContainer = document.getElementById('uploadQueue');
                 const allTasks = [...status.queue, ...status.completed, ...status.failed];
                 
+                // 焦点保护：用户正在编辑标题输入框时，记住 id 与光标位置，重渲染后恢复，
+                // 避免 2s 轮询重新渲染把正在输入的表单冲掉（失焦导致输入中断）。
+                const activeEl = document.activeElement;
+                const editingTaskId = (activeEl && activeEl.tagName === 'INPUT'
+                    && activeEl.dataset && activeEl.dataset.role === 'task-title')
+                    ? activeEl.dataset.id : null;
+                const caretPos = editingTaskId ? activeEl.selectionStart : null;
+                
                 if (allTasks.length === 0) {
                     queueContainer.innerHTML = '<div style="padding: 20px; text-align: center; color: #666;">队列为空</div>';
                 } else {
-                    queueContainer.innerHTML = allTasks.map(task => `
-                        <div class="queue-item">
-                            <span class="status-badge ${escapeHtml(task.status)}">${
-                                task.status === 'pending' ? '待上传' :
-                                task.status === 'uploading' ? '上传中' :
-                                task.status === 'completed' ? '已完成' : '失败'
-                            }</span>
-                            <div class="queue-info">
-                                <div>${escapeHtml(task.drama_name)} V${escapeHtml(task.version)}</div>
-                                ${task.error_message ? `<div class="queue-progress">错误: ${escapeHtml(task.error_message)}</div>` : ''}
-                            </div>
-                        </div>
-                    `).join('');
+                    queueContainer.innerHTML = allTasks.map(task => {
+                        const isPending = task.status === 'pending';
+                        // 待上传任务：可编辑短标题输入框（覆盖值优先于 edl_config）；
+                        // 非待上传任务：只读显示（上传值已进页面，改内存无意义）。
+                        const titleHtml = isPending
+                            ? `<input class="task-title-input" data-role="task-title" data-id="${task.id}"
+                                 value="${escapeHtml(task.title || '')}" maxlength="30"
+                                 onchange="updateTaskTitle(${task.id}, this.value)"
+                                 title="短标题（上传前可编辑，失焦/回车生效）" />`
+                            : `<span class="task-title-static">${escapeHtml(task.title || '')}</span>`;
+                        return `
+                            <div class="queue-item">
+                                <span class="status-badge ${escapeHtml(task.status)}">${
+                                    task.status === 'pending' ? '待上传' :
+                                    task.status === 'uploading' ? '上传中' :
+                                    task.status === 'completed' ? '已完成' : '失败'
+                                }</span>
+                                <div class="queue-info">
+                                    <div>${escapeHtml(task.drama_name)} V${escapeHtml(task.version)}</div>
+                                    <div style="margin-top:3px;">${titleHtml}</div>
+                                    <div class="task-meta-row">
+                                        <span class="publish-time-badge">🕐 计划发表：${escapeHtml(formatPublishTime(task.publish_time))}</span>
+                                        ${isPending ? '<span class="edit-tip">短标题可点击编辑</span>' : ''}
+                                    </div>
+                                    ${task.error_message ? `<div class="queue-progress">错误: ${escapeHtml(task.error_message)}</div>` : ''}
+                                </div>
+                            </div>`;
+                    }).join('');
+                }
+                
+                // 恢复正在编辑的标题输入框焦点与光标位置
+                if (editingTaskId) {
+                    const restored = queueContainer.querySelector(
+                        `input[data-role="task-title"][data-id="${editingTaskId}"]`);
+                    if (restored) {
+                        restored.focus();
+                        try { restored.setSelectionRange(caretPos, caretPos); } catch (e) {}
+                    }
                 }
                 
                 // 更新日志
@@ -1950,6 +2262,18 @@
         
         let cutPollTimer = null;
         let selectedCutDramas = new Set();
+        let cutDramaAccounts = new Map();
+        let currentCutPreviewDrama = '';
+        const CUT_STAGES = [
+            ['material_scan', '素材扫描'],
+            ['asr', 'ASR 转写'],
+            ['highlight', '高光分析'],
+            ['version_budget', '版本预算'],
+            ['segment_select', '选段/EDL'],
+            ['render', '渲染'],
+            ['content_dedup', '内容检测'],
+            ['post_process', '后处理/交付']
+        ];
         
         // 刷新切片剧列表
         async function refreshCutDramas() {
@@ -1965,6 +2289,8 @@
                 }
 
                 const container = document.getElementById('cutDramaList');
+                cutDramaAccounts = new Map(data.dramas.map(d => [d.name, d.account || '由服务端分配']));
+                selectedCutDramas = new Set();
                 
                 if (!data.dramas || data.dramas.length === 0) {
                     container.innerHTML = '<div style="padding: 20px; text-align: center; color: #666;">没有找到可切片的剧</div>';
@@ -1980,6 +2306,7 @@
                         <label for="cutDrama_${name}">
                             <strong>${name}</strong>
                             <span class="drama-info">(${escapeHtml(drama.episodes)}集素材)</span>
+                            <span class="version-count">账号：${escapeHtml(drama.account || '由服务端分配')}</span>
                         </label>
                     </div>`;
                 }).join('');
@@ -2022,18 +2349,94 @@
         function closeCutPreview() {
             const panel = document.getElementById('cutPreviewPanel');
             panel.hidden = true;
+            currentCutPreviewDrama = '';
             document.getElementById('cutPreviewBody').innerHTML = '';
+        }
+
+        function reloadCutPreview() {
+            if (currentCutPreviewDrama) previewCutDrama(currentCutPreviewDrama);
+        }
+
+        function formatPercent(value) {
+            return value === null || value === undefined
+                ? '不可用'
+                : (Number(value) * 100).toFixed(1) + '%';
+        }
+
+        function riskLabel(level) {
+            return {high: '高风险', medium: '需复核', low: '低风险'}[level] || '未知';
+        }
+
+        function renderCutInsights(data) {
+            const risk = data.content_risk || {};
+            const summary = data.summary || {};
+            const note = risk.note || '';
+            const riskHtml = `
+                <div class="risk-banner ${escapeHtml(risk.level || 'high')}">
+                    <strong>内容风险：${riskLabel(risk.level)}</strong><br>
+                    ${escapeHtml(note)}
+                    ${risk.bulk_publish_allowed === false ? '<br><strong>当前不建议批量发布。</strong>' : ''}
+                </div>`;
+            const summaryHtml = `
+                <div class="insight-summary">
+                    <div class="insight-metric"><strong>${escapeHtml(data.version_count || 0)}</strong><span>版本</span></div>
+                    <div class="insight-metric"><strong>${escapeHtml(summary.segments_unique || 0)}/${escapeHtml(summary.segments_total || 0)}</strong><span>独立片段/总片段</span></div>
+                    <div class="insight-metric"><strong>${escapeHtml(summary.exact_reuse_segments || 0)}</strong><span>精确复用片段</span></div>
+                    <div class="insight-metric"><strong>${formatPercent(summary.visual_max)}</strong><span>版本视觉最高相似度</span></div>
+                </div>`;
+
+            const versionHtml = (data.versions || []).map(version => {
+                const versionRisk = version.risk || {};
+                const reasons = (versionRisk.reasons || []).map(reason =>
+                    `<li>${escapeHtml(reason)}</li>`).join('');
+                const rows = (version.segments || []).map(segment => `
+                    <tr>
+                        <td>${escapeHtml(segment.index)}</td>
+                        <td>第${escapeHtml(segment.episode)}集</td>
+                        <td>${Number(segment.start).toFixed(1)}–${Number(segment.end).toFixed(1)}s</td>
+                        <td>${Number(segment.duration).toFixed(1)}s</td>
+                        <td>${escapeHtml(segment.hook_type || '')}</td>
+                        <td class="cut-preview-reason">${escapeHtml(segment.reason || '')}</td>
+                        <td class="cut-preview-reason">${escapeHtml(segment.dialogue_excerpt || '')}</td>
+                    </tr>
+                `).join('');
+                return `
+                    <section class="cut-preview-version">
+                        <div class="cut-preview-title">
+                            V${escapeHtml(version.version)} · ${escapeHtml(version.title || version.hook || '')}
+                            <span class="version-risk ${escapeHtml(versionRisk.level || 'high')}">${riskLabel(versionRisk.level)}</span>
+                        </div>
+                        <div class="cut-preview-summary">
+                            <span>${escapeHtml(version.hook || '')}</span>
+                            <span>${Number(version.planned_duration || 0).toFixed(1)}s</span>
+                            <span>${escapeHtml(version.segment_count || 0)}段</span>
+                            <span>覆盖 ${escapeHtml((version.source_episodes || []).length)} 集</span>
+                            <span>源片 ${escapeHtml(version.source_seconds || 0)}s</span>
+                            <span>${version.video_exists ? '已有成片' : '待渲染'}</span>
+                        </div>
+                        <ul class="risk-reasons">${reasons || '<li>未发现本地规则级冲突</li>'}</ul>
+                        ${version.dialogue_excerpt ? `<div class="dialogue-excerpt">对白摘录：${escapeHtml(version.dialogue_excerpt)}</div>` : ''}
+                        <table class="cut-preview-table">
+                            <thead><tr><th>#</th><th>来源</th><th>入出点</th><th>时长</th><th>钩子</th><th>选段理由</th><th>对白</th></tr></thead>
+                            <tbody>${rows}</tbody>
+                        </table>
+                    </section>`;
+            }).join('');
+            return riskHtml + summaryHtml + versionHtml;
         }
 
         async function previewCutDrama(dramaName) {
             const panel = document.getElementById('cutPreviewPanel');
             const body = document.getElementById('cutPreviewBody');
             const heading = document.getElementById('cutPreviewHeading');
-            heading.textContent = `${dramaName} · 方案预览`;
+            const refreshBtn = document.getElementById('cutPreviewRefreshBtn');
+            currentCutPreviewDrama = dramaName;
+            refreshBtn.dataset.dramaName = dramaName;
+            heading.textContent = `${dramaName} · 版本差异与内容风险`;
             panel.hidden = false;
             body.innerHTML = '<div style="padding:14px;color:#666;">读取中...</div>';
             try {
-                const response = await fetch(`/api/cut/preview?drama_name=${encodeURIComponent(dramaName)}`);
+                const response = await fetch(`/api/cut/insights?drama_name=${encodeURIComponent(dramaName)}`);
                 const data = await response.json();
                 if (!response.ok) {
                     body.innerHTML = `<div style="padding:14px;color:#666;">${escapeHtml(data.error || '暂无切片方案')}</div>`;
@@ -2043,33 +2446,7 @@
                     body.innerHTML = '<div style="padding:14px;color:#666;">暂无 EDL 方案</div>';
                     return;
                 }
-                body.innerHTML = data.versions.map(version => {
-                    const status = version.video_exists ? '已有成片' : '待渲染';
-                    const rows = (version.segments || []).map(segment => `
-                        <tr>
-                            <td>${escapeHtml(segment.index)}</td>
-                            <td>第${escapeHtml(segment.episode)}集</td>
-                            <td>${Number(segment.start).toFixed(1)}–${Number(segment.end).toFixed(1)}s</td>
-                            <td>${Number(segment.duration).toFixed(1)}s</td>
-                            <td>${escapeHtml(segment.hook_type || '')}</td>
-                            <td class="cut-preview-reason">${escapeHtml(segment.reason || '')}</td>
-                        </tr>
-                    `).join('');
-                    return `
-                        <section class="cut-preview-version">
-                            <div class="cut-preview-title">V${escapeHtml(version.version)} · ${escapeHtml(version.title || version.hook || '')}</div>
-                            <div class="cut-preview-summary">
-                                <span>${escapeHtml(version.hook || '')}</span>
-                                <span>${Number(version.planned_duration || 0).toFixed(1)}s</span>
-                                <span>${escapeHtml(version.segment_count || 0)}段</span>
-                                <span>${escapeHtml(status)}</span>
-                            </div>
-                            <table class="cut-preview-table">
-                                <thead><tr><th>#</th><th>来源</th><th>入出点</th><th>时长</th><th>钩子</th><th>选段理由</th></tr></thead>
-                                <tbody>${rows}</tbody>
-                            </table>
-                        </section>`;
-                }).join('');
+                body.innerHTML = renderCutInsights(data);
             } catch (error) {
                 body.innerHTML = `<div style="padding:14px;color:#b42318;">${escapeHtml(error.message)}</div>`;
             }
@@ -2091,7 +2468,7 @@
                         headers: { 'Content-Type': 'application/json' },
                         body: JSON.stringify({
                             drama_name: dramaName,
-                            account: '小桃追剧中'
+                            account: cutDramaAccounts.get(dramaName) || undefined
                         })
                     });
                     
@@ -2183,6 +2560,51 @@
                 showNotification('清除失败: ' + result.error, 'error');
             }
         }
+
+        function cutStageLabel(stage) {
+            if (stage === 'pending') return '等待开始';
+            if (stage === 'report') return '报告/交付';
+            if (stage === 'completed') return '已完成';
+            if (stage === 'failed') return '失败';
+            if (stage === 'cancelled') return '已停止';
+            const item = CUT_STAGES.find(row => row[0] === stage);
+            return item ? item[1] : (stage || '未知阶段');
+        }
+
+        function renderCutLive(status) {
+            const task = status.current_task || null;
+            const title = document.getElementById('cutLiveTitle');
+            const message = document.getElementById('cutLiveMessage');
+            const meta = document.getElementById('cutLiveMeta');
+            const fill = document.getElementById('cutProgressFill');
+            const list = document.getElementById('cutStageList');
+            if (!task) {
+                title.textContent = status.paused ? '切片已暂停' : '切片流水线空闲';
+                message.textContent = status.queue_length
+                    ? `${status.queue_length} 个任务等待开始`
+                    : '选择剧集后开始切片';
+                meta.textContent = status.queue_length ? '队列已就绪' : '等待任务';
+                fill.style.width = '0%';
+                list.innerHTML = CUT_STAGES.map(([id, label]) =>
+                    `<div class="cut-stage">${escapeHtml(label)}</div>`).join('');
+                return;
+            }
+            const currentStage = task.stage || 'material_scan';
+            const started = task.started_at ? `开始：${task.started_at}` : '正在初始化';
+            const progress = Math.max(0, Math.min(100, Number(task.progress || 0)));
+            title.textContent = `${task.drama_name || '切片任务'} · ${cutStageLabel(currentStage)}`;
+            message.textContent = `${progress}%`;
+            meta.textContent = `${task.stage_message || '处理中'} · 账号：${task.account || '服务端分配'} · ${started}`;
+            fill.style.width = `${progress}%`;
+            const activeIndex = CUT_STAGES.findIndex(row => row[0] === currentStage);
+            const completed = currentStage === 'completed' || currentStage === 'report';
+            list.innerHTML = CUT_STAGES.map(([id, label], index) => {
+                let cls = 'cut-stage';
+                if (completed || (activeIndex >= 0 && index < activeIndex)) cls += ' done';
+                if (!completed && activeIndex >= 0 && index === activeIndex) cls += ' active';
+                return `<div class="${cls}">${escapeHtml(label)}</div>`;
+            }).join('');
+        }
         
         // 更新切片界面
         async function updateCutUI() {
@@ -2195,6 +2617,7 @@
                 document.getElementById('cutCurrentCount').textContent = status.current_task ? 1 : 0;
                 document.getElementById('cutCompletedCount').textContent = status.completed_count;
                 document.getElementById('cutFailedCount').textContent = status.failed_count;
+                renderCutLive(status);
 
                 // 完成/失败状态实时通知（轮询间状态跃迁）
                 if (typeof window._cutLastCompleted === 'number') {
@@ -2252,7 +2675,8 @@
                             }</span>
                             <div class="queue-info">
                                 <div>${escapeHtml(task.drama_name)}</div>
-                                ${task.stage ? `<div class="queue-progress">阶段: ${escapeHtml(task.stage)}</div>` : ''}
+                                <div class="queue-progress">阶段：${escapeHtml(cutStageLabel(task.stage || task.status))} · ${escapeHtml(task.progress || 0)}%</div>
+                                ${task.stage_message ? `<div class="queue-progress">${escapeHtml(task.stage_message)}</div>` : ''}
                                 ${task.error ? `<div class="queue-progress">错误: ${escapeHtml(task.error)}</div>` : ''}
                             </div>
                             <div class="queue-actions">

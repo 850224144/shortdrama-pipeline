@@ -152,6 +152,15 @@ class FingerprintStoreTests(unittest.TestCase):
                                        exclude_path=p_a)
         self.assertEqual(hits, [])
 
+    def test_find_similar_none_account_searches_all_accounts(self):
+        p_a = r'C:\out\A_1_x_去重版.mp4'
+        seq_a = _seq(10, seed=8)
+        self.store.upsert('剧A', p_a, seq_a, version=1, account='福桃说剧')
+        self.store.mark_uploaded(p_a)
+        hits = self.store.find_similar(None, list(seq_a), 0.6)
+        self.assertEqual(len(hits), 1)
+        self.assertEqual(hits[0]['account'], '福桃说剧')
+
     def test_blob_roundtrip(self):
         seq = _seq(300, seed=11)
         blob = cf.FingerprintStore._seq_to_blob(seq)

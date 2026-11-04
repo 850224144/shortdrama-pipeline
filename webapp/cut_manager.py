@@ -77,6 +77,8 @@ class BatchCutManager:
                     'resume': bool(params.get('resume', False)),
                     'force': bool(params.get('force', False)),
                     'status': status,
+                    'stage': job.get('stage') or status,
+                    'progress': int(job.get('progress') or 0),
                     'created_at': job.get('created_at'),
                     'started_at': job.get('started_at'),
                     'finished_at': job.get('finished_at'),
@@ -86,6 +88,7 @@ class BatchCutManager:
                 if result:
                     task['output_dirs'] = result.get('output_dirs', [])
                     task['skipped'] = bool(result.get('skipped'))
+                    task['stage_message'] = result.get('stage_message', '')
                 if status == 'completed':
                     task['completed_at'] = job.get('finished_at')
                     self.completed.append(task['id'])
@@ -113,11 +116,14 @@ class BatchCutManager:
 
     def _persist_task(self, task):
         """把任务快照写入任务库。"""
-        result = None
+        result = {
+            'stage_message': task.get('stage_message', ''),
+        }
         if task.get('status') == 'completed':
             result = {
                 'output_dirs': task.get('output_dirs', []),
                 'skipped': bool(task.get('skipped', False)),
+                'stage_message': task.get('stage_message', '完成'),
             }
         heartbeat = None
         if task.get('status') == 'cutting':
@@ -126,8 +132,8 @@ class BatchCutManager:
             'id': task['id'],
             'job_type': 'cut',
             'status': task['status'],
-            'stage': task['status'],
-            'progress': 0,
+            'stage': task.get('stage') or task['status'],
+            'progress': int(task.get('progress') or 0),
             'params': {
                 'drama_name': task['drama_name'],
                 'account': task.get('account', '小桃追剧中'),
@@ -142,6 +148,32 @@ class BatchCutManager:
             'finished_at': task.get('finished_at'),
             'heartbeat_at': heartbeat,
         })
+
+    def _set_task_progress(self, task, stage, progress, message, metadata):
+        """接收 PipelineProcessor 阶段回调，更新内存并限频持久化。"""
+        now = time.monotonic()
+        stage_changed = task.get('stage') != stage
+        with self.lock:
+            task['stage'] = stage
+            task['progress'] = max(0, min(100, int(progress)))
+            task['stage_message'] = message or ''
+            task['stage_updated_at'] = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+            last_persist = float(task.get('_progress_persist_at') or 0)
+            should_persist = stage_changed or now - last_persist >= 3.0
+            if should_persist:
+                task['_progress_persist_at'] = now
+        if not should_persist:
+            return
+        try:
+            self._persist_task(task)
+            if stage_changed:
+                meta = dict(metadata or {})
+                meta.update({'stage': stage, 'progress': progress})
+                self.store.add_event(task['id'], 'info', 'cut_stage',
+                                     message or stage, metadata=meta)
+                self._log('info', f'{task["drama_name"]}：{message or stage}')
+        except Exception:
+            pass
 
     def add_to_queue(self, drama_name, account='小桃追剧中', resume=False,
                      force=False):
@@ -159,6 +191,8 @@ class BatchCutManager:
                 'resume': bool(resume),
                 'force': bool(force),
                 'status': 'pending',
+                'stage': 'pending',
+                'progress': 0,
                 'created_at': datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
             }
             self.queue.append(task)
@@ -462,6 +496,9 @@ class BatchCutManager:
                             self._log('info', '切片完成：所有任务已处理')
                             break
                         task['status'] = 'cutting'
+                        task['stage'] = 'material_scan'
+                        task['progress'] = 1
+                        task['stage_message'] = '开始扫描素材'
                         task['started_at'] = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
                         task.pop('stopped_at', None)
                         task.pop('error', None)
@@ -483,6 +520,10 @@ class BatchCutManager:
 
                 cancelled = False
                 try:
+                    callback = lambda stage, progress, message, metadata, _task=task: \
+                        self._set_task_progress(_task, stage, progress, message, metadata)
+                    if hasattr(self.processor, 'set_cut_progress_callback'):
+                        self.processor.set_cut_progress_callback(callback)
                     cut_kwargs = {
                         'resume': task.get('resume', False),
                         'cancel_event': cancel_event,
@@ -503,6 +544,9 @@ class BatchCutManager:
                         if cancelled:
                             duration_seconds = self._elapsed_seconds(task.get('started_at'))
                             task['status'] = 'pending'
+                            task['stage'] = 'pending'
+                            task['progress'] = 0
+                            task['stage_message'] = '已停止，等待继续'
                             task.pop('started_at', None)
                             task['stopped_at'] = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
                             task['error'] = '用户已停止，任务已放回队列'
@@ -519,6 +563,11 @@ class BatchCutManager:
                             self._log('info', f'切片已停止：{task["drama_name"]}')
                         elif result.get('status') in ('success', 'skipped'):
                             task['status'] = 'completed'
+                            task['stage'] = 'completed'
+                            task['progress'] = 100
+                            task['stage_message'] = ('已有成片，跳过' if
+                                                     result.get('status') == 'skipped'
+                                                     else '切片完成，可复核内容风险')
                             task['completed_at'] = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
                             task['output_dirs'] = result.get('output_dirs', [])
                             task['skipped'] = result.get('status') == 'skipped'
@@ -541,6 +590,8 @@ class BatchCutManager:
                                 )
                         else:
                             task['status'] = 'failed'
+                            task['stage'] = 'failed'
+                            task['stage_message'] = result.get('error', '切片失败')
                             task['failed_at'] = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
                             task['error'] = result.get('error', '未知错误')
                             self.failed.append(task['id'])
@@ -560,6 +611,9 @@ class BatchCutManager:
                         if cancelled:
                             duration_seconds = self._elapsed_seconds(task.get('started_at'))
                             task['status'] = 'pending'
+                            task['stage'] = 'pending'
+                            task['progress'] = 0
+                            task['stage_message'] = '已停止，等待继续'
                             task.pop('started_at', None)
                             task['stopped_at'] = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
                             task['error'] = '用户已停止，任务已放回队列'
@@ -576,6 +630,8 @@ class BatchCutManager:
                             self._log('info', f'切片已停止：{task["drama_name"]}')
                         else:
                             task['status'] = 'failed'
+                            task['stage'] = 'failed'
+                            task['stage_message'] = str(exc)
                             task['failed_at'] = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
                             task['error'] = str(exc)
                             self.failed.append(task['id'])
@@ -590,6 +646,11 @@ class BatchCutManager:
                                 pass
                             self._log('error', f'切片异常：{task["drama_name"]} - {exc}')
                 finally:
+                    if hasattr(self.processor, 'set_cut_progress_callback'):
+                        try:
+                            self.processor.set_cut_progress_callback(None)
+                        except Exception:
+                            pass
                     with self.lock:
                         self.current_task = None
 

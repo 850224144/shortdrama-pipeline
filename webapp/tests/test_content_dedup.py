@@ -160,7 +160,7 @@ class UploadDedupTests(unittest.TestCase):
         self.assertEqual(len(res['duplicates']), 1)
         d = res['duplicates'][0]
         self.assertEqual(d['reason'], 'content_duplicate')
-        self.assertEqual(d['conflict'], '剧A V1')
+        self.assertEqual(d['conflict'], '[福桃说剧] 剧A V1')
 
     def test_add_batch_fingerprint_failure_passthrough(self):
         """指纹失败 → 保守放行。"""
@@ -193,6 +193,27 @@ class UploadDedupTests(unittest.TestCase):
             }])
         self.assertEqual(res['accepted'], 1)
         self.assertEqual(res['duplicates'], [])
+
+    def test_add_batch_rejects_cross_account_duplicate(self):
+        """A 账号已上传的内容换 B 账号发布也必须拒绝。"""
+        from content_fingerprint import FingerprintStore
+        store = FingerprintStore(
+            os.path.join(CONFIG['data_dir'], 'upload.db'))
+        existing = _video('跨号旧片_1_真相_去重版.mp4')
+        store.upsert('剧A', existing, [11, 12, 13], version=1,
+                     account='福桃说剧')
+        store.mark_uploaded(existing)
+        new = _video('跨号新片_1_真相_去重版.mp4')
+        with mock.patch('content_fingerprint.video_fingerprint',
+                        return_value=[11, 12, 13]):
+            res = self.mgr.add_batch([{
+                'drama_name': '剧B', 'video_path': new,
+                'account': '小桃追剧中', 'version': 1,
+            }])
+        self.assertEqual(res['accepted'], 0)
+        self.assertEqual(len(res['duplicates']), 1)
+        self.assertEqual(res['duplicates'][0]['reason'], 'content_duplicate')
+        self.assertIn('福桃说剧', res['duplicates'][0]['conflict'])
 
     def test_mark_uploaded_registers_flag(self):
         from content_fingerprint import FingerprintStore
