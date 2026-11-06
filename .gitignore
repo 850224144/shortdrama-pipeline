@@ -21,6 +21,7 @@ webapp/wechat_user_data/
 __pycache__/
 *.pyc
 *.pyo
+.pytest_cache/
 .hermes-tmp.*
 nul
 
@@ -37,6 +38,9 @@ webapp/_login_*.py
 
 # ===== 归档（历史遗留/诊断脚本，非源码，不入库）=====
 archive/
+
+# ===== AI 钩子工具运行时产物（不入库）=====
+ai_hook_tool/workdir/
 
 # ===== 诊断/探测产物（不入库）=====
 webapp/shell_probe.txt

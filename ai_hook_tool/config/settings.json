@@ -1,0 +1,26 @@
+{
+  "ffmpeg": "D:\\ffmpeg-master-latest-win64-gpl-shared\\bin\\ffmpeg.exe",
+  "ffprobe": "D:\\ffmpeg-master-latest-win64-gpl-shared\\bin\\ffprobe.exe",
+  "segment_sec": 10,
+  "segment_count_target": 3,
+  "total_min_sec": 30,
+  "segments_subdir": "segments",
+  "resolution": { "width": 1080, "height": 1920 },
+  "fps": 30,
+  "image_formats": [".png", ".jpg", ".jpeg", ".webp", ".bmp"],
+  "video_formats": [".mp4"],
+  "audio_format": ".mp3",
+  "badge_text": "含 AI 生成内容 · 仅供娱乐",
+  "badge": {
+    "font": "C:\\Windows\\Fonts\\msyh.ttc",
+    "fontsize": 36,
+    "margin": 60,
+    "alignment": "bottom",
+    "color": "white",
+    "outline_color": "black",
+    "outline": 1
+  },
+  "episode_label": "E01",
+  "title_max_len": 16,
+  "title_min_len": 4
+}

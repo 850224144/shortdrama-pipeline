@@ -1,0 +1,42 @@
+{
+  "version": "1.0",
+  "hard_rules": [
+    {
+      "id": "1.1",
+      "name": "人物一致(全AI)",
+      "block_level": "soft_warn",
+      "basis": "以定妆/剧照为锁脸参照生成，人工复核脸模一致性；脚本只校验存在性/时长/分辨率，不做自动相似度打分"
+    },
+    {
+      "id": "1.2",
+      "name": "内容一致(全AI)",
+      "block_level": "hard_fail",
+      "min_similarity": 0.5,
+      "basis": "前核15s保留首集核心情节，不整条新编；人工对照首集复核相同度"
+    },
+    {
+      "id": "1.3",
+      "name": "动物钩子接正剧",
+      "block_level": "hard_fail",
+      "basis": "动物/卡通段后必须接正剧内容，禁止纯动物钩子成条"
+    },
+    {
+      "id": "1.4",
+      "name": "时长达标",
+      "block_level": "hard_fail",
+      "min_duration_sec": 30,
+      "basis": "成片实测时长>=30s，禁止15s单条"
+    }
+  ],
+  "extra_rules": [
+    "题材垂直：成片与所选原剧同源同题材，去账号维度，不做账号-题材匹配",
+    "去工具标识：成片/字幕/背景不出现生成工具名称",
+    "合规标注：成片带『含 AI 生成内容 / 仅供娱乐』提示",
+    "素材可追溯：所用脸模/场景/钩子在素材库有登记"
+  ],
+  "verdict_levels": ["PASS", "FAIL", "PENDING", "WARN"],
+  "block_levels": {
+    "hard_fail": "退出报原因，不出片",
+    "soft_warn": "不中断流水线，照常拼接落盘，记录 WARN 不算通过"
+  }
+}
