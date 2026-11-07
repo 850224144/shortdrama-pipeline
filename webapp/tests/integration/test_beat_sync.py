@@ -17,7 +17,7 @@ import wave
 
 import numpy as np
 
-sys_path = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+sys_path = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 sys_path_parent = os.path.join(os.path.dirname(sys_path), 'scripts')
 import sys
 sys.path.insert(0, sys_path)

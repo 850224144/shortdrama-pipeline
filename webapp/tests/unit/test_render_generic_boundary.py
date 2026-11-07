@@ -12,7 +12,7 @@ import os
 import unittest
 from unittest import mock
 
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', '..', 'scripts'))
+# scripts 目录由 tests/conftest.py 统一注入 sys.path。
 import render_generic as rg
 
 

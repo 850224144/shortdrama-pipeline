@@ -7,7 +7,7 @@ import time
 from pathlib import Path
 
 # 添加路径
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from wechat_uploader import WeChatChannelsUploader
 
 def test_single_upload():

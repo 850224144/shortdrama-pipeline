@@ -10,7 +10,7 @@ import os
 import re
 import unittest
 
-sys_path = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+sys_path = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 HTML = os.path.join(sys_path, 'templates', 'dashboard.html')
 
 # 允许的插值：含 escapeHtml(...)，或非裸标识符（如三元/拼接/字面量）。

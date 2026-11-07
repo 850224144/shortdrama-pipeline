@@ -7,7 +7,7 @@ import time
 from DrissionPage import ChromiumPage
 
 # 添加路径
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from wechat_uploader import WeChatChannelsUploader
 
 def find_draft_button_only():

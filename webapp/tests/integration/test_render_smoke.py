@@ -22,7 +22,7 @@ from delivery_quality import validate_media
 
 FFMPEG = r'D:\ffmpeg-master-latest-win64-gpl-shared\bin\ffmpeg.exe'
 FFPROBE = r'D:\ffmpeg-master-latest-win64-gpl-shared\bin\ffprobe.exe'
-WEBAPP = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+WEBAPP = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 RENDER = os.path.join(WEBAPP, '..', 'scripts', 'render_generic.py')
 
 

@@ -135,7 +135,7 @@ class TestReRenderFromConfigs(unittest.TestCase):
             with mock.patch('processor.CONFIG', {
                 'download_base_dir': d,
                 'output_dir': os.path.join(d, 'output'),
-                'scripts_dir': os.path.dirname(os.path.dirname(__file__)),
+                'scripts_dir': os.path.dirname(os.path.dirname(os.path.dirname(__file__))),
             }), mock.patch.object(p, 'cut_batch', return_value=[]) as mcut:
                 # 直接验证 cut_batch 收到 resume=True 且不抛（回退发生在 _cut_once 内，
                 # 这里用 mock cut_batch 只验证透传）

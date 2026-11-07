@@ -15,7 +15,7 @@ import subprocess
 import tempfile
 import unittest
 
-sys_path = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+sys_path = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import sys
 sys.path.insert(0, sys_path)
 sys.path.insert(0, os.path.join(os.path.dirname(sys_path), 'scripts'))  # render_generic.py
