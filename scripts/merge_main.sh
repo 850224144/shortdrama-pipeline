@@ -8,7 +8,7 @@ set -euo pipefail
 
 cd "$(dirname "$0")/.."
 
-DEV_BRANCH="codex/pipeline-reliability"
+DEV_BRANCH="develop"
 PYEXE="C:/Users/86159/AppData/Local/Programs/Python/Python311/python.exe"
 
 echo "== 当前分支 =="
