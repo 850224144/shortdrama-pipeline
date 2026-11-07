@@ -25,6 +25,7 @@ from ai_copy_generator import AICopyGenerator
 from job_runtime import JobCancelled, execution_gate
 from job_store import JobStore
 from config import CONFIG
+from log_utils import make_entry
 
 
 # 标点符号列表
@@ -82,31 +83,28 @@ class Logger:
                         except: pass
         except: pass
     
-    def log(self, drama_name, level, message):
-        """记录日志"""
-        timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        log_entry = {
-            'timestamp': timestamp,
-            'drama_name': drama_name,
-            'level': level,
-            'message': message
-        }
-        
+    def log(self, drama_name, level, message, account='', task_id='', batch_id='', stage=''):
+        """记录日志；条目结构见 log_utils.make_entry。"""
+        log_entry = make_entry(
+            level, message, drama_name=drama_name, account=account,
+            task_id=task_id, batch_id=batch_id, stage=stage)
+        timestamp = log_entry['timestamp']
+
         with self.lock:
             self.logs.append(log_entry)
-            
-            # 写入文件
+
+            # 写入文件（人类可读行，格式保持不变）
             log_file = os.path.join(self.log_dir, f"{datetime.now().strftime('%Y%m%d')}.log")
             with open(log_file, 'a', encoding='utf-8') as f:
-                f.write(f"[{timestamp}] [{level}] [{drama_name}] {message}\n")
-        
+                f.write(f"[{timestamp}] [{log_entry['level']}] [{drama_name}] {message}\n")
+
         # 推送到前端
         if self.socketio:
             try:
                 self.socketio.emit('log_update', log_entry)
             except Exception as e:
                 print(f"推送日志失败: {e}")
-        
+
         return log_entry
     
     def get_recent_logs(self, limit=100):

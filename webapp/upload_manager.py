@@ -5,6 +5,7 @@
 """
 import os
 import json
+import logging
 import threading
 import time
 from datetime import datetime, timedelta
@@ -32,6 +33,7 @@ from wechat_uploader import WeChatChannelsUploader
 
 # 导入配置
 from config import CONFIG
+from log_utils import make_entry, context_from_task, get_logger
 
 # DrissionPage 已随 wechat_uploader 加载；此处模块级导入便于 mock 与复用
 from DrissionPage import ChromiumPage, ChromiumOptions
@@ -1324,11 +1326,11 @@ class UploadManager:
             return False
     
     def _log(self, level: str, message: str):
-        """记录日志"""
-        log_entry = {
-            'timestamp': datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
-            'level': level,
-            'message': message
-        }
+        """记录日志：统一结构化条目，上下文取自当前任务；控制台走标准库 logger。"""
+        ctx = context_from_task(self.current_task)
+        log_entry = make_entry(level, message, **ctx)
         self.logs.append(log_entry)
-        print(f'[{log_entry["timestamp"]}] [{level.upper()}] {message}')
+        if len(self.logs) > 100:
+            self.logs = self.logs[-100:]
+        py_level = getattr(logging, log_entry['level'], logging.INFO)
+        get_logger('upload').log(py_level, message)

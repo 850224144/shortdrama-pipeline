@@ -15,6 +15,7 @@ from datetime import datetime
 
 from job_runtime import execution_gate
 from job_store import JobStore
+from log_utils import make_entry, context_from_task
 
 
 class BatchCutManager:
@@ -679,16 +680,13 @@ class BatchCutManager:
             self._stop_heartbeat()
 
     def _log(self, level, message):
-        """记录切片队列日志（内存 + 任务库事件）。"""
-        entry = {
-            'timestamp': datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
-            'level': level,
-            'message': message,
-        }
+        """记录切片队列日志（内存 + 任务库事件）；条目结构见 log_utils.make_entry。"""
+        ctx = context_from_task(self.current_task)
+        entry = make_entry(level, message, **ctx)
         self.logs.append(entry)
         if len(self.logs) > 100:
             self.logs = self.logs[-100:]
         try:
-            self.store.add_event('', level, 'queue', message)
+            self.store.add_event(ctx.get('task_id', ''), entry['level'], 'queue', message)
         except Exception:
             pass
