@@ -23,10 +23,44 @@ def _video_scale_filter(index: int, res: dict) -> str:
     )
 
 
-def _build_complex(clips: list[dict], res: dict, badge: dict | None) -> tuple[str, list[str], bool]:
+def _subtitle_filter(index: int, subtitle: str, settings: dict) -> tuple[str, str | None]:
+    """Render a timed Chinese subtitle as an overlay, or return empty label."""
+    if not subtitle:
+        return f"[v{index}]", None
+    sub_cfg = settings.get("subtitle", {})
+    font = sub_cfg.get("font", r"C:\Windows\Fonts\msyh.ttc")
+    if not os.path.exists(font):
+        return f"[v{index}]", None
+    fd, text_file = tempfile.mkstemp(suffix=".txt", prefix="hook_subtitle_")
+    with os.fdopen(fd, "w", encoding="utf-8") as handle:
+        handle.write(subtitle.replace("\n", " "))
+    escaped_font = font.replace("\\", "/").replace(":", "\\:")
+    escaped_text = text_file.replace("\\", "/").replace(":", "\\:")
+    out = f"vs{index}"
+    return out, (
+        f"[v{index}]drawtext=fontfile='{escaped_font}':textfile='{escaped_text}':"
+        f"fontsize={sub_cfg.get('fontsize', 64)}:fontcolor={sub_cfg.get('color', 'white')}:"
+        f"borderw={sub_cfg.get('outline', 4)}:bordercolor={sub_cfg.get('outline_color', 'black')}:"
+        f"x=(w-text_w)/2:y=h-{sub_cfg.get('margin', 250)}[vs{index}]"
+    )
+
+
+def _build_complex(clips: list[dict], res: dict, badge: dict | None,
+                   settings: dict | None = None) -> tuple[str, list[str], bool]:
+    settings = settings or {}
     n = len(clips)
     parts = [_video_scale_filter(i, res) for i in range(n)]
-    v_concat = "".join(f"[v{i}]" for i in range(n))
+    subtitle_cfg = settings.get("subtitle", {})
+    subtitle_ready = bool(subtitle_cfg.get("enabled", True)
+                          and os.path.exists(subtitle_cfg.get("font", "")))
+    labels = []
+    for index, clip in enumerate(clips):
+        label, filter_string = _subtitle_filter(
+            index, clip.get("subtitle", "") if subtitle_ready else "", settings)
+        labels.append(f"[{label}]" if label.startswith("v") else f"[{label}]")
+        if filter_string:
+            parts.append(filter_string)
+    v_concat = "".join(labels)
     parts.append(f"{v_concat}concat=n={n}:v=1:a=0[vc]")
 
     has_audio = all(c.get("has_audio") for c in clips) and n > 0
@@ -72,8 +106,13 @@ def run_assemble(clips: list[dict], output_path: str, badge_text: str | None = N
     res = settings["resolution"]
     ffmpeg = cfg.ffmpeg_bin()
     warns: list[str] = []
+    subtitle_cfg = settings.get("subtitle", {})
+    subtitle_present = (not subtitle_cfg.get("enabled", True)
+                        or not os.path.exists(subtitle_cfg.get("font", ""))
+                        or all(bool(c.get("subtitle")) for c in clips))
     result = {"output": output_path, "duration": None, "width": None, "height": None,
-              "has_audio": False, "badge_ok": False, "warns": warns, "error": None}
+              "has_audio": False, "badge_ok": False, "subtitle_present": subtitle_present,
+              "warns": warns, "error": None}
 
     if not clips:
         result["error"] = "无片段可拼接"
@@ -86,10 +125,15 @@ def run_assemble(clips: list[dict], output_path: str, badge_text: str | None = N
     badge["text"] = badge_text or settings.get("badge_text", "")
 
     os.makedirs(os.path.dirname(output_path), exist_ok=True)
+    if not subtitle_present:
+        result["error"] = "钩子片段缺字幕文本；未生成成片"
+        return result
+    if subtitle_cfg.get("enabled", True) and not os.path.exists(subtitle_cfg.get("font", "")):
+        warns.append("中文字幕字体文件不存在；字幕无法烧录")
 
     def ffmpeg_cmd(with_badge: bool) -> list[str]:
         b = badge if with_badge else None
-        filter_complex, maps, has_audio = _build_complex(clips, res, b)
+        filter_complex, maps, has_audio = _build_complex(clips, res, b, settings)
         cmd = [ffmpeg, "-y"]
         for c in clips:
             cmd += ["-i", c["path"]]
@@ -98,6 +142,9 @@ def run_assemble(clips: list[dict], output_path: str, badge_text: str | None = N
                 "-r", str(settings.get("fps", 30)), "-pix_fmt", "yuv420p"]
         if has_audio:
             cmd += ["-c:a", "aac", "-b:a", "192k"]
+        elif subtitle_cfg.get("fallback_voiceover"):
+            cmd += ["-f", "lavfi", "-i", "anullsrc=channel_layout=stereo:sample_rate=44100",
+                    "-map", "1:a:0", "-shortest", "-c:a", "aac", "-b:a", "192k"]
         cmd += ["-movflags", "+faststart", output_path]
         return cmd
 

@@ -48,14 +48,27 @@ def collect(manifest: dict, seg_dirs: dict[str, str] | None = None,
     warns: list[str] = []
     pending: list[str] = []
     seen: set[str] = set()
+    hard_block: list[str] = []
+    strict_slots = bool(manifest.get("hook_qc") or manifest.get("hard_block"))
+    required = {
+        mf.SEG_PRE: max(1, int(cfg.keywords().get("hook", {}).get("min_pre_shots", 3))),
+        mf.SEG_HOOK: max(1, int(cfg.keywords().get("hook", {}).get("min_hook_shots", 2))),
+    }
 
     for seg_name, seg_dir, is_flat in sources:
         files = _clips_in(seg_dir)
 
         if not files:
             if not is_flat:
-                pending.append(f"{seg_name} 槽位无片段（可由扁平 segments 目录补齐）")
+                if strict_slots:
+                    hard_block.append(f"{seg_name} 必需槽位缺失：后钩子/前核未齐，禁止拼接")
+                else:
+                    pending.append(f"{seg_name} 槽位无片段（可由扁平 segments 目录补齐）")
             continue
+
+        if strict_slots and not is_flat and len(files) < required.get(seg_name, 1):
+            hard_block.append(
+                f"{seg_name} 片段只有 {len(files)} 个，少于必需的 {required.get(seg_name, 1)} 个")
 
         for idx, f in enumerate(files, start=1):
             if f in seen:
@@ -89,7 +102,25 @@ def collect(manifest: dict, seg_dirs: dict[str, str] | None = None,
 
     if not clips:
         missing.append("所有生成槽位均无片段（前核/后钩子/segments）")
+    if strict_slots and not any(c["segment"] == mf.SEG_HOOK for c in clips):
+        reason = "后钩子槽位没有实际片段；禁止用前核素材拼出≥30秒假钩子"
+        if reason not in hard_block:
+            hard_block.append(reason)
+    if strict_slots and len({c["path"] for c in clips
+                             if c["segment"] == mf.SEG_HOOK}) < required[mf.SEG_HOOK]:
+        reason = f"后钩子素材不足 {required[mf.SEG_HOOK]} 个独立片段"
+        if reason not in hard_block:
+            hard_block.append(reason)
 
     manifest["clips"] = clips
+    manifest["hard_block"] = list(dict.fromkeys(
+        list(manifest.get("hard_block", [])) + hard_block))
+    manifest["hook_qc"] = manifest.get("hook_qc", {})
+    manifest["hook_qc"]["collect_hard_block"] = list(dict.fromkeys(hard_block))
+    manifest["hook_qc"]["pre_clip_count"] = sum(
+        c["segment"] == mf.SEG_PRE for c in clips)
+    manifest["hook_qc"]["hook_clip_count"] = sum(
+        c["segment"] == mf.SEG_HOOK for c in clips)
     manifest["status"] = "collected" if clips else manifest["status"]
-    return {"clips": clips, "missing": missing, "warns": warns, "pending": pending}
+    return {"clips": clips, "missing": missing, "warns": warns, "pending": pending,
+            "hard_block": list(dict.fromkeys(hard_block))}

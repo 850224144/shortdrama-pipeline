@@ -1,5 +1,24 @@
 {
   "conflict_words": ["打脸", "傻", "死", "滚", "敢", "谁", "凭什么", "不可能", "疯了", "假", "真", "骗", "恨", "杀", "血", "泪", "巴掌", "逼", "骂", "欺负", "委屈", "怒", "对峙", "直播", "取乐", "刁难"],
   "suspense_words": ["发现", "秘密", "真相", "原来", "竟然", "居然", "突然", "没想到", "终于", "为什么", "到底", "藏着", "谁教", "认亲", "身份", "没想到"],
-  "punctuations": ["，", "。", "？", "！", "、", "：", "；", "“", "”", "（", "）", " ", "\t"]
+  "punctuations": ["，", "。", "？", "！", "、", "：", "；", "“", "”", "（", "）", " ", "\t"],
+  "high_intensity_phrases": ["这一巴掌", "打你老婆", "怀双胞胎难产", "双胞胎大出血", "换医生", "她在直播", "躲不掉了", "今天躲不掉", "出去", "衣服脱了", "上台"],
+  "low_signal_phrases": ["娇软傻白甜", "不会打车", "不会取快递", "吃虾让老公剥", "家里跳闸", "同学们还没占好位"],
+  "hook": {
+    "opening_max_sec": 3.0,
+    "min_candidates": 3,
+    "min_pre_shots": 3,
+    "min_hook_shots": 2,
+    "min_source_match": 0.5,
+    "cliffhanger_phrases": ["衣服脱了", "上台", "躲不掉了", "换医生", "开开眼"],
+    "cliffhanger_lead_window_sec": 15.0,
+    "source_script_role_bonus": 6.0
+  },
+  "subtitle": {
+    "max_chars_per_line": 14,
+    "font_size": 64,
+    "bottom_margin": 250,
+    "outline_width": 4,
+    "default_color": "white"
+  }
 }

@@ -30,6 +30,7 @@ def evaluate(material: dict, manifest: dict, collect_res: dict,
     rules: list[dict] = []
     warns: list[str] = []
     pending: list[str] = []
+    hook_fail_reasons: list[str] = []
 
     # 1.1 人物一致（软告警）
     if not material.get("faces"):
@@ -100,16 +101,57 @@ def evaluate(material: dict, manifest: dict, collect_res: dict,
     elif assemble_res:
         rules.append(_rule("badge", "AI 标注", "soft_warn", PASS, "角标已压上", False))
 
+    # Hook quality is a separate production gate. A duration-compliant concat
+    # can still be blocked when its opening or rear cliffhanger is missing.
+    hook_qc = manifest.get("hook_qc", {})
+    hook_reasons = (list(manifest.get("hard_block", []))
+                    + list(hook_qc.get("hard_block", []))
+                    + list(hook_qc.get("collect_hard_block", []))
+                    + list(collect_res.get("hard_block", [])))
+    if manifest and "segments" in manifest:
+        pre = next((s for s in manifest.get("segments", [])
+                    if s.get("segment") == "前核15s"), {})
+        rear = next((s for s in manifest.get("segments", [])
+                     if s.get("segment") == "后钩子15s"), {})
+        expected_pre = int(cfg.keywords().get("hook", {}).get("min_pre_shots", 3))
+        expected_rear = int(cfg.keywords().get("hook", {}).get("min_hook_shots", 2))
+        if len(pre.get("shots", [])) < expected_pre:
+            hook_reasons.append(f"前核只有 {len(pre.get('shots', []))} 镜，至少需要 {expected_pre} 镜")
+        if len(rear.get("shots", [])) < expected_rear:
+            hook_reasons.append(f"后钩子只有 {len(rear.get('shots', []))} 镜，至少需要 {expected_rear} 镜")
+        if hook_qc and not hook_qc.get("opening_within_limit", False):
+            hook_reasons.append("首镜未能证明位于首 3 秒内，缺少开场钩子证据")
+        if hook_qc and not hook_qc.get("subtitle_lines_present", False):
+            hook_reasons.append("有分镜缺少字幕行")
+        if assemble_res and assemble_res.get("output"):
+            clips = collect_res.get("clips", [])
+            rear_clips = [c for c in clips if c.get("segment") == "后钩子15s"]
+            if not rear_clips:
+                hook_reasons.append("成片未接入实际后钩子片段")
+        hook_reasons = list(dict.fromkeys(hook_reasons))
+        if hook_reasons:
+            rules.append(_rule("hook", "短视频钩子质量", "hard_fail", FAIL,
+                               "；".join(hook_reasons), True))
+            hook_fail_reasons.extend(hook_reasons)
+        elif hook_qc:
+            rules.append(_rule("hook", "短视频钩子质量", "hard_fail", PASS,
+                               "开场时间码、前核/后钩子槽位和字幕均齐备", False))
+        else:
+            rules.append(_rule("hook", "短视频钩子质量", "hard_fail", PENDING,
+                               "缺钩子质量证据，需重新生成脚本分镜", True))
+            hook_fail_reasons.append("缺钩子质量证据，需重新生成脚本分镜")
+
     # 音轨/字幕 PENDING 汇总
     for p in collect_res.get("pending", []):
         pending.append(p)
 
     # 汇总
     hard_fail = [r for r in rules if r["level"] == "hard_fail" and r["verdict"] == FAIL]
+    hook_block = bool(hook_fail_reasons)
     has_pending = any(r["verdict"] == PENDING for r in rules) or bool(pending)
     has_warn = any(r["verdict"] == WARN for r in rules) or bool(warns)
 
-    if hard_fail:
+    if hard_fail or hook_block:
         overall, block = FAIL, True
     elif has_pending:
         overall, block = PENDING, False
@@ -125,6 +167,8 @@ def evaluate(material: dict, manifest: dict, collect_res: dict,
         "warns": warns,
         "pending": pending,
         "fail_reasons": [r["detail"] for r in hard_fail],
+        "hook_block": hook_block,
+        "hook_fail_reasons": hook_fail_reasons,
     }
 
 

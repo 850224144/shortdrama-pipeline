@@ -75,7 +75,9 @@ def _cmd_script(args) -> int:
         return 1
 
     lines, pending_reason = transcribe.load_or_transcribe(mat)
-    short, long = quotes.extract_quotes(lines)
+    ranked = quotes.rank_quotes(lines, count=40)
+    short = [item["short_title"] for item in ranked]
+    long = [item["text"] for item in ranked]
     genre_res = genre.detect_genre(material.read_texts(mat["texts"]))
 
     kw = cfg.keywords()
@@ -84,10 +86,12 @@ def _cmd_script(args) -> int:
     if script_txt:
         entries = script_source.parse_script_txt(script_txt)
         txt_entries = script_source.pick_txt_candidates(
-            entries, kw["conflict_words"], kw["suspense_words"])
+            entries, kw["conflict_words"], kw["suspense_words"], count=40)
 
     source_ep = mat["first_episode"][1] if mat["first_episode"] else ""
-    man = script.build_script(mat, short, long, genre_res["genre"], source_ep, txt_entries)
+    man = script.build_script(mat, short, long, genre_res["genre"], source_ep,
+                              txt_entries, quote_records=ranked,
+                              transcript_lines=lines)
     if pending_reason:
         man["warns"].append(f"转写：{pending_reason}（PENDING）")
     if genre_res["pending"]:
@@ -99,6 +103,10 @@ def _cmd_script(args) -> int:
           f"后钩子 {len(mf.segment(man, mf.SEG_HOOK)['shots'])} 镜")
     for w in man["warns"]:
         print(f"  WARN/PENDING: {w}")
+    if man.get("hard_block"):
+        print("[script] HARD BLOCK: 前核/后钩子不完整；不应生成或拼接占位片段")
+        return 1
+    print("[script] 前核按 3 秒开场钩子生成；后钩子独立选段，字幕、原剧动作及时间码已写入")
     return 0
 
 
@@ -118,7 +126,10 @@ def _cmd_collect(_args) -> int:
         print(f"  WARN: {w}")
     for p in res["pending"]:
         print(f"  PENDING: {p}")
-    return 1 if res["missing"] else 0
+    if res.get("hard_block"):
+        for reason in res["hard_block"]:
+            print(f"  HARD BLOCK: {reason}")
+    return 1 if res["missing"] or res.get("hard_block") else 0
 
 
 def _cmd_assemble(args) -> int:
@@ -127,9 +138,27 @@ def _cmd_assemble(args) -> int:
     if not man:
         print("  无 manifest，请先跑 script/collect")
         return 1
+    if man.get("hard_block") or man.get("hook_qc", {}).get("hard_block"):
+        reasons = man.get("hard_block") or man.get("hook_qc", {}).get("hard_block", [])
+        for reason in reasons:
+            print(f"  HARD BLOCK: {reason}")
+        print("[assemble] 未达到钩子要求，拒绝拼接")
+        return 1
     clips = man.get("clips", [])
     if not clips:
         print("  无已收集片段，请先跑 collect")
+        return 1
+    segment_shots = {
+        seg.get("segment"): {shot.get("shot"): shot
+                             for shot in seg.get("shots", [])}
+        for seg in man.get("segments", [])
+    }
+    for clip in clips:
+        shot = segment_shots.get(clip.get("segment"), {}).get(clip.get("shot"), {})
+        clip["subtitle"] = shot.get("subtitle", "")
+        clip["subtitle_source_time"] = shot.get("source_time", {})
+    if not any(c.get("segment") == mf.SEG_HOOK for c in clips):
+        print("  HARD BLOCK: 后钩子缺少独立视频，禁止以前核片段代替")
         return 1
 
     out_name = assemble.compose_output_name(
@@ -176,8 +205,10 @@ def _cmd_gate(args) -> int:
         print(f"  PENDING: {p}")
     for f in report["fail_reasons"]:
         print(f"  FAIL: {f}")
+    for f in report.get("hook_fail_reasons", []):
+        print(f"  HOOK FAIL: {f}")
     print(f"[gate] 记录：{path}")
-    return 1 if report["block"] else 0
+    return 1 if report["block"] or report.get("hook_block") else 0
 
 
 def build_parser() -> argparse.ArgumentParser:

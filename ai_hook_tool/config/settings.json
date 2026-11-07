@@ -11,6 +11,16 @@
   "video_formats": [".mp4"],
   "audio_format": ".mp3",
   "badge_text": "含 AI 生成内容 · 仅供娱乐",
+  "subtitle": {
+    "enabled": true,
+    "font": "C:\\Windows\\Fonts\\msyh.ttc",
+    "fontsize": 64,
+    "margin": 250,
+    "outline": 4,
+    "color": "white",
+    "outline_color": "black",
+    "fallback_voiceover": true
+  },
   "badge": {
     "font": "C:\\Windows\\Fonts\\msyh.ttc",
     "fontsize": 36,
