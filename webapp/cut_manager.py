@@ -16,9 +16,10 @@ from datetime import datetime
 from job_runtime import execution_gate
 from job_store import JobStore
 from log_utils import make_entry, context_from_task
+from base_queue import BaseQueueManager
 
 
-class BatchCutManager:
+class BatchCutManager(BaseQueueManager):
     """批量切片管理器。
 
     停止是协作式取消：管理器向 processor 传 threading.Event，processor 在
@@ -30,6 +31,7 @@ class BatchCutManager:
     HEARTBEAT_INTERVAL = 5  # 秒：心跳线程刷新周期
 
     def __init__(self, processor, data_dir=None, store=None, output_root=None):
+        super().__init__()
         self.processor = processor
         self.data_dir = data_dir
         self.output_root = output_root
@@ -38,16 +40,9 @@ class BatchCutManager:
         else:
             db_path = f'{data_dir}/jobs.db' if data_dir else ':memory:'
             self.store = JobStore(db_path)
-        self.queue = []
-        self.current_task = None
+        # 公共状态（queue/current_task/paused/stopping/completed/failed/lock/logs）由基类初始化
         self.cutting = False
-        self.paused = False
-        self.stopping = False
-        self.completed = []
-        self.failed = []
-        self.lock = threading.Lock()
         self.cut_thread = None
-        self.logs = []
         self._cancel_event = None
         self._pipeline_owned = False
         self._heartbeat_thread = None

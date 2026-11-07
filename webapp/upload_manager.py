@@ -34,40 +34,27 @@ from wechat_uploader import WeChatChannelsUploader
 # 导入配置
 from config import CONFIG
 from log_utils import make_entry, context_from_task, get_logger
+from base_queue import BaseQueueManager
 
 # DrissionPage 已随 wechat_uploader 加载；此处模块级导入便于 mock 与复用
 from DrissionPage import ChromiumPage, ChromiumOptions
 
-class UploadManager:
+class UploadManager(BaseQueueManager):
     """上传队列管理器"""
     
     def __init__(self, data_dir: str = None):
+        super().__init__()
         self.data_dir = data_dir or CONFIG.get('data_dir', 'data')
         self.upload_log_file = os.path.join(self.data_dir, 'upload_log.json')
-        
+
         # 数据库路径
         self.db_path = os.path.join(self.data_dir, 'upload.db')
         self._init_database()
-        
-        # 队列状态
-        self.queue = []  # 待上传队列
-        self.current_task = None  # 当前上传任务
+
+        # 子类特有运行标志（公共 queue/current_task/paused/completed/failed/logs/lock 由基类初始化）
         self.uploading = False  # 是否正在上传
         self.prechecking = False  # 是否正在预检登录
-        self.paused = False  # 是否暂停
-        self.completed = []  # 已完成任务
-        self.failed = []  # 失败任务
-        
-        # 日志
-        self.logs = []
-        
-        # 线程锁
-        self.lock = threading.Lock()
-        
-        # 上传线程
         self.upload_thread = None
-        
-        # 账号列表
         self.accounts = []
         self.current_account = None
         
