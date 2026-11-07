@@ -32,7 +32,25 @@ if os.path.isdir(_SCRIPTS_DIR) and _SCRIPTS_DIR not in sys.path:
 import pytest  # noqa: E402
 
 from job_store import JobStore  # noqa: E402
-from config import reset_config  # noqa: E402
+from config import CONFIG, reset_config  # noqa: E402
+
+
+# unit 路径隔离：把固定盘符的机器目录重定向到临时根。
+# Processor 构造时会 os.makedirs(download_base_dir / output_dir)；默认值指向
+# 本机 E:/D: 素材盘，CI 干净环境无对应盘符会抛 FileNotFoundError。测试一律走临时目录，
+# 不依赖本机盘符存在；生产默认值与 config.yml / SHORTDRAMA_* 覆盖链路不变。
+_TEST_PATH_ROOT = tempfile.mkdtemp(prefix='sd_unit_')
+_ISOLATED_DIRS = {
+    'download_base_dir': 'download',
+    'output_dir': 'output',
+    'data_dir': 'data',
+    'log_dir': 'logs',
+}
+for _key, _sub in _ISOLATED_DIRS.items():
+    CONFIG[_key] = os.path.join(_TEST_PATH_ROOT, _sub)
+CONFIG['cache_path'] = os.path.join(CONFIG['data_dir'], 'dramaid_cache.json')
+CONFIG['state_file'] = os.path.join(CONFIG['data_dir'], 'pipeline_state.json')
+CONFIG['temp_dir'] = _TEST_PATH_ROOT
 
 
 @pytest.fixture
