@@ -17,6 +17,9 @@ from flask_socketio import SocketIO
 from processor import PipelineProcessor, Logger, StateManager
 from config import CONFIG
 
+# 共享资料库客户端（dramaid.lol 查询 + 剧集 ID 绑定）
+from dramaid_client import DramaidClient
+
 # 队列管理器与任务控制器
 from upload_manager import UploadManager
 from cut_manager import BatchCutManager
@@ -92,6 +95,10 @@ def unsupported_media_type(error):
 upload_manager = UploadManager(CONFIG['data_dir'])
 atexit.register(upload_manager.close_all_draft_boxes)
 
+# 共享资料库客户端：供 api/dramaid 蓝图与上传管理器（保存草稿前填剧集链接）共用
+dramaid_client = DramaidClient(CONFIG['data_dir'])
+upload_manager.set_dramaid_client(dramaid_client)
+
 # 初始化成品清理服务
 artifact_cleanup = ArtifactCleanup(CONFIG['data_dir'])
 # 批次自然结束时由后端 worker 触发自动清理（前端只展示结果）。
@@ -119,6 +126,7 @@ deps = {
     'upload_manager': upload_manager,
     'artifact_cleanup': artifact_cleanup,
     'batch_cut_manager': batch_cut_manager,
+    'dramaid_client': dramaid_client,
 }
 
 # ── 注册业务域蓝图 ──

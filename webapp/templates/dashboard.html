@@ -1541,7 +1541,7 @@
                         <button class="btn btn-secondary" onclick="window.open('http://dramaid.lol/','_blank')">↗ 打开原站</button>
                     </div>
                     <div id="dramaidHint" class="dramaid-hint" style="margin-top:var(--spacing-sm);color:var(--muted-foreground);font-size:13px;">
-                        免登录可查；点「复制 ID」取用剧集 ID（event/... 格式）。「内部 ID」是数字 ID，供下方按 ID 查上下架状态使用。
+                        免登录可查；点「复制 ID」取用剧集 ID（event/... 格式）。「内部 ID」是数字 ID，供下方按 ID 查上下架状态使用。点「设为该剧集ID」绑定剧名→ID，上传器保存草稿前会自动用它填「链接 → 视频号剧集」。
                     </div>
                     <div class="dramaid-status" style="margin-top:var(--spacing-md);border-top:1px solid var(--border);padding-top:var(--spacing-md);">
                         <h3 style="font-size:14px;margin-bottom:var(--spacing-sm);font-weight:600;">🔎 按 ID 查上下架状态（发布前确认用）</h3>
@@ -1555,16 +1555,17 @@
                     <table style="width:100%;margin-top:var(--spacing-md);border-collapse:collapse;">
                         <thead>
                             <tr>
-                                <th style="width:30%;">剧名</th>
-                                <th style="width:11%;">剧场</th>
-                                <th style="width:9%;">内部 ID</th>
-                                <th style="width:32%;">剧集 ID</th>
+                                <th style="width:26%;">剧名</th>
+                                <th style="width:10%;">剧场</th>
+                                <th style="width:8%;">内部 ID</th>
+                                <th style="width:26%;">剧集 ID</th>
                                 <th style="width:8%;">状态</th>
-                                <th style="width:10%;">操作</th>
+                                <th style="width:10%;">复制</th>
+                                <th style="width:12%;">绑定</th>
                             </tr>
                         </thead>
                         <tbody id="dramaidRows">
-                            <tr><td colspan="6" style="text-align:center;color:var(--muted-foreground);padding:24px;">输入剧名开始搜索</td></tr>
+                            <tr><td colspan="7" style="text-align:center;color:var(--muted-foreground);padding:24px;">输入剧名开始搜索</td></tr>
                         </tbody>
                     </table>
                     <div class="dramaid-pagination" style="margin-top:var(--spacing-sm);display:flex;justify-content:space-between;align-items:center;">
@@ -1950,7 +1951,7 @@
                 dramaidState.total = data.total || 0;
                 dramaidState.pages = Math.max(1, Math.ceil(dramaidState.total / 20));
                 if (!rows.length) {
-                    tbody.innerHTML = '<tr><td colspan="6" style="text-align:center;color:var(--muted-foreground);padding:24px;">未找到匹配剧集</td></tr>';
+                    tbody.innerHTML = '<tr><td colspan="7" style="text-align:center;color:var(--muted-foreground);padding:24px;">未找到匹配剧集</td></tr>';
                 } else {
                     tbody.innerHTML = rows.map(r => {
                         const name = escapeHtml(r.drama_name || '');
@@ -1964,12 +1965,13 @@
                             <td style="word-break:break-all;font-family:monospace;font-size:12px;">${id}</td>
                             <td>${dramaidBadge(r)}</td>
                             <td><button class="btn btn-secondary" style="padding:2px 8px;font-size:12px;" data-id="${id}" onclick="copyDramaidId(this)">📋 复制 ID</button></td>
+                            <td><button class="btn btn-secondary" style="padding:2px 8px;font-size:12px;" data-name="${name}" data-id="${id}" title="绑定该剧名→此剧集 ID，上传时自动填链接" onclick="bindDramaid(this)">📌 设为该剧集ID</button></td>
                         </tr>`;
                     }).join('');
                 }
                 updateDramaidPager();
             } catch (e) {
-                tbody.innerHTML = `<tr><td colspan="6" style="text-align:center;color:#e74c3c;padding:24px;">搜索失败：${escapeHtml(e.message || String(e))}</td></tr>`;
+                tbody.innerHTML = `<tr><td colspan="7" style="text-align:center;color:#e74c3c;padding:24px;">搜索失败：${escapeHtml(e.message || String(e))}</td></tr>`;
             }
         }
 
@@ -2000,6 +2002,35 @@
                     catch (e) { showNotification('复制失败，请手动复制', 'error'); }
                     document.body.removeChild(ta);
                 });
+        }
+
+        // 绑定剧名 → 剧集 ID：上传器保存草稿前自动用它填「链接 → 视频号剧集」
+        async function bindDramaid(btn) {
+            const name = btn.dataset.name;
+            const id = btn.dataset.id;
+            const type = (document.getElementById('dramaidType') || {}).value || 'series';
+            if (!name || !id) { showNotification('缺少剧名或剧集 ID', 'error'); return; }
+            btn.disabled = true;
+            const prev = btn.textContent;
+            try {
+                const resp = await fetch('/api/dramaid/bind', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ drama_name: name, drama_id: id, drama_type: type })
+                });
+                const data = await resp.json();
+                if (data.status === 'success') {
+                    showNotification(`已绑定「${name}」→ ${id.slice(0, 40)}…`, 'success');
+                    btn.textContent = '✅ 已绑定';
+                } else {
+                    showNotification(data.error || '绑定失败', 'error');
+                }
+            } catch (e) {
+                showNotification('绑定失败：' + (e.message || e), 'error');
+            } finally {
+                btn.disabled = false;
+                setTimeout(() => { btn.textContent = prev; }, 1500);
+            }
         }
 
         // 上下架状态徽章（is_published: 1 已上架 / 0 已下架；deleted_at 非空 = 回收站）
@@ -2658,6 +2689,9 @@
                                 <div class="queue-info">
                                     <div>${escapeHtml(task.drama_name)} V${escapeHtml(task.version)}</div>
                                     <div style="margin-top:3px;">${titleHtml}</div>
+                                    ${task.drama_id
+                                        ? `<div style="margin-top:3px;font-size:12px;color:var(--muted-foreground);">剧集ID: <code style="word-break:break-all;">${escapeHtml(task.drama_id)}</code>${task.drama_id_source === 'bound' ? '（已绑定）' : '（自动查）'}</div>`
+                                        : '<div style="margin-top:3px;font-size:12px;color:var(--muted-foreground);">剧集ID: 上传时自动查</div>'}
                                     ${task.error_message ? `<div class="queue-progress">错误: ${escapeHtml(task.error_message)}</div>` : ''}
                                 </div>
                             </div>`;

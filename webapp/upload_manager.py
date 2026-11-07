@@ -72,6 +72,9 @@ class UploadManager(BaseQueueManager):
         self._run_epoch = 0
         self._stop_epoch = -1
 
+        # 共享资料库客户端（保存草稿前填剧集链接用）；由 app.py 注入
+        self._dramaid_client = None
+
         # 服务重启后把未完成记录恢复到内存队列；否则数据库有任务但界面为空，
         # start_upload 会长期报“队列为空”。正在上传的记录统一降回 pending。
         self._restore_unfinished_queue()
@@ -79,6 +82,45 @@ class UploadManager(BaseQueueManager):
     def set_cleanup_callback(self, cb):
         """注入批次完成回调（batch_id → None）。app.py 绑定 artifact_cleanup。"""
         self._cleanup_callback = cb
+
+    def set_dramaid_client(self, client):
+        """注入共享资料库客户端（dramaid.lol 查询 + 剧集 ID 绑定）。
+
+        保存草稿前填剧集链接用：任务有绑定 ID 用之，否则上传时自动查。
+        """
+        self._dramaid_client = client
+
+    def _bound_id(self, drama_name):
+        """入队时取该剧已绑定的剧集 ID 快照（用于展示与上传）。
+
+        无 client / 未绑定 → (None, 'none')，上传时再自动查首条（A3 混合语义）。
+        """
+        client = getattr(self, '_dramaid_client', None)
+        if client is None:
+            return None, 'none'
+        try:
+            b = client.get_bound(drama_name)
+            if b and b.get('drama_id'):
+                return b['drama_id'], 'bound'
+        except Exception:
+            pass
+        return None, 'none'
+
+    def _resolve_task_drama_id(self, task):
+        """上传前解析剧集 ID（A3 混合语义）：绑定优先，未绑定自动查首条。
+
+        返回 (drama_id, source)。drama_id 可为 None；source ∈ bound|autolookup|
+        none|error。任何失败不抛异常——调用方跳过填链接、照常保存草稿。
+        """
+        if task.get('drama_id'):
+            return task['drama_id'], task.get('drama_id_source') or 'bound'
+        client = getattr(self, '_dramaid_client', None)
+        if client is None:
+            return None, 'none'
+        try:
+            return client.resolve(task.get('drama_name') or '')
+        except Exception as exc:
+            return None, f'error:{exc}'
 
     def _restore_unfinished_queue(self):
         """从 upload_records 恢复 pending/uploading 任务。"""
@@ -124,6 +166,8 @@ class UploadManager(BaseQueueManager):
                     'publish_time': row['publish_time'],
                     'cover_status': row['cover_status'] or 'not_requested',
                     'draft_saved': bool(row['draft_saved']),
+                    'drama_id': row['drama_id'],
+                    'drama_id_source': row['drama_id_source'] or 'none',
                     'restored_after_restart': True,
                 }
                 self.queue.append(task)
@@ -170,6 +214,8 @@ class UploadManager(BaseQueueManager):
             'cleanup_status': "TEXT DEFAULT 'none'",
             'cleanup_error': 'TEXT',
             'publish_time': 'TEXT',  # 计划发表时间（当天+day_offset 日，槽位按版本号循环）
+            'drama_id': 'TEXT',  # 剧集 ID（event/... 格式，保存草稿前填剧集链接用）
+            'drama_id_source': "TEXT DEFAULT 'none'",  # bound|autolookup|none|error
         }
         existing_cols = {row[1] for row in cursor.execute('PRAGMA table_info(upload_records)').fetchall()}
         for col, ddl in new_columns.items():
@@ -452,16 +498,19 @@ class UploadManager(BaseQueueManager):
                 topics_list = []
             topics_db = json.dumps(topics_list, ensure_ascii=False)
 
+            # 剧集 ID 快照：入队时若该剧已绑定则带上（上传时未绑定则自动查）
+            bound_id, bound_src = self._bound_id(drama_name)
+
             # 插入数据库
             with _connect_db(self.db_path) as conn:
                 cursor = conn.cursor()
                 cursor.execute('''
                     INSERT INTO upload_records 
                     (drama_name, version, video_path, cover_path, title, description, topics, account, status,
-                     batch_id, source_dir, output_dir, publish_time)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?, ?, ?, ?)
+                     batch_id, source_dir, output_dir, publish_time, drama_id, drama_id_source)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?, ?, ?, ?, ?, ?)
                 ''', (drama_name, version, video_path, cover_path, title, description, topics_db, _account,
-                      batch_id, source_dir, output_dir, publish_time))
+                      batch_id, source_dir, output_dir, publish_time, bound_id, bound_src))
                 record_id = cursor.lastrowid
             
             # 添加到内存队列
@@ -484,6 +533,8 @@ class UploadManager(BaseQueueManager):
                 'expected_versions': expected_versions,
                 'cover_status': 'not_requested',
                 'draft_saved': 0,
+                'drama_id': bound_id,
+                'drama_id_source': bound_src,
             }
             self.queue.append(task)
             
@@ -585,18 +636,21 @@ class UploadManager(BaseQueueManager):
                     # 标题缺省读 edl_config，计划时间缺省按版本号自动计算
                     title = item.get('title') or self._read_edl_title(video_path, version)
                     publish_time = item.get('publish_time') or self._compute_publish_time(version)
+                    # 剧集 ID 快照：入队时若该剧已绑定则带上
+                    bound_id, bound_src = self._bound_id(drama)
                     cur = conn.cursor()
                     cur.execute('''
                         INSERT INTO upload_records
                         (drama_name, version, video_path, cover_path, title,
                          description, topics, account, status,
-                         batch_id, source_dir, output_dir, publish_time)
-                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?, ?, ?, ?)
+                         batch_id, source_dir, output_dir, publish_time,
+                         drama_id, drama_id_source)
+                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?, ?, ?, ?, ?, ?)
                     ''', (drama, version, video_path, item.get('cover_path'),
                           title, item.get('description'), topics_db,
                           account, item.get('batch_id'),
                           item.get('source_dir'), item.get('output_dir'),
-                          publish_time))
+                          publish_time, bound_id, bound_src))
                     record_id = cur.lastrowid
                     ids.append(record_id)
 
@@ -621,6 +675,8 @@ class UploadManager(BaseQueueManager):
                         'expected_versions': exp_versions,
                         'cover_status': 'not_requested',
                         'draft_saved': 0,
+                        'drama_id': bound_id,
+                        'drama_id_source': bound_src,
                     })
 
             self.queue.extend(new_tasks)
@@ -1276,6 +1332,21 @@ class UploadManager(BaseQueueManager):
                 task['error_message'] = '登录失败'
                 return False
 
+            # 剧集 ID（保存草稿前填「链接 → 视频号剧集」用，A3 混合语义）：
+            # 任务有绑定 ID 用之；未绑定则自动查上游首条；查不到/失败则不填，
+            # 照常保存草稿（不阻断发布）。结果写回 task 供日志与前端展示。
+            drama_id, drama_src = self._resolve_task_drama_id(task)
+            task['drama_id'] = drama_id
+            task['drama_id_source'] = drama_src
+            if drama_id:
+                self._log('info',
+                          f'V{task["version"]} 剧集链接将用 [{drama_src}] ID：'
+                          f'{drama_id}（剧名 {task["drama_name"]}）')
+            else:
+                self._log('warn',
+                          f'V{task["version"]} 未取得剧集 ID（{drama_src}），'
+                          f'跳过填链接，照常保存草稿')
+
             # 执行上传（传递位置参数）
             # upload_to_draft 现在返回结构化 dict，不再返回 bool：
             #   {'status': 'success'|'failed', 'draft_saved': bool,
@@ -1286,7 +1357,9 @@ class UploadManager(BaseQueueManager):
                 title=title or '短剧精彩片段',
                 tags=topics or [],
                 description=description or '',
-                cover_path=cover_path
+                cover_path=cover_path,
+                drama_name=task['drama_name'],
+                drama_id=drama_id,
             )
 
             if isinstance(outcome, dict):

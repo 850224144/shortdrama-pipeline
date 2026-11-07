@@ -359,7 +359,63 @@ COVER_CARD_FP_JS = r'''
 })()
 '''
 
-    
+# 发表页写入「链接 → 视频号剧集」（保存草稿前用）。复用已手工验证的注入逻辑：
+# 发表页是 wujie 微前端，内容渲染在 <wujie-app> 的 shadow DOM；选中剧集存在
+# .post-create-wrap 组件的 Vue 状态（componentId/componentName）。先 $set 响应式
+# 开启剧集权限开关（无权限账号 entranceInfo 里根本没有这些 key，直接赋值不触发
+# 响应式，必须 $set），再调用组件自带的 updateComponent({componentType:8,...})
+# 正确写入链接（componentType:8 = 视频号剧集）。__COMPONENT_ID__/__COMPONENT_NAME__
+# 由 Python 用 json.dumps 嵌入（保证 JS 字符串字面量安全）。
+DRAMA_LINK_FILL_JS = r'''
+(function() {
+    var newId = __COMPONENT_ID__;
+    var newName = __COMPONENT_NAME__;
+    var wa = document.querySelector('wujie-app');
+    if (!wa || !wa.shadowRoot) return {ok: false, error: '未找到编辑器（wujie-app）'};
+    var sr = wa.shadowRoot;
+
+    var linkVue = null, us = null;
+    var seen = new Set();
+    var all = sr.querySelectorAll('*');
+    for (var i = 0; i < all.length; i++) {
+        var v = all[i].__vue__;
+        if (!v || seen.has(v)) continue;
+        seen.add(v);
+        var d = v.$data || {};
+        if (!linkVue && d.hasOwnProperty('curLink')) linkVue = v;
+        if (!us && d.userStore && typeof d.userStore === 'object') us = d.userStore;
+        if (linkVue && us) break;
+    }
+
+    var post = sr.querySelector('.post-create-wrap');
+    if (!post || !post.__vue__) return {ok: false, error: '未找到编辑器组件'};
+    var pv = post.__vue__;
+    var cur = pv.$data || {};
+
+    // 响应式开启剧集权限开关（$set：无权限账号的 entranceInfo 无此 key）
+    if (linkVue && us && typeof linkVue.$set === 'function') {
+        try {
+            if (us.entranceInfo && typeof us.entranceInfo === 'object') {
+                linkVue.$set(us.entranceInfo, 'nativeDramaSelfOperatedEntrance', 1);
+            }
+            if (us.switchInfo && typeof us.switchInfo === 'object') {
+                linkVue.$set(us.switchInfo, 'enablePostWithDrama', 1);
+            }
+            linkVue.$set(us, 'canPostFinderDrama', true);
+        } catch (e) {}
+    }
+
+    var name2 = (typeof newName === 'string' && newName) ? newName : (cur.componentName || '');
+    var id2 = (typeof newId === 'string' && newId) ? newId : (cur.componentId || '');
+    if (!id2) return {ok: false, error: '缺少剧集 ID（componentId）'};
+    if (!name2) name2 = '剧集';
+
+    pv.updateComponent({componentName: name2, componentId: id2, componentType: 8});
+    return {ok: true, componentId: pv.$data.componentId, componentName: pv.$data.componentName};
+})()
+'''
+
+
 
 class WeChatChannelsUploader:
     """视频号自动上传器"""
@@ -1575,6 +1631,41 @@ return (() => {
         logger.warning(f'草稿箱未找到标题（timeout={timeout}s）: {title}')
         return False
 
+    def _fill_drama_link(self, component_id, component_name):
+        """保存草稿前，在发表页写入「链接 → 视频号剧集」（复用已验证注入逻辑）。
+
+        任何失败不抛异常——返回 False，调用方跳过填链接、照常保存草稿。
+
+        Returns: bool（True=已写入；False=失败/未找到，跳过不阻断）
+        """
+        if not component_id:
+            logger.warning('无剧集 ID，跳过填链接')
+            return False
+        if not getattr(self, 'page', None):
+            logger.warning('无页面对象，跳过填链接')
+            return False
+        page = self.page
+        import json as _json
+        js = (DRAMA_LINK_FILL_JS
+              .replace('__COMPONENT_ID__',
+                       _json.dumps(str(component_id), ensure_ascii=False))
+              .replace('__COMPONENT_NAME__',
+                       _json.dumps(str(component_name or ''), ensure_ascii=False)))
+        try:
+            result = page.run_js(js, as_expr=True) or {}
+        except Exception as e:
+            logger.warning(f'写入剧集链接失败（跳过，不阻断）: {e}')
+            return False
+        if isinstance(result, dict) and result.get('ok'):
+            logger.info(
+                f"✅ 剧集链接已写入：{result.get('componentName')} / "
+                f"{result.get('componentId')}")
+            return True
+        logger.warning(
+            f"写入剧集链接未成功（跳过）: "
+            f"{result.get('error') if isinstance(result, dict) else result}")
+        return False
+
     def _save_draft(self, title, baseline_count=None):
         logger.info('开始保存草稿...')
         
@@ -1931,7 +2022,8 @@ return (() => {
             'error': error or '上传失败',
         }
 
-    def upload_to_draft(self, video_path, title, tags, description, cover_path=None):
+    def upload_to_draft(self, video_path, title, tags, description, cover_path=None,
+                        drama_name=None, drama_id=None):
         """
         上传视频到草稿箱
         
@@ -1941,6 +2033,9 @@ return (() => {
             tags: 话题标签列表
             description: 描述
             cover_path: 封面图路径（可选）
+            drama_name: 剧名（填剧集链接用，可选）
+            drama_id: 剧集 ID（event/... 格式；提供则在保存草稿前写入
+                      「链接 → 视频号剧集」。查不到/失败自动跳过，不阻断）
         
         Returns:
             dict: {'status': 'success'|'failed',
@@ -2130,6 +2225,13 @@ return (() => {
                     logger.warning(f"封面上传未成功（不阻断）: {cover_result.get('error')}")
             else:
                 logger.info('无封面，跳过封面上传')
+
+            # 5.5 保存草稿前写入「链接 → 视频号剧集」（失败/未提供则跳过，不阻断）
+            if drama_id:
+                logger.info(f'填写剧集链接：{drama_name or ""} / {drama_id}')
+                self._fill_drama_link(drama_id, drama_name)
+            else:
+                logger.info('未提供剧集 ID，跳过填链接')
 
             # 6. 保存草稿（重试：视频可能仍在上传，保存被拒则等待重试）
             logger.info('保存草稿...')

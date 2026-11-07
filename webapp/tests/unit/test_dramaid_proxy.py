@@ -5,13 +5,15 @@
 上游连通性由人工冒烟（tests/manual 或直接调用真实端点）覆盖。
 """
 import json
+import tempfile
 import unittest
 from unittest import mock
 
 import requests
 from flask import Flask
 
-from api.dramaid import create_dramaid_bp, DRAMAID_BASE, SEARCH_TIMEOUT
+from api.dramaid import create_dramaid_bp
+from dramaid_client import DramaidClient, DRAMAID_BASE, SEARCH_TIMEOUT
 
 
 class _FakeResponse:
@@ -22,10 +24,15 @@ class _FakeResponse:
 
 
 def _client(get_impl):
-    """构造只挂载 dramaid 蓝图的最小 Flask app，返回 test_client。"""
-    with mock.patch('api.dramaid.requests.Session') as session_cls:
+    """构造只挂载 dramaid 蓝图的最小 Flask app，返回 test_client。
+
+    DramaidClient 的 `_session` 用 mock 替换（不访问网络），只验证本代理的
+    行为契约；上游连通性由人工冒烟覆盖。
+    """
+    with mock.patch('dramaid_client.requests.Session') as session_cls:
         session_cls.return_value.get = get_impl
-        bp = create_dramaid_bp({})
+        client = DramaidClient(tempfile.mkdtemp())
+    bp = create_dramaid_bp({'dramaid_client': client})
     app = Flask(__name__)
     app.register_blueprint(bp)
     return app.test_client()
@@ -160,6 +167,54 @@ class TestDramaidStatus(unittest.TestCase):
         body = json.loads(resp.data.decode('utf-8'))
         self.assertEqual(body['status'], 'error')
         self.assertIn('共享资料库连接失败', body['error'])
+
+
+class TestDramaidBind(unittest.TestCase):
+    """剧名 → 剧集 ID 绑定：/api/dramaid/bind 与 /api/dramaid/bound。"""
+
+    def _bound_client(self):
+        """带真实绑定库的 client（不访问网络；get 只用于 search 路径）。"""
+        with mock.patch('dramaid_client.requests.Session') as session_cls:
+            session_cls.return_value.get = lambda url, params=None, timeout=None: \
+                _FakeResponse({'data': [], 'total': 0})
+            client = DramaidClient(tempfile.mkdtemp())
+        bp = create_dramaid_bp({'dramaid_client': client})
+        app = Flask(__name__)
+        app.register_blueprint(bp)
+        return app.test_client(), client
+
+    def test_bind_requires_name_and_id(self):
+        c, _ = self._bound_client()
+        for body in ({}, {'drama_name': '前夫'}, {'drama_id': 'event/x'}):
+            resp = c.post('/api/dramaid/bind', json=body)
+            self.assertEqual(resp.status_code, 400, f'应拦截: {body}')
+            self.assertIn('缺少', json.loads(resp.data.decode('utf-8'))['error'])
+
+    def test_bind_upserts_and_bound_reads_back(self):
+        c, client = self._bound_client()
+        resp = c.post('/api/dramaid/bind',
+                      json={'drama_name': '前夫', 'drama_id': 'event/a1',
+                            'drama_type': 'series'})
+        self.assertEqual(resp.status_code, 200)
+        self.assertEqual(json.loads(resp.data.decode('utf-8'))['status'], 'success')
+
+        resp = c.get('/api/dramaid/bound?drama_name=前夫')
+        bound = json.loads(resp.data.decode('utf-8'))
+        self.assertEqual(bound['drama_id'], 'event/a1')
+        self.assertEqual(bound['drama_type'], 'series')
+
+        # 幂等：重复绑定更新，不新增行
+        c.post('/api/dramaid/bind',
+               json={'drama_name': '前夫', 'drama_id': 'event/b2', 'drama_type': 'series'})
+        resp = c.get('/api/dramaid/bound')
+        items = json.loads(resp.data.decode('utf-8'))['items']
+        self.assertEqual(len(items), 1)
+        self.assertEqual(items[0]['drama_id'], 'event/b2')
+
+    def test_bound_unknown_returns_null(self):
+        c, _ = self._bound_client()
+        resp = c.get('/api/dramaid/bound?drama_name=不存在剧')
+        self.assertEqual(json.loads(resp.data.decode('utf-8')), None)
 
 
 if __name__ == '__main__':
