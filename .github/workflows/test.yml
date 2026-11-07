@@ -1,0 +1,79 @@
+name: Test gate (unit)
+
+# 测试门禁：develop 分支推送 / PR 时自动跑 unit（纯逻辑 + 临时目录 + mock，不起浏览器、
+# 不跑 ffmpeg 子进程、不依赖真实素材，可秒级跑完）。
+#
+# 分层边界（对齐 webapp/tests/README.md）：
+# - unit：自动门禁，每次 push / PR 执行。
+# - integration：依赖 ffmpeg、浏览器与登录态，不在自动门禁内；仅手动触发时做收集校验
+#   （--collect-only，确认无 import 报错），真实运行仍在本地 / manual 脚本完成。
+#
+# 选 windows-latest：本项目是 Windows 单机工具，unit 断言含 Windows 路径分隔符与
+# ffprobe.exe 后缀，与开发/运行环境保持一致，规避跨平台路径差异。
+
+on:
+  push:
+    branches: [develop]
+  pull_request:
+    branches: [develop]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: test-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  unit:
+    name: Unit tests (Python 3.11, Windows)
+    runs-on: windows-latest
+    defaults:
+      run:
+        working-directory: webapp
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: pip
+          cache-dependency-path: webapp/requirements.txt
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r requirements.txt -r requirements-dev.txt
+
+      - name: Run unit tests
+        run: python -m pytest tests/unit -q -rf
+
+  integration-collect:
+    name: Integration collect-only (manual)
+    # 仅手动触发；不真实运行 integration，只校验收集阶段无 import / 路径报错。
+    if: github.event_name == 'workflow_dispatch'
+    runs-on: windows-latest
+    defaults:
+      run:
+        working-directory: webapp
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: pip
+          cache-dependency-path: webapp/requirements.txt
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r requirements.txt -r requirements-dev.txt
+
+      - name: Collect integration tests (no run)
+        run: python -m pytest tests/integration --collect-only -q
