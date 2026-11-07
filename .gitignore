@@ -25,6 +25,8 @@ __pycache__/
 .pytest_cache/
 .hermes-tmp.*
 nul
+.venv/
+venv/
 
 # ===== 二进制工具（体积大，不入库，README 里写依赖说明）=====
 tools/*.exe
