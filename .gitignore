@@ -13,6 +13,7 @@ data/*.db
 data/*.db-wal
 data/*.db-shm
 data/*.csv
+data/download_quarantine/
 
 # ===== 浏览器登录态（493MB cookie，绝不能传）=====
 webapp/wechat_user_data/
