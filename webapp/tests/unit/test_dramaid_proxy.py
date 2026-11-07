@@ -105,5 +105,62 @@ class TestDramaidProxyFailure(unittest.TestCase):
         self.assertIn('connection reset', body['error'])
 
 
+class TestDramaidStatus(unittest.TestCase):
+    """按内部 ID 查上下架状态：/api/dramaid/status。"""
+
+    def test_numeric_id_forwards_and_passthrough(self):
+        payload = {'id': 18657, 'drama_name': '前夫请让路', 'is_published': 1,
+                   'deleted_at': None, 'drama_type': 'series', 'drama_id': 'event/x'}
+        calls = {}
+
+        def fake_get(url, params=None, timeout=None):
+            calls['url'] = url
+            calls['timeout'] = timeout
+            return _FakeResponse(payload)
+
+        c = _client(fake_get)
+        resp = c.get('/api/dramaid/status?id=18657')
+
+        self.assertEqual(resp.status_code, 200)
+        self.assertEqual(resp.mimetype, 'application/json')
+        self.assertEqual(json.loads(resp.data.decode('utf-8')), payload)
+        self.assertEqual(calls['url'], DRAMAID_BASE + '/api/dramas/18657')
+        self.assertEqual(calls['timeout'], SEARCH_TIMEOUT)
+
+    def test_non_numeric_or_missing_id_returns_400_without_request(self):
+        calls = []
+
+        def fake_get(url, params=None, timeout=None):
+            calls.append(url)
+            return _FakeResponse({})
+
+        c = _client(fake_get)
+        for qs in ('', '?id=', '?id=abc', '?id=12a3', '?id=劇名'):
+            resp = c.get('/api/dramaid/status' + qs)
+            self.assertEqual(resp.status_code, 400, f'应拦截: {qs}')
+            self.assertIn('id 参数无效', json.loads(resp.data.decode('utf-8'))['error'])
+        self.assertEqual(calls, [], '非法 id 不应转发上游')
+
+    def test_upstream_404_passthrough(self):
+        upstream = {'error': '剧集不存在'}
+        c = _client(lambda url, params=None, timeout=None: _FakeResponse(
+            upstream, status=404))
+        resp = c.get('/api/dramaid/status?id=999999')
+        self.assertEqual(resp.status_code, 404)
+        self.assertEqual(json.loads(resp.data.decode('utf-8')), upstream)
+
+    def test_request_exception_returns_502(self):
+        def boom(url, params=None, timeout=None):
+            raise requests.RequestException('connection reset')
+
+        c = _client(boom)
+        resp = c.get('/api/dramaid/status?id=18657')
+
+        self.assertEqual(resp.status_code, 502)
+        body = json.loads(resp.data.decode('utf-8'))
+        self.assertEqual(body['status'], 'error')
+        self.assertIn('共享资料库连接失败', body['error'])
+
+
 if __name__ == '__main__':
     unittest.main()
