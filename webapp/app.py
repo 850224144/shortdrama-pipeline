@@ -48,6 +48,7 @@ from api.login import create_login_bp
 from api.cleanup import create_cleanup_bp
 from api.upload import create_upload_bp
 from api.cut import create_cut_bp
+from api.dramaid import create_dramaid_bp
 
 apply_env_overrides(CONFIG)
 
@@ -129,6 +130,7 @@ app.register_blueprint(create_login_bp(deps))
 app.register_blueprint(create_cleanup_bp(deps))
 app.register_blueprint(create_upload_bp(deps))
 app.register_blueprint(create_cut_bp(deps))
+app.register_blueprint(create_dramaid_bp(deps))
 
 
 # ── WebSocket 事件 ──────────────────────────────────────

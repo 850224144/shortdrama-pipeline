@@ -1298,6 +1298,7 @@
                 <div class="tab" onclick="switchTab('upload')">🚀 批量上传</div>
                 <div class="tab" onclick="switchTab('cut')">✂️ 批量切片</div>
                 <div class="tab" onclick="switchTab('archive')">🗂️ 剧级档案</div>
+                <div class="tab" onclick="switchTab('dramaid')">📚 共享资料库</div>
             </div>
 
             <div class="tab-content active" id="logsTab">
@@ -1524,6 +1525,47 @@
                     </table>
                 </div>
             </div>
+
+            <div class="tab-content" id="dramaidTab">
+                <div class="upload-panel">
+                    <h2>📚 共享资料库（dramaid.lol 按剧名查剧集 ID）</h2>
+                    <div class="upload-controls">
+                        <input type="text" id="dramaidKeyword" placeholder="输入剧名（如：前夫、双胞胎）..." style="flex:1;"
+                               onkeydown="if(event.key==='Enter'){event.preventDefault();searchDramaid(1);}">
+                        <select id="dramaidType">
+                            <option value="series">剧集 ID（视频号剧集）</option>
+                            <option value="mini_drama">小程序 ID（绿泡泡小程序）</option>
+                            <option value="ai_drama">AI 剧集 ID（需登录原站）</option>
+                        </select>
+                        <button class="btn btn-primary" onclick="searchDramaid(1)">🔍 搜索</button>
+                        <button class="btn btn-secondary" onclick="window.open('http://dramaid.lol/','_blank')">↗ 打开原站</button>
+                    </div>
+                    <div id="dramaidHint" class="dramaid-hint" style="margin-top:var(--spacing-sm);color:var(--muted-foreground);font-size:13px;">
+                        免登录可查；搜索结果来自共享资料库，点「复制 ID」可一键取用剧集 ID（event/... 格式）。
+                    </div>
+                    <table style="width:100%;margin-top:var(--spacing-md);border-collapse:collapse;">
+                        <thead>
+                            <tr>
+                                <th style="width:34%;">剧名</th>
+                                <th style="width:14%;">剧场</th>
+                                <th style="width:42%;">剧集 ID</th>
+                                <th style="width:10%;">操作</th>
+                            </tr>
+                        </thead>
+                        <tbody id="dramaidRows">
+                            <tr><td colspan="4" style="text-align:center;color:var(--muted-foreground);padding:24px;">输入剧名开始搜索</td></tr>
+                        </tbody>
+                    </table>
+                    <div class="dramaid-pagination" style="margin-top:var(--spacing-sm);display:flex;justify-content:space-between;align-items:center;">
+                        <span id="dramaidTotal" style="color:var(--muted-foreground);font-size:13px;"></span>
+                        <div>
+                            <button class="btn btn-secondary" id="dramaidPrev" onclick="dramaidPage(-1)">← 上一页</button>
+                            <span id="dramaidPage" style="margin:0 10px;font-size:13px;"></span>
+                            <button class="btn btn-secondary" id="dramaidNext" onclick="dramaidPage(1)">下一页 →</button>
+                        </div>
+                    </div>
+                </div>
+            </div>
         </div>
     </div>
 
@@ -1678,6 +1720,10 @@
             }
             if (tab === 'upload') {
                 loadUploadAccounts();
+            }
+            if (tab === 'dramaid') {
+                // 懒加载：首次进入初始化分页按钮状态（不自动搜，等用户输入）
+                if (typeof updateDramaidPager === 'function') updateDramaidPager();
             }
         }
 
@@ -1864,6 +1910,82 @@
             setTimeout(() => {
                 notification.classList.remove('show');
             }, 3000);
+        }
+
+        // ── 共享资料库（dramaid.lol 按剧名搜剧集 ID）────────────
+        let dramaidState = { page: 1, keyword: '', type: 'series', total: 0, pages: 1 };
+
+        async function searchDramaid(page = 1) {
+            const keyword = document.getElementById('dramaidKeyword').value.trim();
+            const type = document.getElementById('dramaidType').value;
+            dramaidState = { page, keyword, type, total: 0, pages: 1 };
+            const tbody = document.getElementById('dramaidRows');
+            if (!keyword) {
+                tbody.innerHTML = '<tr><td colspan="4" style="text-align:center;color:var(--muted-foreground);padding:24px;">输入剧名开始搜索</td></tr>';
+                updateDramaidPager();
+                return;
+            }
+            tbody.innerHTML = '<tr><td colspan="4" style="text-align:center;padding:24px;">搜索中…</td></tr>';
+            try {
+                const params = new URLSearchParams({ keyword, drama_type: type, page: String(page), page_size: '20' });
+                const resp = await fetch('/api/dramaid/search?' + params.toString());
+                const data = await resp.json();
+                if (data && data.error) {
+                    tbody.innerHTML = `<tr><td colspan="4" style="text-align:center;color:#e67e22;padding:24px;">${escapeHtml(data.error)}</td></tr>`;
+                    updateDramaidPager();
+                    return;
+                }
+                const rows = data.data || [];
+                dramaidState.total = data.total || 0;
+                dramaidState.pages = Math.max(1, Math.ceil(dramaidState.total / 20));
+                if (!rows.length) {
+                    tbody.innerHTML = '<tr><td colspan="4" style="text-align:center;color:var(--muted-foreground);padding:24px;">未找到匹配剧集</td></tr>';
+                } else {
+                    tbody.innerHTML = rows.map(r => {
+                        const name = escapeHtml(r.drama_name || '');
+                        const theater = escapeHtml(r.theater_name || '');
+                        const id = escapeHtml(r.drama_id || '');
+                        return `<tr>
+                            <td>${name}</td>
+                            <td>${theater || '—'}</td>
+                            <td style="word-break:break-all;font-family:monospace;font-size:12px;">${id}</td>
+                            <td><button class="btn btn-secondary" style="padding:2px 8px;font-size:12px;" data-id="${id}" onclick="copyDramaidId(this)">📋 复制 ID</button></td>
+                        </tr>`;
+                    }).join('');
+                }
+                updateDramaidPager();
+            } catch (e) {
+                tbody.innerHTML = `<tr><td colspan="4" style="text-align:center;color:#e74c3c;padding:24px;">搜索失败：${escapeHtml(e.message || String(e))}</td></tr>`;
+            }
+        }
+
+        function updateDramaidPager() {
+            document.getElementById('dramaidTotal').textContent = dramaidState.total ? `共 ${dramaidState.total} 条` : '';
+            document.getElementById('dramaidPage').textContent = `第 ${dramaidState.page} / ${dramaidState.pages} 页`;
+            document.getElementById('dramaidPrev').disabled = dramaidState.page <= 1;
+            document.getElementById('dramaidNext').disabled = dramaidState.page >= dramaidState.pages;
+        }
+
+        function dramaidPage(delta) {
+            const next = dramaidState.page + delta;
+            if (next < 1 || next > dramaidState.pages) return;
+            searchDramaid(next);
+        }
+
+        function copyDramaidId(btn) {
+            const id = btn.dataset.id;
+            if (!id) return;
+            (navigator.clipboard ? navigator.clipboard.writeText(id) : Promise.reject())
+                .then(() => showNotification('已复制剧集 ID', 'success'))
+                .catch(() => {
+                    const ta = document.createElement('textarea');
+                    ta.value = id;
+                    document.body.appendChild(ta);
+                    ta.select();
+                    try { document.execCommand('copy'); showNotification('已复制剧集 ID', 'success'); }
+                    catch (e) { showNotification('复制失败，请手动复制', 'error'); }
+                    document.body.removeChild(ta);
+                });
         }
 
         // BaiduPCS-Go登录状态
