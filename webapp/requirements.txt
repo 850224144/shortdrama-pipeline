@@ -1,3 +1,21 @@
-flask>=2.3.0
-flask-socketio>=5.3.0
-python-socketio>=5.9.0
+# 运行依赖（按源码 import 反推，版本下限取本机已验证版本）
+# Python 3.11
+
+# Web / SocketIO
+flask>=3.0.0
+flask-socketio>=5.7.0
+python-socketio>=5.17.0
+
+# 配置 / 数据处理
+PyYAML>=6.0.3
+numpy>=2.2.4
+
+# 共享资料库代理（api/dramaid.py）、AI 文案（ai_copy_generator.py）
+requests>=2.31.0
+
+# 视频号上传（upload_manager.py / wechat_uploader.py）
+DrissionPage>=4.1.1.4
+Pillow>=11.2.1
+
+# 可选：ASR 转写（transcribe_dir.py 专用，体积较大，按需安装）
+# faster-whisper>=1.1.0
