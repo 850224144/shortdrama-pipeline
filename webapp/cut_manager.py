@@ -139,6 +139,7 @@ class BatchCutManager:
                 'account': task.get('account', '小桃追剧中'),
                 'resume': bool(task.get('resume', False)),
                 'force': bool(task.get('force', False)),
+                'config': task.get('config'),
             },
             'result': result,
             'error': task.get('error'),
@@ -176,8 +177,12 @@ class BatchCutManager:
             pass
 
     def add_to_queue(self, drama_name, account='小桃追剧中', resume=False,
-                     force=False):
-        """添加切片任务到队列。"""
+                     force=False, config=None):
+        """添加切片任务到队列。
+
+        config：本剧切制参数覆盖（version_count/min_dur/max_dur/reuse_material/
+        watermark），None 走代码默认；由 processor._resolve_cut_config 合并。
+        """
         with self.lock:
             for task in self.queue:
                 if (task['drama_name'] == drama_name and
@@ -190,6 +195,7 @@ class BatchCutManager:
                 'account': account,
                 'resume': bool(resume),
                 'force': bool(force),
+                'config': config,
                 'status': 'pending',
                 'stage': 'pending',
                 'progress': 0,
@@ -532,6 +538,10 @@ class BatchCutManager:
                     # 才传 force，真实 processor 支持该参数。
                     if task.get('force', False):
                         cut_kwargs['force'] = True
+                    # 本剧切制参数覆盖（None = 走代码默认）
+                    task_cfg = task.get('config') if task is not None else None
+                    if task_cfg is not None:
+                        cut_kwargs['config'] = task_cfg
                     result = self.processor.manual_cut(task['drama_name'],
                                                        **cut_kwargs)
                     cancelled = bool(

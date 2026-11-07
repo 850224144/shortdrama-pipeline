@@ -207,15 +207,17 @@ class TestIncrementalReportsAndSourcePattern(unittest.TestCase):
         cases = {
             '第10集.mp4': '第{ep}集.mp4',
             '第01集.mp4': '第{ep:02d}集.mp4',
-            '剧名 - 第10集.mp4': '{name} - 第{ep}集.mp4',
-            '剧名-第10集.mp4': '{name}-第{ep}集.mp4',
-            '剧名第10集.mp4': '{name}第{ep}集.mp4',
-            '剧名第01集.mp4': '{name}第{ep:02d}集.mp4',
+            # 2026-11-05 修复：前缀用样例文件真实字面量（而非 {name} 占位符），
+            # 剧名带序号前缀而文件名不带时不再失配；匹配结果与旧行为一致。
+            '剧名 - 第10集.mp4': '剧名 - 第{ep}集.mp4',
+            '剧名-第10集.mp4': '剧名-第{ep}集.mp4',
+            '剧名第10集.mp4': '剧名第{ep}集.mp4',
+            '剧名第01集.mp4': '剧名第{ep:02d}集.mp4',
             '10.mp4': '{ep}.mp4',
             '01.mp4': '{ep:02d}.mp4',
-            '剧名-10.mp4': '{name}-{ep}.mp4',
-            '剧名-01.mp4': '{name}-{ep:02d}.mp4',
-            '剧名_10.mp4': '{name}_{ep}.mp4',
+            '剧名-10.mp4': '剧名-{ep}.mp4',
+            '剧名-01.mp4': '剧名-{ep:02d}.mp4',
+            '剧名_10.mp4': '剧名_{ep}.mp4',
         }
         for filename, expected in cases.items():
             self.assertEqual(p._detect_source_pattern(filename), expected,

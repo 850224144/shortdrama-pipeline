@@ -124,11 +124,16 @@ def _startup_download_resume():
             link = params.get('link')
             if not link:
                 return
+            # 失败任务自动续传：记录次数，防永久失效源无限重试。
+            if job.get('status') == 'failed':
+                processor.bump_download_auto_resume(job.get('id'))
             pwd = params.get('pwd') or CONFIG['download'].get('default_pwd', '9999')
             msg = link if 'pwd=' in link else f"{link}?pwd={pwd}"
             logger.log('system', 'WARN', f'启动恢复：续传中断下载 {link}')
             body, status = process_controller.start(msg)
-            if status == 200:
+            # start 成功返回 202（Accepted），非 200；判 <300 才算接受，
+            # 否则每次启动恢复都误报「被拒」并多余重试一次。
+            if isinstance(status, int) and status < 300:
                 logger.log('system', 'INFO', f'启动恢复：已提交续传任务')
                 return
             logger.log('system', 'WARN',
@@ -934,11 +939,13 @@ def add_cut_task():
         drama_name = data.get('drama_name')
         account = data.get('account', '小桃追剧中')
         force = data.get('force', False)
+        config = data.get('config') or None
         
         if not drama_name:
             return jsonify({'status': 'failed', 'error': '缺少剧名'}), 400
         
-        result = batch_cut_manager.add_to_queue(drama_name, account, force=force)
+        result = batch_cut_manager.add_to_queue(
+            drama_name, account, force=force, config=config)
         
         from flask import Response
         import json
@@ -1075,6 +1082,110 @@ def reconcile_cut_queue():
         report = batch_cut_manager.reconcile()
         return Response(json.dumps({'status': 'success', 'report': report},
                                    ensure_ascii=False), mimetype='application/json')
+    except Exception as e:
+        from flask import Response
+        import json
+        return Response(json.dumps({'status': 'failed', 'error': str(e)}, ensure_ascii=False), mimetype='application/json', status=500)
+
+# ── 本剧切制参数（cut_config）────────────────────────────
+@app.route('/api/cut/config', methods=['GET'])
+def get_cut_config():
+    """读取本剧切制参数。
+
+    ?drama=<剧名> → 该剧生效配置（默认合并覆盖，供 UI 回显）
+    无 drama → 所有已设置覆盖的列表 + 代码默认值。
+    """
+    try:
+        from flask import Response
+        import json
+        drama = (request.args.get('drama') or '').strip()
+        _store = getattr(batch_cut_manager, 'store', None)
+        if not _store or not hasattr(_store, 'get_cut_config'):
+            return Response(json.dumps({'status': 'error',
+                                        'error': '任务库不支持 cut_config'},
+                                       ensure_ascii=False),
+                            mimetype='application/json', status=500)
+        if drama:
+            row = _store.get_cut_config(drama)
+            # 合并代码默认：前端总是拿到完整生效值
+            effective = batch_cut_manager.processor._resolve_cut_config(row)
+            return Response(json.dumps({'status': 'success',
+                                        'drama': drama,
+                                        'config': effective,
+                                        'override': row or None},
+                                       ensure_ascii=False),
+                            mimetype='application/json')
+        rows = _store.list_cut_configs()
+        return Response(json.dumps({'status': 'success',
+                                    'configs': rows,
+                                    'defaults': dict(
+                                        __import__('processor', fromlist=['DEFAULT_CUT_CONFIG']).DEFAULT_CUT_CONFIG)},
+                                   ensure_ascii=False),
+                        mimetype='application/json')
+    except Exception as e:
+        from flask import Response
+        import json
+        return Response(json.dumps({'status': 'failed', 'error': str(e)}, ensure_ascii=False), mimetype='application/json', status=500)
+
+
+@app.route('/api/cut/config', methods=['POST'])
+def post_cut_config():
+    """写入/覆盖本剧切制参数。
+
+    body: {drama_name, version_count?, min_dur?, max_dur?, reuse_material?,
+           watermark?}。只写非 None 字段（保持旧值）。
+    """
+    try:
+        from flask import Response
+        import json
+        data = request.get_json() or {}
+        drama = (data.get('drama_name') or '').strip()
+        if not drama:
+            return jsonify({'status': 'failed', 'error': '缺少剧名'}), 400
+        _store = getattr(batch_cut_manager, 'store', None)
+        if not _store or not hasattr(_store, 'upsert_cut_config'):
+            return jsonify({'status': 'failed',
+                            'error': '任务库不支持 cut_config'}), 500
+        _store.upsert_cut_config(
+            drama,
+            version_count=data.get('version_count'),
+            min_dur=data.get('min_dur'),
+            max_dur=data.get('max_dur'),
+            reuse_material=data.get('reuse_material'),
+            watermark=data.get('watermark'))
+        effective = batch_cut_manager.processor._resolve_cut_config(
+            _store.get_cut_config(drama))
+        return Response(json.dumps({'status': 'success',
+                                    'drama': drama,
+                                    'config': effective},
+                                   ensure_ascii=False),
+                        mimetype='application/json')
+    except Exception as e:
+        from flask import Response
+        import json
+        return Response(json.dumps({'status': 'failed', 'error': str(e)}, ensure_ascii=False), mimetype='application/json', status=500)
+
+
+@app.route('/api/cut/config', methods=['DELETE'])
+def delete_cut_config():
+    """删除本剧切制参数（恢复代码默认）。"""
+    try:
+        from flask import Response
+        import json
+        drama = (request.args.get('drama') or '').strip()
+        if not drama:
+            return jsonify({'status': 'failed', 'error': '缺少剧名'}), 400
+        _store = getattr(batch_cut_manager, 'store', None)
+        if not _store or not hasattr(_store, 'delete_cut_config'):
+            return jsonify({'status': 'failed',
+                            'error': '任务库不支持 cut_config'}), 500
+        _store.delete_cut_config(drama)
+        effective = batch_cut_manager.processor._resolve_cut_config(None)
+        return Response(json.dumps({'status': 'success',
+                                    'drama': drama,
+                                    'config': effective},
+                                   ensure_ascii=False),
+                        mimetype='application/json')
     except Exception as e:
         from flask import Response
         import json

@@ -141,6 +141,24 @@ PUNCTUATIONS = ['，', '。', '？', '！', '、', '：', '；', '“', '”', '
 CutCancelled = JobCancelled
 
 
+# 每部剧的切制参数默认值（用户可逐剧覆盖，存 job_store.cut_config）。
+# 语义（用户拍板 A）：时长与版本数无关——每版都在 [min_dur, max_dur] 内。
+# max_dur=330 修复原 CONFIG['duration']['max_final']=1200 导致的 V1 膨胀
+# （63 段/21 分钟 → 渲染 600s 超时 → 素材池耗尽 → 仅 1 版成功）。
+DEFAULT_CUT_CONFIG = {
+    'version_count': None,     # None = 自动（集数判定 + 素材容量 clamp）
+    'min_dur': 180.0,          # 单版成片下限（s）
+    'max_dur': 330.0,          # 单版成片上限（s）≈5.5 分钟
+    'reuse_material': False,   # False = 跨版本零复用（版本差异化）
+    'watermark': None,         # None = 输出目录账号名
+}
+# 绝对安全边界：无论配置怎么设，版本数/时长不超过这些（防手误）
+CUT_CONFIG_ABS = {
+    'version_min': 1, 'version_max': 8,
+    'dur_min': 60.0, 'dur_max': 1200.0,
+}
+
+
 class DownloadStalled(Exception):
     """下载卡顿：进程存活但长时间无新文件产出（P1 卡顿检测）。"""
     pass
@@ -554,6 +572,45 @@ class PipelineProcessor:
         return False, None
     
     
+    def _resolve_cut_config(self, config):
+        """把原始 config（可为 None/部分字段）解析为完整默认合并配置。
+
+        - version_count: None=自动；否则 clamp 到 [1, 8]（用户硬性要求）。
+        - min_dur/max_dur: clamp 到 [60, 1200]，且保证 min < max。
+        - reuse_material: 布尔。
+        - watermark: None=账号名。
+        """
+        rc = dict(DEFAULT_CUT_CONFIG)
+        if isinstance(config, dict):
+            for k in DEFAULT_CUT_CONFIG:
+                if config.get(k) is not None:
+                    rc[k] = config[k]
+        # 版本数 clamp 1-8
+        vc = rc.get('version_count')
+        if vc is not None:
+            try:
+                rc['version_count'] = max(
+                    CUT_CONFIG_ABS['version_min'],
+                    min(CUT_CONFIG_ABS['version_max'], int(vc)))
+            except (TypeError, ValueError):
+                rc['version_count'] = None
+        # 时长 clamp + 保证 min < max
+        try:
+            rc['min_dur'] = max(CUT_CONFIG_ABS['dur_min'],
+                                min(CUT_CONFIG_ABS['dur_max'],
+                                    float(rc['min_dur'])))
+            rc['max_dur'] = max(CUT_CONFIG_ABS['dur_min'],
+                                min(CUT_CONFIG_ABS['dur_max'],
+                                    float(rc['max_dur'])))
+            if rc['min_dur'] >= rc['max_dur']:
+                rc['max_dur'] = min(CUT_CONFIG_ABS['dur_max'],
+                                    rc['min_dur'] + 60.0)
+        except (TypeError, ValueError):
+            rc['min_dur'] = float(DEFAULT_CUT_CONFIG['min_dur'])
+            rc['max_dur'] = float(DEFAULT_CUT_CONFIG['max_dur'])
+        rc['reuse_material'] = bool(rc.get('reuse_material'))
+        return rc
+
     def determine_version_count(self, ep_count):
         """判断版本数"""
         if ep_count >= 30:
@@ -690,11 +747,15 @@ class PipelineProcessor:
             with self.lock:
                 self.processing = False
     
-    def manual_cut(self, drama_name, resume=False, force=False, cancel_event=None):
+    def manual_cut(self, drama_name, resume=False, force=False, cancel_event=None,
+                   config=None):
         """手动切片 - 从素材目录直接切片
 
         resume=True：失败续跑，只重渲染保留的 edl_config，不重新生成 EDL；
         无保留 config 时自动回退全量重切。
+
+        config：本剧切制参数覆盖（version_count/min_dur/max_dur/reuse_material/
+        watermark），None 走代码默认；调用方（UI）先合并 job_store.cut_config。
         """
         if not drama_name:
             return {'status': 'failed', 'error': '请输入剧名'}
@@ -731,7 +792,16 @@ class PipelineProcessor:
         
         self.logger.log('system', 'INFO', f'找到{len(mp4_files)}集素材，开始切片...')
 
-        expected_count = self.determine_version_count(len(mp4_files))
+        # 本剧切制参数：resolve 后一路透传到 _cut_once / _generate_edl_versions。
+        cut_cfg = self._resolve_cut_config(config)
+        expected_count = (cut_cfg['version_count']
+                          if cut_cfg['version_count'] is not None
+                          else self.determine_version_count(len(mp4_files)))
+        if cut_cfg['version_count'] is not None:
+            self.logger.log('system', 'INFO',
+                            f'本剧切制配置：{expected_count}版，'
+                            f'时长{cut_cfg["min_dur"]:.0f}-{cut_cfg["max_dur"]:.0f}s，'
+                            f'素材复用{"开" if cut_cfg["reuse_material"] else "关"}')
 
         # 重复切片检查：只有达到目标版本数才跳过。旧逻辑看到任意一部成片
         # 就返回 skipped，导致 2/8、6/8 的批次永远无法继续完成。
@@ -755,7 +825,8 @@ class PipelineProcessor:
             'downloaded_files': mp4_files,
             'src_dir': src_dir,
             'success': True,
-            'error': None
+            'error': None,
+            'cut_config': cut_cfg,
         }
         
         # 切片
@@ -1294,8 +1365,11 @@ class PipelineProcessor:
                 self.logger.log(dir_name, 'INFO', f'开始下载：{dir_name}')
 
             if download_cmd is not None:
-                # P1: 共享进度状态（last 时间戳供卡顿探测，eps 供集号级进度）
-                progress = {'last': time.monotonic(), 'count': len(local_eps), 'eps': local_eps}
+                # P1: 共享进度状态（last 时间戳供卡顿探测，eps 供集号级进度）。
+                # size 从 0 起：监控线程按「总字节增长」刷新 last，避免续传时
+                # 目标目录集数与暂存目录文件数基数不同导致误判卡顿（P1 根因修复）。
+                progress = {'last': time.monotonic(), 'count': len(local_eps),
+                            'size': 0, 'eps': local_eps}
                 stop_monitor = threading.Event()
                 monitor_thread = threading.Thread(
                     target=self._monitor_download_progress,
@@ -1463,6 +1537,9 @@ class PipelineProcessor:
                 }
             
         except CutCancelled:
+            self._promote_staged_on_failure(
+                locals().get('staging_dir'), locals().get('target_dir'),
+                locals().get('dir_name'))
             self._finalize_download_job(download_job_id, False, '用户已停止任务')
             return {
                 'success': False,
@@ -1476,6 +1553,10 @@ class PipelineProcessor:
         except DownloadStalled:
             # P1: 卡顿已由 _run_command_cancellable 终止并抛错。
             # P2: 保留网盘备份（本地残缺，续传靠 --overwrite=never 补缺失集）。
+            # 失败也先把暂存区已完成的集数提升到目标目录，避免滞留。
+            self._promote_staged_on_failure(
+                locals().get('staging_dir'), locals().get('target_dir'),
+                locals().get('dir_name'))
             self._finalize_download_job(download_job_id, False, '下载卡顿')
             return {
                 'success': False,
@@ -1488,6 +1569,9 @@ class PipelineProcessor:
         except subprocess.TimeoutExpired:
             # P2: 超时不再删除网盘备份 —— 本地残缺时云端源是续传的基础。
             # 保留 /短剧素材/{dir_name}，下次重试走"已存在"分支复用。
+            self._promote_staged_on_failure(
+                locals().get('staging_dir'), locals().get('target_dir'),
+                locals().get('dir_name'))
             self._finalize_download_job(download_job_id, False, '下载超时')
             self.logger.log(dir_name if 'dir_name' in locals() else link_dir_name,
                             'WARN', '下载超时：保留网盘备份待续传，不删除云端文件')
@@ -1501,6 +1585,9 @@ class PipelineProcessor:
             }
         except Exception as e:
             # P2: 异常也不删除网盘备份 —— 保留云端源待续传。
+            self._promote_staged_on_failure(
+                locals().get('staging_dir'), locals().get('target_dir'),
+                locals().get('dir_name'))
             self._finalize_download_job(download_job_id, False, str(e))
             self.logger.log(dir_name if 'dir_name' in locals() else link_dir_name,
                             'WARN', f'下载异常：保留网盘备份待续传（{str(e)}）')
@@ -1561,16 +1648,59 @@ class PipelineProcessor:
         except Exception as e:
             self.logger.log('system', 'WARN', f'更新下载任务状态失败：{e}')
 
+    # 可自动续传的失败原因（网络/限速类瞬态失败；转存失败等永久错误不自动重试）
+    _AUTO_RESUME_FAIL_MARKERS = ('下载卡顿', '下载超时', '下载不完整',
+                                 '下载完成但未找到文件', '下载异常',
+                                 'Failed after')
+    _AUTO_RESUME_MAX = 3  # 同一任务自动续传上限，防永久失效源无限重试
+
     def find_orphaned_download_jobs(self):
-        """返回心跳过期且 status=downloading 的下载任务（崩溃遗留，待续传）。"""
+        """返回待续传的下载任务：
+        - 心跳过期且 status=downloading 的崩溃遗留；
+        - 可恢复的 failed 任务（瞬态失败且自动续传次数未超限），
+          让卡顿/超时后无需人工干预即可续传（P1 修复增强）。
+        """
         try:
             store = self._download_job_store()
-            return store.stale_jobs(job_type='download',
+            jobs = store.stale_jobs(job_type='download',
                                     statuses=('downloading',),
                                     window_seconds=90)
+            failed = store.list(job_type='download', statuses=('failed',))
+            now = datetime.now()
+            for job in failed:
+                err = (job.get('error') or '')
+                if not any(m in err for m in self._AUTO_RESUME_FAIL_MARKERS):
+                    continue
+                params = job.get('params') or {}
+                if int(params.get('auto_resume', 0) or 0) >= self._AUTO_RESUME_MAX:
+                    continue
+                # 仅自动续传 48h 内失败的，避免复活很久前已被人工处理的旧任务。
+                finished = job.get('finished_at')
+                if finished:
+                    try:
+                        ft = datetime.strptime(finished, '%Y-%m-%d %H:%M:%S')
+                        if (now - ft).total_seconds() > 48 * 3600:
+                            continue
+                    except ValueError:
+                        pass
+                jobs.append(job)
+            return jobs
         except Exception as e:
             self.logger.log('system', 'WARN', f'查找中断下载任务失败：{e}')
             return []
+
+    def bump_download_auto_resume(self, job_id):
+        """记录一次自动续传（防同一任务无限重试）。"""
+        try:
+            store = self._download_job_store()
+            job = store.get(job_id)
+            if not job:
+                return
+            params = dict(job.get('params') or {})
+            params['auto_resume'] = int(params.get('auto_resume', 0) or 0) + 1
+            store.update(job_id, params=params)
+        except Exception as e:
+            self.logger.log('system', 'WARN', f'记录自动续传失败：{e}')
 
     # ── P4: 网盘文件清单（缺失集比对）────────────────────────────
     def _list_cloud_files(self, cloud_dir):
@@ -1699,10 +1829,16 @@ class PipelineProcessor:
                             eps.append(n)
                     eps = sorted(set(eps))
 
-                    # P1: 共享进度状态（last 时间戳、count、eps）
+                    # P1: 共享进度状态（last 时间戳、size、count、eps）
+                    # 用「总字节增长」判定下载活性而非「文件数增长」：
+                    # 续传时目标目录已含旧集数，暂存目录文件数基数不同，按文件数
+                    # 会永不刷新 last → 300s 后误判卡顿（P1 根因修复）；单文件
+                    # 下载慢时字节持续增长也能正确保持活性。
                     if progress is not None:
-                        if len(mp4_files) > progress.get('count', 0):
+                        if total_size > progress.get('size', 0):
                             progress['last'] = time.monotonic()
+                            progress['size'] = total_size
+                        if len(mp4_files) > progress.get('count', 0):
                             progress['count'] = len(mp4_files)
                         progress['eps'] = eps
 
@@ -1893,6 +2029,21 @@ class PipelineProcessor:
                 dir_name, 'INFO',
                 f'下载整理完成：上移{moved}个文件，隔离重复{quarantined}个')
         return moved, quarantined
+
+    def _promote_staged_on_failure(self, staging_dir, target_dir, dir_name):
+        """下载失败/卡顿/超时/取消路径：把暂存区已完成的文件提升到目标目录。
+
+        原实现只在整体成功时整理暂存区，失败路径会把已下完的集数滞留
+        .incoming（如娇妻婆婆为我挡风雨 6,14,15,18,42 卡顿后滞留）。本方法在
+        各异常处理分支调用，确保失败也保留进度，下次续传仅下载真正缺失的集数。
+        """
+        try:
+            if (staging_dir and target_dir and dir_name
+                    and os.path.isdir(staging_dir)):
+                self._normalize_download_tree(staging_dir, target_dir, dir_name)
+        except Exception as e:
+            self.logger.log(dir_name or 'system', 'WARN',
+                            f'失败路径提升暂存文件异常：{e}')
 
     def _validate_download_layout(self, target_dir):
         """校验增量下载的最终布局；返回问题列表，空列表表示通过。"""
@@ -2185,6 +2336,9 @@ class PipelineProcessor:
         """单次切片"""
         # 从下载目录提取实际剧名
         drama_name = download_result.get('drama_name') or download_result.get('link_id', '')
+        # 本剧切制参数（manual_cut 已 resolve；下载批路径无 config 走默认）
+        cut_cfg = (download_result.get('cut_config')
+                   or self._resolve_cut_config(None))
         self._emit_cut_progress('material_scan', 2, f'扫描素材：{drama_name}')
         if cancel_event is not None and cancel_event.is_set():
             return {
@@ -2226,8 +2380,10 @@ class PipelineProcessor:
         
         # 去重检查：按计划版本数判断是否真的完成，而非“有任意成片就跳过”。
         downloaded = download_result.get('downloaded_files') or []
-        expected_count = self.determine_version_count(
-            len(self._dedupe_episodes_by_number(downloaded)))
+        expected_count = (cut_cfg['version_count']
+                          if cut_cfg['version_count'] is not None
+                          else self.determine_version_count(
+                              len(self._dedupe_episodes_by_number(downloaded))))
         should, reason = self.should_process(
             drama_name, src_dir, out_dir, expected_count=expected_count,
             force=force)
@@ -2287,7 +2443,9 @@ class PipelineProcessor:
             all_eps = [ep[1] for ep in episodes]  # 只取文件路径
             
             ep_count = len(all_eps)
-            version_count = self.determine_version_count(ep_count)
+            version_count = (cut_cfg['version_count']
+                             if cut_cfg['version_count'] is not None
+                             else self.determine_version_count(ep_count))
             self._emit_cut_progress('material_scan', 8,
                                     f'识别 {ep_count} 集素材', episodes=ep_count)
             
@@ -2345,11 +2503,13 @@ class PipelineProcessor:
                             'version_budget', 27,
                             '按独立素材容量计算安全版本数')
                         version_count = self._capacity_version_count(
-                            edl_eps, drama_name)
+                            edl_eps, drama_name, config=cut_cfg)
                     except Exception as e:
                         self.logger.log(drama_name, 'WARN',
                                         f'方案B容量计算异常，用集数判定：{e}')
-                        version_count = self.determine_version_count(ep_count)
+                        version_count = (cut_cfg['version_count']
+                                         if cut_cfg['version_count'] is not None
+                                         else self.determine_version_count(ep_count))
                 
                 # 生产路径统一走导演叙事（钩子→前因→发展→结局）。
                 # 只有高光/转写全缺时，_generate_reverse_segments 才回落随机兜底，
@@ -2370,7 +2530,7 @@ class PipelineProcessor:
                 edl_videos = self._generate_edl_versions(
                     drama_name, src_dir, edl_eps, edl_count, out_dir,
                     use_reverse, short_titles, long_titles,
-                    cancel_event=cancel_event)
+                    cancel_event=cancel_event, config=cut_cfg)
             else:
                 use_reverse = False
                 cut_method = '续跑重渲染'
@@ -2381,8 +2541,8 @@ class PipelineProcessor:
             self._raise_if_cancelled(cancel_event)
             all_videos = ai_videos + edl_videos
             
-            # 筛选最佳版本
-            best_videos = self._select_best_videos(all_videos)
+            # 筛选最佳版本（时长窗口用本剧 config：[min_dur, max_dur]）
+            best_videos = self._select_best_videos(all_videos, cut_cfg)
 
             # 内容级去重（R9）：版本间感知哈希相似度 → 剔除高重复版本，
             # 规避"成片重复度很高"被平台判重。剔除只在交付集内进行，
@@ -2840,7 +3000,7 @@ class PipelineProcessor:
     
     def _generate_edl_versions(self, drama_name, src_dir, edl_eps, count, out_dir,
                                use_reverse=False, short_titles=None, long_titles=None,
-                               cancel_event=None):
+                               cancel_event=None, config=None):
         """生成EDL版本 - 优先导演叙事结构，高光缺失时随机兜底。"""
         self._raise_if_cancelled(cancel_event)
         self.logger.log(drama_name, 'INFO', f'生成EDL版本（{count}个）')
@@ -2997,11 +3157,12 @@ class PipelineProcessor:
                 segments = self._generate_reverse_segments(edl_eps, v_idx,
                                                            drama_name=drama_name,
                                                            plan=edl_plan,
-                                                           used_global=used_global)
+                                                           used_global=used_global,
+                                                           config=config)
             else:
                 # 随机兜底路径也按剧情驱动预算（_generate_reverse_segments 内部已设）
                 self._active_seg_target = self._compute_version_budget(
-                    edl_plan, v_idx, None)
+                    edl_plan, v_idx, None, config=config)
                 segments = self._generate_random_segments(edl_eps, v_idx,
                                                           used_global=used_global)
             
@@ -3047,10 +3208,11 @@ class PipelineProcessor:
                 "source_dir": src_dir,
                 "source_pattern": source_pattern,
                 "output_dir": out_dir,
-                # 水印文本 = 输出目录的账号名（output/{账号}/{剧名} 的 {账号}），
-                # 与交叉轮询 assign_account 产出一致；render_generic.py 读不到时
-                # 才落回默认"福桃说剧"，这里显式写入保证 账号/水印/输出 三者统一。
-                "watermark_text": os.path.basename(os.path.dirname(out_dir)),
+                # 水印文本 = 本剧配置覆盖，否则输出目录账号名（output/{账号}/{剧名}
+                # 的 {账号}），与交叉轮询 assign_account 产出一致；render_generic.py
+                # 读不到时才落回默认"福桃说剧"，这里显式写入保证 账号/水印/输出 三者统一。
+                "watermark_text": (self._resolve_cut_config(config)['watermark']
+                                   or os.path.basename(os.path.dirname(out_dir))),
                 "artifacts": artifacts,
                 "videos": [
                     {
@@ -3084,9 +3246,11 @@ class PipelineProcessor:
                 f'渲染 V{v_idx + 1}/{expected_count}',
                 version=v_idx + 1,
                 segments=len(segments), duration=round(sum(s['duration'] for s in segments), 1))
+            # 渲染超时随本版规划时长缩放：长版（用户调大 max_dur）不再固定 600s 超时。
+            render_timeout = max(600, int(sum(s['duration'] for s in segments) * 2.5))
             video, fail_cat, verdict = self._run_render_one(
                 drama_name, out_dir, v_idx, config_path,
-                cancel_event=cancel_event)
+                cancel_event=cancel_event, timeout=render_timeout)
             render_done_pct = 48 + int(40 * (v_idx + 1) / max(1, expected_count))
             self._emit_cut_progress(
                 'render', render_done_pct,
@@ -3139,16 +3303,21 @@ class PipelineProcessor:
                         else '{ep}')
             return f'第{ep_field}集.mp4'
         if "第" in name and "集" in name:
-            cn_any = re.search(r'第(\d+)集', name)
+            # 取最后一个 第N集 作为集号标记（避免剧名本身含"第N集"时误判，
+            # 如"第1集就离婚-第02集.mp4" 应取 "第02集" 为集号标记）。
+            matches = list(re.finditer(r'第(\d+)集', name))
+            cn_any = matches[-1] if matches else None
             digits = cn_any.group(1) if cn_any else ''
             ep_field = (f'{{ep:0{len(digits)}d}}'
                         if len(digits) > 1 and digits.startswith('0')
                         else '{ep}')
-            if " - " in name:
-                return f"{{name}} - 第{ep_field}集.mp4"
-            if "-" in name:
-                return f"{{name}}-第{ep_field}集.mp4"
-            return f"{{name}}第{ep_field}集.mp4"
+            # 前缀用样例文件的真实字面量，而非 {name} 占位符：剧名可能带序号前缀
+            # （如"12重生成他弟媳后"）而文件名不带，{name} 替换后会全部失配，
+            # 导致 fail-fast 预检系统性误杀。字面量前缀含分隔符（"-"、" - "）一并
+            # 保留；花括号转义防后续 .format(name=..., ep=...) 误解析。
+            prefix = (name[:cn_any.start()] if cn_any else '')
+            prefix = prefix.replace('{', '{{').replace('}', '}}')
+            return f"{prefix}第{ep_field}集.mp4"
         bare = re.fullmatch(r'(\d+)\.mp4', name, re.IGNORECASE)
         if bare:
             width = len(bare.group(1))
@@ -3161,7 +3330,10 @@ class PipelineProcessor:
             ep_field = (f'{{ep:0{len(digits)}d}}'
                         if len(digits) > 1 and digits.startswith('0')
                         else '{ep}')
-            return f"{{name}}{sep}{ep_field}.mp4"
+            # 同上：前缀用真实字面量（含分隔符），不用 {name} 占位符。
+            prefix = name[:suffix.start()] + sep
+            prefix = prefix.replace('{', '{{').replace('}', '}}')
+            return f"{prefix}{ep_field}.mp4"
         return "{ep}.mp4"
 
     def _repair_config_source_pattern(self, config, drama_name):
@@ -3226,11 +3398,14 @@ class PipelineProcessor:
         return 'other'
 
     def _run_render_one(self, drama_name, out_dir, v_idx, config_path,
-                        cancel_event=None):
+                        cancel_event=None, timeout=600):
         """对单个 edl_config_v*.json 调 render_generic.py 渲染。
 
         公共方法：_generate_edl_versions（全量生成）与 _re_render_from_configs
         （失败续跑）共用，保证渲染/日志行为一致。
+
+        timeout：本版渲染上限（秒）。默认 600；调用方按本版规划时长缩放
+        （max(600, 规划秒数×2.5)），长版不再 600s 固定超时。
 
         Returns: video dict（path/final_path/filename/type）或 None（失败）。
         """
@@ -3238,7 +3413,7 @@ class PipelineProcessor:
             with execution_gate.render_slot(cancel_event):
                 result = self._run_command_cancellable(
                     [sys.executable, os.path.join(CONFIG['scripts_dir'], "render_generic.py"), config_path],
-                    timeout=600, cancel_event=cancel_event,
+                    timeout=timeout, cancel_event=cancel_event,
                     cwd=os.path.dirname(CONFIG['scripts_dir']),
                 )
 
@@ -3438,7 +3613,7 @@ class PipelineProcessor:
                         drama_name, 'INFO',
                         f'续跑配置源文件模式已修复：{before_pattern} → '
                         f'{edl_config.get("source_pattern")}')
-                seg_count = len(edl_config.get('videos', [{}])[0].get('segments', []))
+                seg_count = len((edl_config.get('videos') or [{}])[0].get('segments', []))
                 self.logger.log(drama_name, 'INFO',
                                 f'续跑 V{v_idx+1}：{seg_count}个片段，配置 {os.path.basename(config_path)}')
             except Exception as e:
@@ -3479,9 +3654,14 @@ class PipelineProcessor:
                     except OSError:
                         pass
                     continue
+            # 续跑也按本版规划时长缩放渲染超时（edl_config 已含 segments）
+            _segs = ((edl_config.get('videos') or [{}])[0].get('segments', [])
+                     if isinstance(edl_config, dict) else [])
+            _planned = sum(float(s.get('duration', 0)) for s in _segs)
             video, fail_cat, _verdict = self._run_render_one(
                 drama_name, out_dir, v_idx, config_path,
-                cancel_event=cancel_event)
+                cancel_event=cancel_event,
+                timeout=max(600, int(_planned * 2.5)))
             self._emit_cut_progress(
                 'render', min(89, 45 + int(40 * (v_idx + 1) / max(1, len(config_paths)))),
                 f'续跑 V{v_idx + 1} '
@@ -3535,7 +3715,7 @@ class PipelineProcessor:
     # 18 个 15s 碎段；30s 更接近“前铺垫+完整冲突+后反应”的可观看单元。
     HIGHLIGHT_WINDOW_MIN = 30.0
 
-    def _compute_version_budget(self, plan, v_idx, eps_hl):
+    def _compute_version_budget(self, plan, v_idx, eps_hl, config=None):
         """剧情驱动 + 随机：计算本版 EDL 规划预算（秒）。
 
         剧情量 = 导演方案叙事单元数（集数）× per_unit + 弧线跨度 × per_spread
@@ -3544,13 +3724,18 @@ class PipelineProcessor:
         预算 = 成片目标 × 1.05；且预算下限预留 MIN_SEG_DUR 停手间隙，保证
         成片 ≥ min_final（add() 在预算剩 ≤MIN_SEG_DUR 时停手）。
 
+        时长边界改用本剧 config（用户拍板 A：每版都在 [min_dur, max_dur] 内），
+        默认 min_dur=180 / max_dur=330——修复原 CONFIG['duration']['max_final']
+        =1200 导致的 V1 膨胀（63 段/21 分钟 → 渲染超时 → 素材池耗尽）。
+
         enabled=False 或 plan 缺失 → 退回固定 CONFIG['edl']['target_dur']。
         """
         cfg = CONFIG.get('duration', {})
+        rc = self._resolve_cut_config(config)
         if not cfg.get('enabled', True):
             return float(CONFIG['edl'].get('target_dur', 200.0))
-        min_final = float(cfg.get('min_final', 210))
-        max_final = float(cfg.get('max_final', 1200))
+        min_final = float(rc['min_dur'])
+        max_final = float(rc['max_dur'])
         per_unit = float(cfg.get('per_unit', 32))
         per_spread = float(cfg.get('per_spread', 8))
         angle_bonus = cfg.get('angle_bonus', {}) or {}
@@ -3846,12 +4031,14 @@ class PipelineProcessor:
             i += 1
         return out
 
-    def _capacity_version_count(self, edl_eps, drama_name):
+    def _capacity_version_count(self, edl_eps, drama_name, config=None):
         """素材容量决定版本数。
 
         默认版本数 = min(集数目标, 独立素材可支撑版本数)，最少保留 1 版。
-        只有显式开启 allow_controlled_reuse 时才允许为了达到集数目标而复用。
+        config.version_count 显式设定时：reuse_material=True 按设定（≤8，允许跨版本
+        复用）；reuse_material=False 则 clamp 到零复用容量，绝不超容被迫复用。
         """
+        rc = self._resolve_cut_config(config)
         cfg = CONFIG['edl']
         seg_dur = float(cfg.get('segment_dur', 20.0))
         target = float(cfg.get('target_dur', 200.0))
@@ -3864,17 +4051,26 @@ class PipelineProcessor:
             self.logger.log(drama_name, 'WARN',
                             f'方案B容量计算失败，回退集数判定：{e}')
             total = 0
+        auto_desired = self.determine_version_count(len(edl_eps))
+        desired = (rc['version_count'] if rc['version_count'] is not None
+                   else auto_desired)
+        allow_reuse = bool(rc['reuse_material']) or bool(
+            cfg.get('allow_controlled_reuse', False))
+        # 有效版本数边界 = 用户硬性 [1,8] ∩ CONFIG edl.min_versions/max_versions
+        # 旋钮（保留既有可配置性，当前默认 1/8 与硬边界一致）。
+        _lo_v = max(CUT_CONFIG_ABS['version_min'],
+                    int(cfg.get('min_versions', CUT_CONFIG_ABS['version_min'])))
+        _hi_v = min(CUT_CONFIG_ABS['version_max'],
+                    int(cfg.get('max_versions', CUT_CONFIG_ABS['version_max'])))
+        if _hi_v < _lo_v:
+            _hi_v = _lo_v
         if total <= 0:
-            return self.determine_version_count(len(edl_eps))
-        desired = self.determine_version_count(len(edl_eps))
+            return max(_lo_v, min(_hi_v, desired))
         zero_reuse_cap = total // segs_per_version
-        allow_reuse = bool(cfg.get('allow_controlled_reuse', False))
         if allow_reuse:
-            count = max(int(cfg.get('min_versions', 1)),
-                        min(int(cfg.get('max_versions', 8)), desired))
+            count = max(_lo_v, min(_hi_v, desired))
         else:
-            count = max(1, min(int(cfg.get('max_versions', 8)),
-                               desired, zero_reuse_cap))
+            count = max(_lo_v, min(_hi_v, desired, zero_reuse_cap))
         self.logger.log(drama_name, 'INFO',
                         f'方案B容量：素材{total}段 / 每版{segs_per_version}段 '
                         f'零复用上限{zero_reuse_cap}版，集数目标{desired}版 '
@@ -4621,7 +4817,7 @@ class PipelineProcessor:
                                       boundaries)
 
     def _generate_reverse_segments(self, edl_eps, v_idx, drama_name=None,
-                                   plan=None, used_global=None):
+                                   plan=None, used_global=None, config=None):
         """倒叙结构：开头上钩子，随后按叙事顺序铺开每集的高能窗口。
 
         高能点主路径是 LLM 逐集打分（带理由，落日志可审计），关键词兜底。
@@ -4634,11 +4830,13 @@ class PipelineProcessor:
 
         used_global（方案B跨版本去重）：跨版本共享的 (集,起点) 已用集合；
         任何版本都跳过已用段 → 版本间零复用同一个素材片段。None 关闭。
+
+        config：本剧切制参数（时长预算用 config.min_dur/max_dur）。
         """
         eps_hl = self._load_episode_highlights(edl_eps, drama_name=drama_name)
         # 剧情驱动时长：按本版导演方案计算规划预算（随机兜底路径也用它）
         self._active_seg_target = self._compute_version_budget(
-            plan, v_idx, eps_hl)
+            plan, v_idx, eps_hl, config=config)
         if not eps_hl:
             # 没有 ASR 转写（未跑通或素材缺转写）：退回随机逻辑，保证版本开得出
             return self._generate_random_segments(edl_eps, v_idx,
@@ -4914,19 +5112,30 @@ class PipelineProcessor:
         except Exception as e:
             self.logger.log('system', 'WARN', f'回写 artifacts.{key} 失败: {e}')
 
-    def _select_best_videos(self, all_videos):
-        """筛选最佳版本"""
+    def _select_best_videos(self, all_videos, config=None):
+        """筛选最佳版本。
+
+        时长窗口改用本剧 config（方案A：每版在 [min_dur, max_dur]），默认
+        180~330s。原来硬编码 CONFIG['duration']['min_final'/'max_final']
+        =210/1200 正是 21 分钟成片被"接受"的窗口，已随本剧时长配置一并收敛。
+        """
+        rc = self._resolve_cut_config(config)
+        # 与 _compute_version_budget 一致：duration.enabled=False（全局关掉剧情
+        # 驱动时长）时回退旧宽松窗口 [min_final, max_final]，否则用本剧窗口。
+        if not CONFIG.get('duration', {}).get('enabled', True):
+            _dcfg = CONFIG.get('duration', {})
+            _lo = float(_dcfg.get('min_final', 210))
+            _hi = float(_dcfg.get('max_final', 1200))
+        else:
+            _lo = float(rc['min_dur'])
+            _hi = float(rc['max_dur'])
         videos = [v for v in all_videos if "测试" not in v.get("filename", "") and "_test" not in v.get("filename", "")]
         
         valid_videos = []
         for v in videos:
             duration = self._get_video_duration(v.get("path", ""))
-            # 业务要求成片在 [min_final, max_final]（剧情驱动时长，默认
-            # 210s-20min）；原来错写成110-130会把短的当最佳。渲染会
-            # atempo=1.05 压缩，故以成片实测 duration 判定。
-            _dcfg = CONFIG.get('duration', {})
-            _lo = float(_dcfg.get('min_final', 210))
-            _hi = float(_dcfg.get('max_final', 1200))
+            # 业务要求成片在 [min_dur, max_dur]（本剧可配，默认 180~330s）。
+            # 渲染会 atempo=1.05 压缩，故以成片实测 duration 判定。
             if _lo <= duration <= _hi:
                 v["duration"] = duration
                 valid_videos.append(v)

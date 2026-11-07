@@ -3,547 +3,1021 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>短剧工坊仪表盘</title>
+    <title>短剧工坊</title>
     <style>
+        :root {
+            --font-sans: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Microsoft YaHei", sans-serif;
+            --font-mono: "SF Mono", "Cascadia Code", "Courier New", monospace;
+
+            /* 深色阶梯表面 - 从近黑逐级上升，青色基调 */
+            --surface-0: #05090E;
+            --surface-1: #0A1015;
+            --surface-2: #0F161D;
+            --surface-3: #151D26;
+            --surface-4: #1C252F;
+            --surface-5: #233038;
+
+            /* 青色主色 + 暖琥珀支撑 */
+            --accent-cyan: #38BDF8;
+            --accent-amber: #FB923C;
+
+            /* 文字层级 */
+            --text-primary: #F8FAFC;
+            --text-secondary: #94A3B8;
+            --text-tertiary: #64748B;
+
+            /* 状态色 */
+            --status-success: #22C55E;
+            --status-warn: #F59E0B;
+            --status-error: #EF4444;
+            --status-idle: #64748B;
+
+            /* spacing + border-radius tokens */
+            --spacing-xs: clamp(0.25rem, 0.5vw, 0.375rem);
+            --spacing-sm: clamp(0.5rem, 1vw, 0.75rem);
+            --spacing-md: clamp(0.75rem, 1.5vw, 1rem);
+            --spacing-lg: clamp(1rem, 2vw, 1.5rem);
+            --spacing-xl: clamp(1.5rem, 3vw, 2rem);
+
+            --radius-sm: 6px;
+            --radius-md: 10px;
+            --radius-lg: 14px;
+            --radius-full: 999px;
+
+            /* 阴影 */
+            --shadow-sm: 0 1px 3px rgba(0,0,0,0.4);
+            --shadow-md: 0 4px 12px rgba(0,0,0,0.5);
+            --shadow-lg: 0 10px 30px rgba(0,0,0,0.6);
+        }
+
         * {
             margin: 0;
             padding: 0;
             box-sizing: border-box;
         }
-        
+
         body {
-            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Microsoft YaHei', sans-serif;
-            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            font-family: var(--font-sans);
+            background: var(--surface-0);
+            color: var(--text-primary);
             min-height: 100vh;
-            padding: 20px;
+            padding: var(--spacing-lg);
+            font-size: clamp(0.875rem, 1.2vw, 1rem);
+            line-height: 1.6;
+            letter-spacing: -0.01em;
         }
-        
+
         .container {
-            max-width: 1200px;
+            max-width: 1400px;
             margin: 0 auto;
         }
-        
+
+        /* Header */
         .header {
-            background: white;
-            border-radius: 12px;
-            padding: 20px 30px;
-            margin-bottom: 20px;
-            box-shadow: 0 4px 6px rgba(0,0,0,0.1);
-            display: flex;
-            justify-content: space-between;
+            background: var(--surface-2);
+            border-radius: var(--radius-lg);
+            padding: var(--spacing-lg);
+            margin-bottom: var(--spacing-lg);
+            box-shadow: var(--shadow-md);
+            display: grid;
+            grid-template-columns: auto 1fr auto;
+            gap: var(--spacing-md);
             align-items: center;
         }
-        
+
         .header h1 {
-            color: #667eea;
-            font-size: 24px;
+            font-size: clamp(1.25rem, 2vw, 1.75rem);
+            font-weight: 700;
+            color: var(--accent-cyan);
+            letter-spacing: -0.03em;
         }
-        
-        .header .status {
+
+        .status-pill {
             display: flex;
             align-items: center;
-            gap: 15px;
+            gap: var(--spacing-sm);
+            background: var(--surface-3);
+            padding: var(--spacing-sm) var(--spacing-md);
+            border-radius: var(--radius-full);
         }
-        
-        .baidupcs-status {
-            display: flex;
-            align-items: center;
-            gap: 8px;
-            background: rgba(255,255,255,0.05);
-            padding: 5px 10px;
-            border-radius: 8px;
-        }
-        
-        .baidupcs-status span {
-            color: #ff7043;
-            font-weight: 600;
-            font-size: 13px;
-        }
-        
-        .baidupcs-status span.logged-in {
-            color: #66bb6a;
-        }
-        
-        .btn-small {
-            padding: 5px 10px;
-            font-size: 12px;
-        }
-        
-        .btn-danger {
-            background: #f44336;
-            color: white;
-            border: none;
-            padding: 8px 16px;
-            border-radius: 8px;
-            cursor: pointer;
-            font-weight: 600;
-            font-size: 14px;
-        }
-        
-        .btn-danger:hover {
-            background: #d32f2f;
-        }
-        
+
         .status-indicator {
-            width: 12px;
-            height: 12px;
+            width: 10px;
+            height: 10px;
             border-radius: 50%;
-            background: #999;
+            background: var(--status-idle);
         }
-        
+
         .status-indicator.active {
-            background: #00c853;
-            animation: pulse 1.5s infinite;
+            background: var(--status-success);
+            animation: pulse 2s ease-in-out infinite;
         }
-        
+
         .status-indicator.processing {
-            background: #ffc107;
-            animation: pulse 1.5s infinite;
+            background: var(--accent-cyan);
+            animation: pulse 2s ease-in-out infinite;
         }
-        
+
         .status-indicator.error {
-            background: #f44336;
+            background: var(--status-error);
         }
-        
+
         @keyframes pulse {
             0%, 100% { opacity: 1; }
-            50% { opacity: 0.5; }
+            50% { opacity: 0.4; }
         }
-        
+
         .status-text {
-            color: #333;
+            font-size: clamp(0.8125rem, 1vw, 0.9375rem);
+            color: var(--text-secondary);
             font-weight: 500;
         }
-        
+
+        .baidu-status {
+            display: flex;
+            align-items: center;
+            gap: var(--spacing-sm);
+            background: var(--surface-3);
+            padding: var(--spacing-sm) var(--spacing-md);
+            border-radius: var(--radius-full);
+        }
+
+        .baidu-status span {
+            font-size: clamp(0.75rem, 0.95vw, 0.875rem);
+            color: var(--text-secondary);
+            font-weight: 600;
+        }
+
+        .baidu-status span.logged-in {
+            color: var(--status-success);
+        }
+
+        /* Buttons */
+        .btn {
+            padding: var(--spacing-sm) var(--spacing-md);
+            border: none;
+            border-radius: var(--radius-full);
+            font-size: clamp(0.8125rem, 1vw, 0.9375rem);
+            font-weight: 600;
+            cursor: pointer;
+            transition: all 0.2s cubic-bezier(0.4, 0, 0.2, 1);
+            font-family: var(--font-sans);
+            white-space: nowrap;
+        }
+
+        .btn-primary {
+            background: var(--accent-cyan);
+            color: var(--surface-0);
+        }
+
+        .btn-primary:hover:not(:disabled) {
+            background: #7DD3FC;
+            transform: translateY(-1px);
+            box-shadow: 0 4px 12px rgba(56, 189, 248, 0.3);
+        }
+
+        .btn-primary:disabled {
+            opacity: 0.5;
+            cursor: not-allowed;
+        }
+
+        .btn-secondary {
+            background: var(--surface-4);
+            color: var(--text-primary);
+        }
+
+        .btn-secondary:hover {
+            background: var(--surface-5);
+        }
+
+        .btn-success {
+            background: var(--status-success);
+            color: var(--surface-0);
+        }
+
+        .btn-success:hover {
+            background: #4ADE80;
+        }
+
+        .btn-danger {
+            background: var(--status-error);
+            color: white;
+        }
+
+        .btn-danger:hover {
+            background: #F87171;
+        }
+
+        .btn-small {
+            padding: var(--spacing-xs) var(--spacing-sm);
+            font-size: clamp(0.75rem, 0.9vw, 0.8125rem);
+        }
+
+        /* Grid */
         .grid {
             display: grid;
-            grid-template-columns: 1fr 1fr;
-            gap: 20px;
-            margin-bottom: 20px;
+            grid-template-columns: repeat(auto-fit, minmax(min(100%, 500px), 1fr));
+            gap: var(--spacing-lg);
+            margin-bottom: var(--spacing-lg);
         }
-        
+
+        /* Card */
         .card {
-            background: white;
-            border-radius: 12px;
-            padding: 20px;
-            box-shadow: 0 4px 6px rgba(0,0,0,0.1);
+            background: var(--surface-2);
+            border-radius: var(--radius-lg);
+            padding: var(--spacing-lg);
+            box-shadow: var(--shadow-md);
         }
-        
+
         .card h2 {
-            color: #667eea;
-            font-size: 18px;
-            margin-bottom: 15px;
-            padding-bottom: 10px;
-            border-bottom: 2px solid #f0f0f0;
+            font-size: clamp(1rem, 1.5vw, 1.25rem);
+            font-weight: 700;
+            color: var(--accent-cyan);
+            margin-bottom: var(--spacing-md);
+            padding-bottom: var(--spacing-md);
+            border-bottom: 1px solid var(--surface-4);
+            letter-spacing: -0.02em;
         }
-        
+
+        /* Message Input */
         .message-input {
             width: 100%;
-            height: 150px;
-            border: 2px solid #e0e0e0;
-            border-radius: 8px;
-            padding: 15px;
-            font-size: 14px;
-            font-family: inherit;
+            height: clamp(120px, 20vh, 180px);
+            background: var(--surface-3);
+            border: 1px solid var(--surface-4);
+            border-radius: var(--radius-md);
+            padding: var(--spacing-md);
+            font-size: clamp(0.8125rem, 1vw, 0.9375rem);
+            font-family: var(--font-sans);
+            color: var(--text-primary);
             resize: vertical;
-            transition: border-color 0.3s;
+            transition: border-color 0.2s, box-shadow 0.2s;
         }
-        
+
+        .message-input::placeholder {
+            color: var(--text-tertiary);
+        }
+
         .message-input:focus {
             outline: none;
-            border-color: #667eea;
+            border-color: var(--accent-cyan);
+            box-shadow: 0 0 0 3px rgba(56, 189, 248, 0.15);
         }
-        
+
         .input-actions {
             display: flex;
-            gap: 10px;
-            margin-top: 15px;
+            gap: var(--spacing-sm);
+            margin-top: var(--spacing-md);
+            flex-wrap: wrap;
         }
-        
-        .btn {
-            padding: 10px 20px;
-            border: none;
-            border-radius: 8px;
-            font-size: 14px;
-            font-weight: 500;
-            cursor: pointer;
-            transition: all 0.3s;
-        }
-        
-        .btn-primary {
-            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
-            color: white;
-        }
-        
-        .btn-primary:hover {
-            transform: translateY(-2px);
-            box-shadow: 0 4px 12px rgba(102, 126, 234, 0.4);
-        }
-        
-        .btn-primary:disabled {
-            opacity: 0.6;
-            cursor: not-allowed;
-            transform: none;
-        }
-        
-        .btn-secondary {
-            background: #f0f0f0;
-            color: #333;
-        }
-        
-        .btn-secondary:hover {
-            background: #e0e0e0;
-        }
-        
-        .btn-success {
-            background: #4caf50;
-            color: white;
-        }
-        
-        .btn-success:hover {
-            background: #43a047;
-        }
-        
-        .btn-danger {
-            background: #f44336;
-            color: white;
-        }
-        
+
+        /* Progress */
         .progress-section {
-            margin-top: 15px;
-            padding: 15px;
-            background: #f8f9fa;
-            border-radius: 8px;
+            margin-top: var(--spacing-md);
+            padding: var(--spacing-md);
+            background: var(--surface-3);
+            border-radius: var(--radius-md);
             display: none;
         }
-        
+
         .progress-section.active {
             display: block;
         }
-        
+
         .progress-bar {
             width: 100%;
             height: 8px;
-            background: #e0e0e0;
-            border-radius: 4px;
+            background: var(--surface-4);
+            border-radius: var(--radius-full);
             overflow: hidden;
-            margin-bottom: 10px;
+            margin-bottom: var(--spacing-sm);
         }
-        
+
         .progress-fill {
             height: 100%;
-            background: linear-gradient(90deg, #667eea 0%, #764ba2 100%);
-            border-radius: 4px;
-            transition: width 0.5s ease;
+            background: linear-gradient(90deg, var(--accent-cyan), #7DD3FC);
+            border-radius: var(--radius-full);
+            transition: width 0.5s cubic-bezier(0.4, 0, 0.2, 1);
         }
-        
+
         .progress-info {
             display: flex;
             justify-content: space-between;
-            color: #666;
-            font-size: 13px;
+            color: var(--text-secondary);
+            font-size: clamp(0.75rem, 0.9vw, 0.8125rem);
         }
-        
+
+        /* Stats */
         .stats-grid {
             display: grid;
-            grid-template-columns: repeat(3, 1fr);
-            gap: 15px;
+            grid-template-columns: repeat(auto-fit, minmax(100px, 1fr));
+            gap: var(--spacing-md);
         }
-        
+
         .stat-item {
+            background: var(--surface-3);
+            border-radius: var(--radius-md);
+            padding: var(--spacing-md);
             text-align: center;
-            padding: 15px;
-            background: linear-gradient(135deg, #f5f7fa 0%, #e8ecf1 100%);
-            border-radius: 8px;
         }
-        
+
         .stat-value {
-            font-size: 28px;
-            font-weight: bold;
-            color: #667eea;
+            font-size: clamp(1.5rem, 3vw, 2rem);
+            font-weight: 700;
+            color: var(--accent-cyan);
+            line-height: 1.1;
         }
-        
+
         .stat-label {
-            font-size: 13px;
-            color: #666;
-            margin-top: 5px;
+            font-size: clamp(0.75rem, 0.9vw, 0.8125rem);
+            color: var(--text-secondary);
+            margin-top: var(--spacing-xs);
         }
-        
+
+        /* Tabs */
         .tabs {
             display: flex;
-            gap: 10px;
-            margin-bottom: 15px;
-            border-bottom: 2px solid #e0e0e0;
+            gap: var(--spacing-xs);
+            margin-bottom: var(--spacing-md);
+            border-bottom: 1px solid var(--surface-4);
+            overflow-x: auto;
         }
-        
+
         .tab {
-            padding: 10px 20px;
+            padding: var(--spacing-sm) var(--spacing-md);
             cursor: pointer;
             border-bottom: 2px solid transparent;
-            margin-bottom: -2px;
-            transition: all 0.3s;
-            color: #666;
-        }
-        
-        .tab.active {
-            border-bottom-color: #667eea;
-            color: #667eea;
+            margin-bottom: -1px;
+            transition: all 0.2s;
+            color: var(--text-secondary);
             font-weight: 500;
+            white-space: nowrap;
+            font-size: clamp(0.8125rem, 1vw, 0.9375rem);
         }
-        
+
+        .tab:hover {
+            color: var(--text-primary);
+        }
+
+        .tab.active {
+            border-bottom-color: var(--accent-cyan);
+            color: var(--accent-cyan);
+        }
+
         .tab-content {
             display: none;
-            max-height: 400px;
+            max-height: clamp(400px, 50vh, 600px);
             overflow-y: auto;
         }
-        
+
         .tab-content.active {
             display: block;
         }
-        
+
+        /* 滚动条 */
+        .tab-content::-webkit-scrollbar,
+        .drama-list::-webkit-scrollbar,
+        .upload-queue::-webkit-scrollbar,
+        .upload-log::-webkit-scrollbar {
+            width: 8px;
+            height: 8px;
+        }
+
+        .tab-content::-webkit-scrollbar-track,
+        .drama-list::-webkit-scrollbar-track,
+        .upload-queue::-webkit-scrollbar-track,
+        .upload-log::-webkit-scrollbar-track {
+            background: var(--surface-3);
+            border-radius: var(--radius-sm);
+        }
+
+        .tab-content::-webkit-scrollbar-thumb,
+        .drama-list::-webkit-scrollbar-thumb,
+        .upload-queue::-webkit-scrollbar-thumb,
+        .upload-log::-webkit-scrollbar-thumb {
+            background: var(--surface-5);
+            border-radius: var(--radius-sm);
+        }
+
+        .tab-content::-webkit-scrollbar-thumb:hover,
+        .drama-list::-webkit-scrollbar-thumb:hover,
+        .upload-queue::-webkit-scrollbar-thumb:hover,
+        .upload-log::-webkit-scrollbar-thumb:hover {
+            background: var(--accent-cyan);
+        }
+
+        /* Log Entry */
         .log-entry {
-            padding: 10px 15px;
-            border-bottom: 1px solid #f0f0f0;
-            font-size: 13px;
-            display: flex;
-            gap: 15px;
+            padding: var(--spacing-sm) var(--spacing-md);
+            border-bottom: 1px solid var(--surface-3);
+            font-size: clamp(0.75rem, 0.9vw, 0.8125rem);
+            display: grid;
+            grid-template-columns: auto auto 1fr;
+            gap: var(--spacing-md);
+            align-items: baseline;
         }
-        
+
         .log-entry:hover {
-            background: #f8f9fa;
+            background: var(--surface-3);
         }
-        
+
         .log-time {
-            color: #999;
+            color: var(--text-tertiary);
             white-space: nowrap;
+            font-variant-numeric: tabular-nums;
         }
-        
+
         .log-level {
-            padding: 2px 8px;
-            border-radius: 4px;
-            font-size: 11px;
-            font-weight: 500;
+            padding: 2px var(--spacing-sm);
+            border-radius: var(--radius-sm);
+            font-size: clamp(0.6875rem, 0.85vw, 0.75rem);
+            font-weight: 600;
             white-space: nowrap;
         }
-        
+
         .log-level.INFO {
-            background: #e3f2fd;
-            color: #1976d2;
+            background: rgba(56, 189, 248, 0.15);
+            color: var(--accent-cyan);
         }
-        
+
         .log-level.WARN {
-            background: #fff3e0;
-            color: #f57c00;
+            background: rgba(251, 146, 60, 0.15);
+            color: var(--accent-amber);
         }
-        
+
         .log-level.ERROR {
-            background: #ffebee;
-            color: #d32f2f;
+            background: rgba(239, 68, 68, 0.15);
+            color: var(--status-error);
         }
-        
+
         .log-level.DEBUG {
-            background: #f3e5f5;
-            color: #7b1fa2;
+            background: rgba(148, 163, 184, 0.15);
+            color: var(--text-secondary);
         }
-        
+
         .log-message {
-            flex: 1;
-            color: #333;
-            word-break: break-all;
+            color: var(--text-primary);
+            word-break: break-word;
         }
-        
+
+        /* History */
         .history-item {
-            padding: 15px;
-            border-bottom: 1px solid #f0f0f0;
+            padding: var(--spacing-md);
+            border-bottom: 1px solid var(--surface-3);
         }
-        
+
         .history-item:hover {
-            background: #f8f9fa;
+            background: var(--surface-3);
         }
-        
+
         .history-header {
             display: flex;
             justify-content: space-between;
             align-items: center;
-            margin-bottom: 8px;
+            margin-bottom: var(--spacing-xs);
+            gap: var(--spacing-sm);
+            flex-wrap: wrap;
         }
-        
+
         .history-name {
-            font-weight: 500;
-            color: #333;
+            font-weight: 600;
+            color: var(--text-primary);
         }
-        
+
         .history-type {
-            padding: 3px 10px;
-            border-radius: 12px;
-            font-size: 11px;
-            font-weight: 500;
+            padding: 3px var(--spacing-sm);
+            border-radius: var(--radius-full);
+            font-size: clamp(0.6875rem, 0.85vw, 0.75rem);
+            font-weight: 600;
         }
-        
+
         .history-type.completed {
-            background: #e8f5e9;
-            color: #2e7d32;
+            background: rgba(34, 197, 94, 0.15);
+            color: var(--status-success);
         }
-        
+
         .history-type.failed {
-            background: #ffebee;
-            color: #c62828;
+            background: rgba(239, 68, 68, 0.15);
+            color: var(--status-error);
         }
-        
+
         .history-time {
-            font-size: 12px;
-            color: #999;
+            font-size: clamp(0.75rem, 0.9vw, 0.8125rem);
+            color: var(--text-tertiary);
         }
-        
+
         .history-details {
-            font-size: 13px;
-            color: #666;
-            margin-top: 5px;
+            font-size: clamp(0.75rem, 0.9vw, 0.8125rem);
+            color: var(--text-secondary);
+            margin-top: var(--spacing-xs);
         }
 
         .history-retry {
-            margin-top: 10px;
-            padding: 7px 12px;
-            border: 0;
-            border-radius: 6px;
-            background: #1976d2;
-            color: #fff;
+            margin-top: var(--spacing-sm);
+            padding: var(--spacing-xs) var(--spacing-md);
+            border: none;
+            border-radius: var(--radius-full);
+            background: var(--accent-cyan);
+            color: var(--surface-0);
             cursor: pointer;
-            font-size: 13px;
+            font-size: clamp(0.75rem, 0.9vw, 0.8125rem);
+            font-weight: 600;
+            transition: all 0.2s;
         }
-        
+
+        .history-retry:hover {
+            background: #7DD3FC;
+        }
+
+        /* Empty State */
         .empty-state {
             text-align: center;
-            padding: 40px;
-            color: #999;
+            padding: var(--spacing-xl);
+            color: var(--text-tertiary);
         }
-        
+
         .empty-state-icon {
-            font-size: 48px;
-            margin-bottom: 15px;
+            font-size: clamp(2rem, 4vw, 3rem);
+            margin-bottom: var(--spacing-md);
         }
-        
+
+        /* Notification */
         .notification {
             position: fixed;
-            top: 20px;
-            right: 20px;
-            padding: 15px 25px;
-            border-radius: 8px;
-            color: white;
-            font-weight: 500;
-            box-shadow: 0 4px 12px rgba(0,0,0,0.15);
-            transform: translateX(120%);
-            transition: transform 0.3s ease;
+            top: var(--spacing-lg);
+            right: var(--spacing-lg);
+            padding: var(--spacing-md) var(--spacing-lg);
+            border-radius: var(--radius-md);
+            color: var(--text-primary);
+            font-weight: 600;
+            box-shadow: var(--shadow-lg);
+            transform: translateX(calc(100% + var(--spacing-lg)));
+            transition: transform 0.3s cubic-bezier(0.4, 0, 0.2, 1);
             z-index: 1000;
+            font-size: clamp(0.8125rem, 1vw, 0.9375rem);
         }
-        
+
         .notification.show {
             transform: translateX(0);
         }
-        
+
         .notification.success {
-            background: #4caf50;
+            background: var(--status-success);
         }
-        
+
         .notification.error {
-            background: #f44336;
+            background: var(--status-error);
         }
-        
+
         .notification.info {
-            background: #2196f3;
+            background: var(--accent-cyan);
+            color: var(--surface-0);
         }
-        
-        /* 上传控制面板样式 */
-        .upload-panel {
-            background: white;
-            border-radius: 12px;
-            padding: 20px;
-            margin-top: 20px;
-            box-shadow: 0 4px 6px rgba(0,0,0,0.1);
+
+        .notification.warning {
+            background: var(--accent-amber);
+            color: var(--surface-0);
         }
-        
-        .upload-panel h2 {
-            color: #667eea;
-            margin-bottom: 15px;
+
+        /* Upload/Cut Panels */
+        .upload-panel, .cut-panel {
+            padding: 0;
         }
-        
-        .upload-controls {
+
+        .upload-panel h2, .cut-panel h2 {
+            margin: 0 0 var(--spacing-md);
+        }
+
+        .upload-controls, .cut-controls {
             display: flex;
-            gap: 10px;
-            margin-bottom: 15px;
+            gap: var(--spacing-sm);
+            margin-bottom: var(--spacing-md);
             flex-wrap: wrap;
         }
-        
+
         .upload-controls select,
-        .upload-controls input {
-            padding: 8px 12px;
-            border: 1px solid #ddd;
-            border-radius: 6px;
-            font-size: 14px;
+        .upload-controls input,
+        .cut-controls input {
+            padding: var(--spacing-sm) var(--spacing-md);
+            border: 1px solid var(--surface-4);
+            border-radius: var(--radius-md);
+            font-size: clamp(0.8125rem, 1vw, 0.9375rem);
             min-width: 150px;
+            background: var(--surface-3);
+            color: var(--text-primary);
+            font-family: var(--font-sans);
         }
-        
+
+        .upload-controls select:focus,
+        .upload-controls input:focus,
+        .cut-controls input:focus {
+            outline: none;
+            border-color: var(--accent-cyan);
+            box-shadow: 0 0 0 3px rgba(56, 189, 248, 0.15);
+        }
+
+        .upload-controls label {
+            display: inline-flex;
+            align-items: center;
+            gap: var(--spacing-xs);
+            font-size: clamp(0.75rem, 0.9vw, 0.8125rem);
+            color: var(--text-secondary);
+        }
+
+        /* Drama Selector */
         .drama-selector {
-            background: #f8f9fa;
-            border-radius: 8px;
-            padding: 15px;
-            margin-bottom: 15px;
+            background: var(--surface-3);
+            border-radius: var(--radius-md);
+            padding: var(--spacing-md);
+            margin-bottom: var(--spacing-md);
         }
-        
+
         .drama-selector h3 {
-            color: #333;
-            margin-bottom: 10px;
-            font-size: 16px;
+            color: var(--text-primary);
+            margin-bottom: var(--spacing-sm);
+            font-size: clamp(0.9375rem, 1.2vw, 1.125rem);
+            font-weight: 600;
         }
-        
+
         .drama-list {
             max-height: 200px;
             overflow-y: auto;
-            border: 1px solid #ddd;
-            border-radius: 6px;
+            border: 1px solid var(--surface-4);
+            border-radius: var(--radius-md);
+            background: var(--surface-2);
         }
-        
+
         .drama-item {
             display: flex;
             align-items: center;
-            padding: 10px 15px;
-            border-bottom: 1px solid #eee;
+            padding: var(--spacing-sm) var(--spacing-md);
+            border-bottom: 1px solid var(--surface-3);
             cursor: pointer;
             transition: background 0.2s;
+            gap: var(--spacing-sm);
         }
-        
+
         .drama-item:hover {
-            background: #e8f4ff;
+            background: var(--surface-3);
         }
-        
+
         .drama-item.selected {
-            background: #d4edda;
+            background: rgba(56, 189, 248, 0.1);
         }
-        
+
         .drama-item:last-child {
             border-bottom: none;
         }
-        
+
         .drama-item input[type="checkbox"] {
-            margin-right: 10px;
-        }
-        
-        .drama-item .drama-name {
-            flex: 1;
-            font-weight: 500;
-        }
-        
-        .drama-item .version-count {
-            color: #666;
-            font-size: 12px;
+            margin: 0;
+            cursor: pointer;
         }
 
+        .drama-item .drama-name {
+            flex: 1;
+            font-weight: 600;
+            color: var(--text-primary);
+        }
+
+        .drama-item .version-count,
+        .drama-item .drama-info {
+            color: var(--text-tertiary);
+            font-size: clamp(0.75rem, 0.9vw, 0.8125rem);
+        }
+
+        /* Upload Status */
+        .upload-status {
+            background: var(--surface-3);
+            border-radius: var(--radius-md);
+            padding: var(--spacing-md);
+            margin-bottom: var(--spacing-md);
+        }
+
+        .upload-status-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(100px, 1fr));
+            gap: var(--spacing-md);
+        }
+
+        .upload-stat {
+            text-align: center;
+        }
+
+        .upload-stat .value {
+            font-size: clamp(1.5rem, 3vw, 2rem);
+            font-weight: 700;
+            color: var(--accent-cyan);
+            line-height: 1.1;
+        }
+
+        .upload-stat .label {
+            font-size: clamp(0.75rem, 0.9vw, 0.8125rem);
+            color: var(--text-secondary);
+            margin-top: var(--spacing-xs);
+        }
+
+        /* Queue */
+        .upload-queue {
+            max-height: 300px;
+            overflow-y: auto;
+            border: 1px solid var(--surface-4);
+            border-radius: var(--radius-md);
+            background: var(--surface-2);
+        }
+
+        .queue-item {
+            display: flex;
+            align-items: center;
+            padding: var(--spacing-sm) var(--spacing-md);
+            border-bottom: 1px solid var(--surface-3);
+            font-size: clamp(0.8125rem, 1vw, 0.9375rem);
+            gap: var(--spacing-sm);
+        }
+
+        .queue-item:last-child {
+            border-bottom: none;
+        }
+
+        .queue-item .status-badge {
+            padding: 3px var(--spacing-sm);
+            border-radius: var(--radius-sm);
+            font-size: clamp(0.6875rem, 0.85vw, 0.75rem);
+            font-weight: 700;
+            white-space: nowrap;
+        }
+
+        .queue-item .status-badge.pending {
+            background: rgba(251, 146, 60, 0.15);
+            color: var(--accent-amber);
+        }
+
+        .queue-item .status-badge.uploading,
+        .queue-item .status-badge.cutting {
+            background: rgba(56, 189, 248, 0.15);
+            color: var(--accent-cyan);
+        }
+
+        .queue-item .status-badge.completed {
+            background: rgba(34, 197, 94, 0.15);
+            color: var(--status-success);
+        }
+
+        .queue-item .status-badge.failed {
+            background: rgba(239, 68, 68, 0.15);
+            color: var(--status-error);
+        }
+
+        .queue-item .queue-info {
+            flex: 1;
+        }
+
+        .queue-item .queue-progress {
+            margin-top: var(--spacing-xs);
+            font-size: clamp(0.75rem, 0.9vw, 0.8125rem);
+            color: var(--text-tertiary);
+        }
+
+        .queue-item .task-title-input {
+            display: inline-block;
+            width: 260px;
+            max-width: 60%;
+            font-size: clamp(0.75rem, 0.9vw, 0.8125rem);
+            padding: 3px var(--spacing-sm);
+            border: 1px solid var(--surface-4);
+            border-radius: var(--radius-sm);
+            background: var(--surface-3);
+            color: var(--text-primary);
+            outline: none;
+        }
+
+        .queue-item .task-title-input:focus {
+            border-color: var(--accent-cyan);
+            box-shadow: 0 0 0 2px rgba(56, 189, 248, 0.15);
+        }
+
+        .queue-item .task-title-static {
+            font-weight: 600;
+            color: var(--text-primary);
+        }
+
+        .queue-actions {
+            margin-left: auto;
+            padding-left: var(--spacing-sm);
+        }
+
+        /* Upload Log */
+        .upload-log {
+            max-height: 200px;
+            overflow-y: auto;
+            background: var(--surface-1);
+            color: var(--text-primary);
+            border-radius: var(--radius-md);
+            padding: var(--spacing-md);
+            font-family: var(--font-mono);
+            font-size: clamp(0.75rem, 0.9vw, 0.8125rem);
+            line-height: 1.6;
+        }
+
+        .upload-log .log-entry {
+            margin-bottom: var(--spacing-xs);
+            border: none;
+            padding: 0;
+            display: block;
+        }
+
+        .upload-log .log-entry .timestamp {
+            color: var(--text-tertiary);
+        }
+
+        .upload-log .log-entry .level {
+            font-weight: 700;
+        }
+
+        .upload-log .log-entry .level.info {
+            color: var(--accent-cyan);
+        }
+
+        .upload-log .log-entry .level.success {
+            color: var(--status-success);
+        }
+
+        .upload-log .log-entry .level.error {
+            color: var(--status-error);
+        }
+
+        /* Cut Live Panel */
+        .cut-live {
+            margin: var(--spacing-md) 0;
+            border: 1px solid var(--surface-4);
+            border-radius: var(--radius-md);
+            background: linear-gradient(135deg, var(--surface-3), var(--surface-2));
+            padding: var(--spacing-md);
+        }
+
+        .cut-live-head {
+            display: flex;
+            justify-content: space-between;
+            gap: var(--spacing-md);
+            align-items: baseline;
+            margin-bottom: var(--spacing-sm);
+        }
+
+        .cut-live-title {
+            font-size: clamp(0.9375rem, 1.2vw, 1.125rem);
+            font-weight: 700;
+            color: var(--text-primary);
+        }
+
+        .cut-live-message {
+            font-size: clamp(0.75rem, 0.9vw, 0.8125rem);
+            color: var(--text-secondary);
+            text-align: right;
+        }
+
+        .cut-progress-track {
+            height: 8px;
+            border-radius: var(--radius-full);
+            overflow: hidden;
+            background: var(--surface-4);
+        }
+
+        .cut-progress-fill {
+            height: 100%;
+            width: 0;
+            background: linear-gradient(90deg, var(--accent-cyan), #7DD3FC);
+            transition: width 0.25s ease;
+        }
+
+        .cut-stage-list {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(80px, 1fr));
+            gap: var(--spacing-xs);
+            margin-top: var(--spacing-md);
+        }
+
+        .cut-stage {
+            border: 1px solid var(--surface-4);
+            border-radius: var(--radius-sm);
+            padding: var(--spacing-xs) var(--spacing-sm);
+            color: var(--text-tertiary);
+            background: var(--surface-2);
+            font-size: clamp(0.6875rem, 0.85vw, 0.75rem);
+            text-align: center;
+            font-weight: 500;
+        }
+
+        .cut-stage.done {
+            color: var(--status-success);
+            border-color: rgba(34, 197, 94, 0.3);
+            background: rgba(34, 197, 94, 0.1);
+        }
+
+        .cut-stage.active {
+            color: var(--accent-cyan);
+            border-color: rgba(56, 189, 248, 0.4);
+            background: rgba(56, 189, 248, 0.1);
+            font-weight: 700;
+        }
+
+        .cut-live-meta {
+            display: flex;
+            flex-wrap: wrap;
+            gap: var(--spacing-xs) var(--spacing-md);
+            margin-top: var(--spacing-sm);
+            color: var(--text-secondary);
+            font-size: clamp(0.75rem, 0.9vw, 0.8125rem);
+        }
+
+        /* Cut Config Card */
+        .cut-config-card {
+            background: var(--surface-3);
+            border: 1px solid var(--surface-4);
+            border-radius: var(--radius-md);
+            padding: var(--spacing-md);
+            margin-top: var(--spacing-md);
+        }
+
+        .cut-config-card[hidden] {
+            display: none;
+        }
+
+        .cut-config-card h3 {
+            margin: 0 0 var(--spacing-sm);
+            font-size: clamp(0.9375rem, 1.2vw, 1.125rem);
+            color: var(--text-primary);
+            font-weight: 600;
+        }
+
+        .cut-config-card h3 span {
+            color: var(--text-tertiary);
+            font-weight: 400;
+            font-size: clamp(0.8125rem, 1vw, 0.9375rem);
+        }
+
+        .cut-config-grid {
+            display: flex;
+            flex-wrap: wrap;
+            gap: var(--spacing-md);
+        }
+
+        .cfg-field {
+            display: flex;
+            flex-direction: column;
+            gap: var(--spacing-xs);
+            min-width: 130px;
+            flex: 1;
+        }
+
+        .cfg-field label {
+            font-size: clamp(0.75rem, 0.9vw, 0.8125rem);
+            color: var(--text-secondary);
+            font-weight: 500;
+        }
+
+        .cfg-field input,
+        .cfg-field select {
+            padding: var(--spacing-sm);
+            border: 1px solid var(--surface-4);
+            border-radius: var(--radius-sm);
+            font-size: clamp(0.8125rem, 1vw, 0.9375rem);
+            background: var(--surface-2);
+            color: var(--text-primary);
+            font-family: var(--font-sans);
+        }
+
+        .cfg-field input:focus,
+        .cfg-field select:focus {
+            outline: none;
+            border-color: var(--accent-cyan);
+            box-shadow: 0 0 0 2px rgba(56, 189, 248, 0.15);
+        }
+
+        .cfg-hint {
+            font-size: clamp(0.6875rem, 0.85vw, 0.75rem);
+            color: var(--text-tertiary);
+        }
+
+        .cut-config-actions {
+            display: flex;
+            align-items: center;
+            gap: var(--spacing-sm);
+            margin-top: var(--spacing-md);
+            flex-wrap: wrap;
+        }
+
+        .cfg-note {
+            font-size: clamp(0.75rem, 0.9vw, 0.8125rem);
+            color: var(--text-tertiary);
+        }
+
+        /* Cut Preview */
         .cut-preview {
-            margin-top: 15px;
-            border: 1px solid #d9dee8;
-            border-radius: 8px;
-            background: #fff;
-            padding: 14px;
+            margin-top: var(--spacing-md);
+            border: 1px solid var(--surface-4);
+            border-radius: var(--radius-md);
+            background: var(--surface-2);
+            padding: var(--spacing-md);
         }
 
         .cut-preview[hidden] {
@@ -554,19 +1028,20 @@
             display: flex;
             align-items: center;
             justify-content: space-between;
-            gap: 12px;
-            margin-bottom: 12px;
+            gap: var(--spacing-md);
+            margin-bottom: var(--spacing-md);
         }
 
         .cut-preview-head h3 {
-            color: #333;
-            font-size: 16px;
+            color: var(--text-primary);
+            font-size: clamp(0.9375rem, 1.2vw, 1.125rem);
             margin: 0;
+            font-weight: 600;
         }
 
         .cut-preview-version {
-            border-top: 1px solid #edf0f5;
-            padding: 12px 0 4px;
+            border-top: 1px solid var(--surface-3);
+            padding: var(--spacing-md) 0 var(--spacing-xs);
         }
 
         .cut-preview-version:first-child {
@@ -577,402 +1052,182 @@
         .cut-preview-summary {
             display: flex;
             flex-wrap: wrap;
-            gap: 8px 16px;
-            color: #555;
-            font-size: 13px;
-            margin-bottom: 8px;
+            gap: var(--spacing-xs) var(--spacing-md);
+            color: var(--text-secondary);
+            font-size: clamp(0.75rem, 0.9vw, 0.8125rem);
+            margin-bottom: var(--spacing-sm);
         }
 
         .cut-preview-title {
-            color: #222;
+            color: var(--text-primary);
             font-weight: 600;
-            margin-bottom: 4px;
+            margin-bottom: var(--spacing-xs);
         }
 
         .cut-preview-table {
             width: 100%;
             border-collapse: collapse;
-            font-size: 12px;
+            font-size: clamp(0.75rem, 0.9vw, 0.8125rem);
         }
 
         .cut-preview-table th,
         .cut-preview-table td {
             text-align: left;
             vertical-align: top;
-            padding: 6px 8px;
-            border-bottom: 1px solid #f0f2f5;
+            padding: var(--spacing-xs) var(--spacing-sm);
+            border-bottom: 1px solid var(--surface-3);
         }
 
         .cut-preview-table th {
-            color: #666;
+            color: var(--text-secondary);
             font-weight: 600;
             white-space: nowrap;
         }
 
+        .cut-preview-table td {
+            color: var(--text-primary);
+        }
+
         .cut-preview-reason {
-            color: #555;
+            color: var(--text-secondary);
             min-width: 180px;
         }
 
-        .queue-actions {
-            margin-left: auto;
-            padding-left: 10px;
-        }
-
-        .cut-live {
-            margin: 14px 0;
-            border: 1px solid #dfe5ef;
-            border-radius: 10px;
-            background: linear-gradient(135deg, #fbfcff, #f4f7fc);
-            padding: 14px;
-        }
-
-        .cut-live-head {
-            display: flex;
-            justify-content: space-between;
-            gap: 12px;
-            align-items: baseline;
-            margin-bottom: 10px;
-        }
-
-        .cut-live-title {
-            font-size: 15px;
-            font-weight: 700;
-            color: #23324d;
-        }
-
-        .cut-live-message {
-            font-size: 12px;
-            color: #667085;
-            text-align: right;
-        }
-
-        .cut-progress-track {
-            height: 9px;
-            border-radius: 99px;
-            overflow: hidden;
-            background: #e8edf5;
-        }
-
-        .cut-progress-fill {
-            height: 100%;
-            width: 0;
-            background: linear-gradient(90deg, #6172f3, #9b8afb);
-            transition: width .25s ease;
-        }
-
-        .cut-stage-list {
-            display: grid;
-            grid-template-columns: repeat(8, minmax(82px, 1fr));
-            gap: 7px;
-            margin-top: 12px;
-            overflow-x: auto;
-        }
-
-        .cut-stage {
-            border: 1px solid #dfe5ef;
-            border-radius: 7px;
-            padding: 7px 8px;
-            color: #7a8496;
-            background: #fff;
-            font-size: 11px;
-            white-space: nowrap;
-        }
-
-        .cut-stage.done {
-            color: #087443;
-            border-color: #a9e3c2;
-            background: #ecfdf3;
-        }
-
-        .cut-stage.active {
-            color: #3448c5;
-            border-color: #a8b4ff;
-            background: #eef0ff;
-            font-weight: 700;
-        }
-
-        .cut-live-meta {
-            display: flex;
-            flex-wrap: wrap;
-            gap: 8px 18px;
-            margin-top: 10px;
-            color: #596579;
-            font-size: 12px;
-        }
-
         .risk-banner {
-            border-radius: 8px;
-            padding: 11px 13px;
-            margin: 10px 0;
-            border: 1px solid #e6c36a;
-            background: #fff8e6;
-            color: #6b4d00;
-            font-size: 13px;
-            line-height: 1.55;
+            border-radius: var(--radius-md);
+            padding: var(--spacing-sm) var(--spacing-md);
+            margin: var(--spacing-sm) 0;
+            border: 1px solid;
+            font-size: clamp(0.8125rem, 1vw, 0.9375rem);
+            line-height: 1.6;
         }
 
         .risk-banner.high {
-            border-color: #efb4ae;
-            background: #fff1f0;
-            color: #8f2119;
+            border-color: rgba(239, 68, 68, 0.3);
+            background: rgba(239, 68, 68, 0.1);
+            color: var(--status-error);
+        }
+
+        .risk-banner.medium {
+            border-color: rgba(251, 146, 60, 0.3);
+            background: rgba(251, 146, 60, 0.1);
+            color: var(--accent-amber);
         }
 
         .risk-banner.low {
-            border-color: #a9e3c2;
-            background: #ecfdf3;
-            color: #087443;
+            border-color: rgba(34, 197, 94, 0.3);
+            background: rgba(34, 197, 94, 0.1);
+            color: var(--status-success);
         }
 
         .insight-summary {
             display: grid;
-            grid-template-columns: repeat(4, minmax(130px, 1fr));
-            gap: 8px;
-            margin: 10px 0 14px;
+            grid-template-columns: repeat(auto-fit, minmax(130px, 1fr));
+            gap: var(--spacing-sm);
+            margin: var(--spacing-sm) 0 var(--spacing-md);
         }
 
         .insight-metric {
-            background: #f7f9fc;
-            border: 1px solid #e8edf5;
-            border-radius: 7px;
-            padding: 9px 10px;
+            background: var(--surface-3);
+            border: 1px solid var(--surface-4);
+            border-radius: var(--radius-sm);
+            padding: var(--spacing-sm);
         }
 
         .insight-metric strong {
             display: block;
-            color: #23324d;
-            font-size: 17px;
+            color: var(--accent-cyan);
+            font-size: clamp(1rem, 1.5vw, 1.25rem);
+            font-weight: 700;
         }
 
         .insight-metric span {
-            color: #6b7280;
-            font-size: 11px;
+            color: var(--text-secondary);
+            font-size: clamp(0.6875rem, 0.85vw, 0.75rem);
         }
 
         .version-risk {
             display: inline-flex;
             align-items: center;
-            border-radius: 99px;
-            padding: 2px 8px;
-            font-size: 11px;
+            border-radius: var(--radius-full);
+            padding: 2px var(--spacing-sm);
+            font-size: clamp(0.6875rem, 0.85vw, 0.75rem);
             font-weight: 700;
         }
 
         .version-risk.high {
-            color: #a30f0f;
-            background: #fee4e2;
+            color: var(--status-error);
+            background: rgba(239, 68, 68, 0.15);
         }
 
         .version-risk.medium {
-            color: #854a0e;
-            background: #fef0c7;
+            color: var(--accent-amber);
+            background: rgba(251, 146, 60, 0.15);
         }
 
         .version-risk.low {
-            color: #087443;
-            background: #d1fadf;
+            color: var(--status-success);
+            background: rgba(34, 197, 94, 0.15);
         }
 
         .risk-reasons {
-            margin: 7px 0 8px 18px;
-            color: #7a3f3a;
-            font-size: 12px;
-            line-height: 1.55;
+            margin: var(--spacing-xs) 0 var(--spacing-sm) var(--spacing-lg);
+            color: var(--text-secondary);
+            font-size: clamp(0.75rem, 0.9vw, 0.8125rem);
+            line-height: 1.6;
         }
 
         .dialogue-excerpt {
-            margin: 8px 0;
-            padding: 7px 9px;
-            background: #f8fafc;
-            border-left: 3px solid #b8c1d1;
-            color: #566173;
-            font-size: 12px;
+            margin: var(--spacing-sm) 0;
+            padding: var(--spacing-sm);
+            background: var(--surface-3);
+            border-left: 3px solid var(--accent-cyan);
+            color: var(--text-secondary);
+            font-size: clamp(0.75rem, 0.9vw, 0.8125rem);
             line-height: 1.5;
         }
 
-        @media (max-width: 720px) {
-            .cut-preview {
-                overflow-x: auto;
-            }
+        /* Archive Table */
+        table {
+            font-size: clamp(0.8125rem, 1vw, 0.9375rem);
+        }
 
-            .cut-preview-table {
-                min-width: 560px;
-            }
-
-            .insight-summary {
-                grid-template-columns: repeat(2, 1fr);
-            }
-        }
-        
-        .upload-status {
-            background: #f8f9fa;
-            border-radius: 8px;
-            padding: 15px;
-            margin-bottom: 15px;
-        }
-        
-        .upload-status-grid {
-            display: grid;
-            grid-template-columns: repeat(4, 1fr);
-            gap: 15px;
-        }
-        
-        .upload-stat {
-            text-align: center;
-        }
-        
-        .upload-stat .value {
-            font-size: 24px;
-            font-weight: bold;
-            color: #667eea;
-        }
-        
-        .upload-stat .label {
-            font-size: 12px;
-            color: #666;
-        }
-        
-        .upload-queue {
-            max-height: 300px;
-            overflow-y: auto;
-            border: 1px solid #ddd;
-            border-radius: 6px;
-        }
-        
-        .queue-item {
-            display: flex;
-            align-items: center;
-            padding: 10px 15px;
-            border-bottom: 1px solid #eee;
-            font-size: 14px;
-        }
-        
-        .queue-item:last-child {
-            border-bottom: none;
-        }
-        
-        .queue-item .status-badge {
-            padding: 3px 8px;
-            border-radius: 4px;
-            font-size: 11px;
-            font-weight: bold;
-            margin-right: 10px;
-        }
-        
-        .queue-item .status-badge.pending {
-            background: #fff3cd;
-            color: #856404;
-        }
-        
-        .queue-item .status-badge.uploading {
-            background: #cce5ff;
-            color: #004085;
-        }
-        
-        .queue-item .status-badge.completed {
-            background: #d4edda;
-            color: #155724;
-        }
-        
-        .queue-item .status-badge.failed {
-            background: #f8d7da;
-            color: #721c24;
-        }
-        
-        .queue-item .queue-info {
-            flex: 1;
-        }
-        
-        .queue-item .queue-progress {
-            margin-top: 5px;
-            font-size: 12px;
-            color: #666;
-        }
-        
-        .queue-item .task-title-input {
-            display: inline-block;
-            width: 260px;
-            max-width: 60%;
-            font-size: 13px;
-            padding: 3px 8px;
-            border: 1px solid #d9d9d9;
-            border-radius: 4px;
-            background: #fff;
-            color: #333;
-            outline: none;
-        }
-        .queue-item .task-title-input:focus {
-            border-color: #4a90e2;
-            box-shadow: 0 0 0 2px rgba(74, 144, 226, .15);
-        }
-        .queue-item .task-title-static {
+        table th {
+            background: var(--surface-3);
+            color: var(--text-secondary);
             font-weight: 600;
-            color: #333;
+            padding: var(--spacing-sm);
         }
-        .queue-item .task-meta-row {
-            margin-top: 4px;
-            font-size: 12px;
-            color: #888;
-            display: flex;
-            align-items: center;
-            gap: 12px;
-            flex-wrap: wrap;
+
+        table td {
+            color: var(--text-primary);
+            padding: var(--spacing-sm);
+            border-bottom: 1px solid var(--surface-3);
         }
-        .queue-item .edit-tip {
-            color: #b0b0b0;
-            font-size: 11px;
-        }
-        
-        .upload-log {
-            max-height: 200px;
-            overflow-y: auto;
-            background: #2d2d2d;
-            color: #f8f8f2;
-            border-radius: 6px;
-            padding: 15px;
-            font-family: 'Courier New', monospace;
-            font-size: 12px;
-        }
-        
-        .upload-log .log-entry {
-            margin-bottom: 5px;
-        }
-        
-        .upload-log .log-entry .timestamp {
-            color: #75715e;
-        }
-        
-        .upload-log .log-entry .level {
-            font-weight: bold;
-        }
-        
-        .upload-log .log-entry .level.info {
-            color: #6897bb;
-        }
-        
-        .upload-log .log-entry .level.success {
-            color: #b8cc52;
-        }
-        
-        .upload-log .log-entry .level.error {
-            color: #e06c75;
-        }
-        
+
+        /* Responsive */
         @media (max-width: 768px) {
+            .header {
+                grid-template-columns: 1fr;
+            }
+
             .grid {
                 grid-template-columns: 1fr;
             }
-            
+
             .stats-grid {
-                grid-template-columns: 1fr;
+                grid-template-columns: repeat(auto-fit, minmax(80px, 1fr));
             }
-            
-            .header {
-                flex-direction: column;
-                gap: 15px;
-            }
-            
+
             .upload-status-grid {
+                grid-template-columns: repeat(2, 1fr);
+            }
+
+            .cut-stage-list {
+                overflow-x: auto;
+            }
+
+            .insight-summary {
                 grid-template-columns: repeat(2, 1fr);
             }
         }
@@ -981,19 +1236,19 @@
 <body>
     <div class="container">
         <div class="header">
-            <h1>🎬 短剧工坊仪表盘</h1>
-            <div class="status">
+            <h1>🎬 短剧工坊</h1>
+            <div class="status-pill">
                 <div class="status-indicator" id="statusIndicator"></div>
                 <span class="status-text" id="statusText">空闲</span>
             </div>
-            <div class="baidupcs-status">
+            <div class="baidu-status">
                 <span id="baidupcsStatus">未登录</span>
                 <button class="btn btn-secondary btn-small" onclick="checkBaidupcsStatus()">刷新</button>
                 <button class="btn btn-primary btn-small" id="loginBtn" onclick="loginBaidupcs()">登录</button>
                 <button class="btn btn-danger btn-small" id="logoutBtn" onclick="logoutBaidupcs()" style="display:none">退出</button>
             </div>
         </div>
-        
+
         <div class="grid">
             <div class="card">
                 <h2>📤 提交消息</h2>
@@ -1013,7 +1268,7 @@
                     </div>
                 </div>
             </div>
-            
+
             <div class="card">
                 <h2>📊 统计信息</h2>
                 <div class="stats-grid">
@@ -1030,12 +1285,12 @@
                         <div class="stat-label">处理中</div>
                     </div>
                 </div>
-                <div style="margin-top: 15px; text-align: center;">
+                <div style="margin-top: var(--spacing-md); text-align: center;">
                     <button class="btn btn-danger" onclick="cleanupLogs()">🧹 清理日志</button>
                 </div>
             </div>
         </div>
-        
+
         <div class="card">
             <div class="tabs">
                 <div class="tab active" onclick="switchTab('logs')">📝 实时日志</div>
@@ -1044,19 +1299,19 @@
                 <div class="tab" onclick="switchTab('cut')">✂️ 批量切片</div>
                 <div class="tab" onclick="switchTab('archive')">🗂️ 剧级档案</div>
             </div>
-            
+
             <div class="tab-content active" id="logsTab">
                 <div id="logsContainer"></div>
             </div>
-            
+
             <div class="tab-content" id="historyTab">
                 <div id="historyContainer"></div>
             </div>
-            
+
             <div class="tab-content" id="uploadTab">
                 <div class="upload-panel">
                     <h2>🚀 批量上传到视频号</h2>
-                    
+
                     <div class="upload-controls">
                         <select id="uploadAccount" onchange="loadDramas()">
                             <option value="">选择账号</option>
@@ -1069,19 +1324,19 @@
                         <button class="btn btn-danger" id="stopUploadBtn" onclick="stopUpload()" disabled>⏹️ 停止</button>
                         <button class="btn btn-secondary" onclick="clearUploadQueue()">🧹 清除队列</button>
                         <button class="btn btn-success" id="openDraftBtn" onclick="openDraftBox()">📋 打开草稿箱</button>
-                        <label style="margin-left: 8px; font-size: 13px; display: inline-flex; align-items: center;">
-                            <input type="checkbox" id="autoCleanup" style="margin-right: 4px;">
+                        <label>
+                            <input type="checkbox" id="autoCleanup">
                             上传成功后自动清理（移入回收站）
                         </label>
                     </div>
-                    
+
                     <div class="drama-selector">
                         <h3>选择剧集</h3>
                         <div class="drama-list" id="dramaList">
-                            <div style="padding: 20px; text-align: center; color: #666;">请选择账号后刷新列表</div>
+                            <div style="padding: var(--spacing-lg); text-align: center; color: var(--text-tertiary);">请选择账号后刷新列表</div>
                         </div>
                     </div>
-                    
+
                     <div class="upload-status">
                         <div class="upload-status-grid">
                             <div class="upload-stat">
@@ -1102,39 +1357,74 @@
                             </div>
                         </div>
                     </div>
-                    
+
                     <div class="upload-queue" id="uploadQueue">
-                        <div style="padding: 20px; text-align: center; color: #666;">队列为空</div>
+                        <div style="padding: var(--spacing-lg); text-align: center; color: var(--text-tertiary);">队列为空</div>
                     </div>
-                    
-                    <div style="margin-top: 15px;">
+
+                    <div style="margin-top: var(--spacing-md);">
                         <h3>上传日志</h3>
                         <div class="upload-log" id="uploadLog"></div>
                     </div>
                 </div>
             </div>
-            
+
             <div class="tab-content" id="cutTab">
                 <div class="cut-panel">
                     <h2>✂️ 批量切片</h2>
-                    
+
                     <div class="cut-controls">
                         <button class="btn btn-secondary" onclick="refreshCutDramas()">🔄 刷新剧列表</button>
                         <button class="btn btn-primary" id="startCutBtn" onclick="startCutting()">▶️ 开始切片</button>
                         <button class="btn btn-secondary" id="pauseCutBtn" onclick="pauseCutting()" disabled>⏸️ 暂停</button>
                         <button class="btn btn-danger" id="stopCutBtn" onclick="stopCutting()" disabled>⏹️ 停止</button>
                         <button class="btn btn-secondary" onclick="clearCutQueue()">🧹 清除队列</button>
-                        <input type="text" id="cutPreviewDrama" placeholder="输入剧名查看方案" style="flex:1;min-width:180px;padding:9px 12px;border:1px solid #d8dce5;border-radius:6px;">
+                        <input type="text" id="cutPreviewDrama" placeholder="输入剧名查看方案" style="flex:1;min-width:180px;">
                         <button class="btn btn-secondary" onclick="previewCutByName()">🔍 查看方案</button>
                     </div>
-                    
+
                     <div class="drama-selector">
                         <h3>选择剧集（素材目录）</h3>
                         <div class="drama-list" id="cutDramaList">
-                            <div style="padding: 20px; text-align: center; color: #666;">点击刷新剧列表</div>
+                            <div style="padding: var(--spacing-lg); text-align: center; color: var(--text-tertiary);">点击刷新剧列表</div>
                         </div>
                     </div>
-                    
+
+                    <div class="cut-config-card" id="cutConfigCard" hidden>
+                        <h3>🎛️ 本剧切制参数 <span id="cutConfigDrama"></span></h3>
+                        <div class="cut-config-grid">
+                            <div class="cfg-field">
+                                <label>版本数（1-8）</label>
+                                <input type="number" id="cfgVersionCount" min="1" max="8" step="1" placeholder="自动">
+                                <span class="cfg-hint">一部剧产几版；留空=按集数/素材容量自动</span>
+                            </div>
+                            <div class="cfg-field">
+                                <label>单版时长下限（秒）</label>
+                                <input type="number" id="cfgMinDur" min="60" max="1200" step="10">
+                            </div>
+                            <div class="cfg-field">
+                                <label>单版时长上限（秒）</label>
+                                <input type="number" id="cfgMaxDur" min="60" max="1200" step="10">
+                            </div>
+                            <div class="cfg-field">
+                                <label>跨版本素材复用</label>
+                                <select id="cfgReuse">
+                                    <option value="0">禁止（版本差异化）</option>
+                                    <option value="1">允许（可超素材容量）</option>
+                                </select>
+                            </div>
+                            <div class="cfg-field">
+                                <label>水印文本</label>
+                                <input type="text" id="cfgWatermark" placeholder="默认=账号名">
+                            </div>
+                        </div>
+                        <div class="cut-config-actions">
+                            <button class="btn btn-secondary btn-small" onclick="saveCutConfig()">💾 保存到本剧</button>
+                            <button class="btn btn-secondary btn-small" onclick="resetCutConfig()">↩️ 恢复默认</button>
+                            <span class="cfg-note">保存后该剧每次读取；不保存也能本次生效</span>
+                        </div>
+                    </div>
+
                     <div class="upload-status">
                         <div class="upload-status-grid">
                             <div class="upload-stat">
@@ -1169,9 +1459,9 @@
                         </div>
                         <div class="cut-stage-list" id="cutStageList"></div>
                     </div>
-                    
+
                     <div class="upload-queue" id="cutQueue">
-                        <div style="padding: 20px; text-align: center; color: #666;">队列为空</div>
+                        <div style="padding: var(--spacing-lg); text-align: center; color: var(--text-tertiary);">队列为空</div>
                     </div>
 
                     <div class="cut-preview" id="cutPreviewPanel" hidden>
@@ -1184,19 +1474,19 @@
                         </div>
                         <div id="cutPreviewBody"></div>
                     </div>
-                    
-                    <div style="margin-top: 15px;">
+
+                    <div style="margin-top: var(--spacing-md);">
                         <h3>切片日志</h3>
                         <div class="upload-log" id="cutLog"></div>
                     </div>
                 </div>
             </div>
-            
+
             <div class="tab-content" id="archiveTab">
                 <div class="upload-panel">
                     <h2>🗂️ 剧级档案（下载/切片/上传状态）</h2>
                     <div class="upload-controls">
-                        <input type="text" id="archiveQ" placeholder="搜索剧名（如：前夫）..." style="flex:1;padding:8px;border-radius:6px;border:1px solid #ddd;font-size:14px;">
+                        <input type="text" id="archiveQ" placeholder="搜索剧名（如：前夫）..." style="flex:1;">
                         <select id="archiveDl">
                             <option value="">下载-全部</option>
                             <option value="done">✅ 已下载</option>
@@ -1217,17 +1507,17 @@
                         </select>
                         <button class="btn btn-primary" onclick="searchArchive()">🔍 搜索</button>
                     </div>
-                    <table style="width:100%;margin-top:15px;border-collapse:collapse;">
+                    <table style="width:100%;margin-top:var(--spacing-md);border-collapse:collapse;">
                         <thead>
-                            <tr style="text-align:left;background:#f5f5f5;">
-                                <th style="padding:8px;">剧名</th>
-                                <th style="padding:8px;">下载</th>
-                                <th style="padding:8px;">切片</th>
-                                <th style="padding:8px;">上传</th>
-                                <th style="padding:8px;">集数</th>
-                                <th style="padding:8px;">下载时间</th>
-                                <th style="padding:8px;">切片时间</th>
-                                <th style="padding:8px;">更新时间</th>
+                            <tr>
+                                <th>剧名</th>
+                                <th>下载</th>
+                                <th>切片</th>
+                                <th>上传</th>
+                                <th>集数</th>
+                                <th>下载时间</th>
+                                <th>切片时间</th>
+                                <th>更新时间</th>
                             </tr>
                         </thead>
                         <tbody id="archiveRows"></tbody>
@@ -1236,46 +1526,46 @@
             </div>
         </div>
     </div>
-    
+
     <div class="notification" id="notification"></div>
-    
+
     <script src="https://cdnjs.cloudflare.com/ajax/libs/socket.io/4.6.0/socket.io.min.js"></script>
     <script>
         let socket;
         let currentTab = 'logs';
-        
+
         // 连接WebSocket
         function connectSocket() {
             socket = io();
-            
+
             socket.on('connect', () => {
                 console.log('已连接');
                 updateStatus('active', '已连接');
             });
-            
+
             socket.on('disconnect', () => {
                 console.log('已断开');
                 updateStatus('error', '已断开');
             });
-            
+
             socket.on('status_update', (data) => {
                 updateStatusUI(data);
             });
-            
+
             socket.on('log_update', (log) => {
                 addLog(log);
             });
-            
+
             socket.on('process_complete', (result) => {
                 handleProcessComplete(result);
             });
         }
-        
+
         // 更新状态UI
         function updateStatusUI(data) {
             const indicator = document.getElementById('statusIndicator');
             const text = document.getElementById('statusText');
-            
+
             if (data.processing) {
                 indicator.className = 'status-indicator processing';
                 text.textContent = `处理中 (${data.progress}%)`;
@@ -1288,41 +1578,41 @@
                 text.textContent = '空闲';
                 document.getElementById('progressSection').classList.remove('active');
             }
-            
+
             document.getElementById('processingCount').textContent = data.processing ? 1 : 0;
         }
-        
+
         function updateStatus(status, text) {
             const indicator = document.getElementById('statusIndicator');
             const statusText = document.getElementById('statusText');
-            
+
             indicator.className = 'status-indicator ' + status;
             statusText.textContent = text;
         }
-        
+
         // 提交消息
         async function submitMessage() {
             const input = document.getElementById('messageInput');
             const message = input.value.trim();
-            
+
             if (!message) {
                 showNotification('请输入消息', 'error');
                 return;
             }
-            
+
             const btn = document.getElementById('submitBtn');
             btn.disabled = true;
             btn.textContent = '处理中...';
-            
+
             try {
                 const response = await fetch('/api/process', {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
                     body: JSON.stringify({ message: message })
                 });
-                
+
                 const result = await response.json();
-                
+
                 if (result.status === 'started') {
                     showNotification('开始处理', 'success');
                     input.value = '';
@@ -1336,7 +1626,7 @@
                 btn.textContent = '🚀 开始处理';
             }
         }
-        
+
         // 处理完成
         function handleProcessComplete(result) {
             if (result.status === 'success') {
@@ -1346,11 +1636,11 @@
             } else {
                 showNotification('处理失败: ' + result.error, 'error');
             }
-            
+
             // 刷新统计
             refreshStats();
         }
-        
+
         // 添加日志
         function addLog(log) {
             const container = document.getElementById('logsContainer');
@@ -1362,23 +1652,23 @@
                 <span class="log-message">${escapeHtml(log.message)}</span>
             `;
             container.insertBefore(entry, container.firstChild);
-            
+
             // 限制日志数量
             while (container.children.length > 100) {
                 container.removeChild(container.lastChild);
             }
         }
-        
+
         // 切换标签
         function switchTab(tab) {
             currentTab = tab;
-            
+
             document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
             document.querySelectorAll('.tab-content').forEach(t => t.classList.remove('active'));
-            
+
             event.target.classList.add('active');
             document.getElementById(tab + 'Tab').classList.add('active');
-            
+
             if (tab === 'history') {
                 loadHistory();
             }
@@ -1390,7 +1680,7 @@
                 loadUploadAccounts();
             }
         }
-        
+
         // 全局转义辅助（防剧名含引号/HTML 的 DOM XSS）
         function escapeHtml(s) {
             return String(s ?? '').replace(/[&<>"']/g, c => ({
@@ -1415,47 +1705,46 @@
                     const tbody = document.getElementById('archiveRows');
                     tbody.innerHTML = '';
                     if (d.status !== 'success') {
-                        tbody.innerHTML = '<tr><td colspan="8" style="color:#c00;padding:8px;">搜索失败：' + escapeHtml(d.error || '未知错误') + '</td></tr>';
+                        tbody.innerHTML = '<tr><td colspan="8" style="color:var(--status-error);padding:var(--spacing-sm);">搜索失败：' + escapeHtml(d.error || '未知错误') + '</td></tr>';
                         return;
                     }
                     if (!d.results.length) {
-                        tbody.innerHTML = '<tr><td colspan="8" style="color:#666;padding:8px;">无记录（未下载过或未切片/上传过）</td></tr>';
+                        tbody.innerHTML = '<tr><td colspan="8" style="color:var(--text-tertiary);padding:var(--spacing-sm);">无记录（未下载过或未切片/上传过）</td></tr>';
                         return;
                     }
                     d.results.forEach(r => {
                         const tr = document.createElement('tr');
-                        tr.style.borderBottom = '1px solid #eee';
                         tr.innerHTML =
-                            '<td style="padding:8px;">' + escapeHtml(r.drama_name) + '</td>' +
-                            '<td style="padding:8px;">' + stateBadge(r.download_state) + '</td>' +
-                            '<td style="padding:8px;">' + stateBadge(r.slice_state) + '</td>' +
-                            '<td style="padding:8px;">' + stateBadge(r.upload_state) + '</td>' +
-                            '<td style="padding:8px;">' + (r.episode_count || '') + '</td>' +
-                            '<td style="padding:8px;">' + (r.downloaded_at || '') + '</td>' +
-                            '<td style="padding:8px;">' + (r.sliced_at || '') + '</td>' +
-                            '<td style="padding:8px;">' + (r.updated_at || '') + '</td>';
+                            '<td>' + escapeHtml(r.drama_name) + '</td>' +
+                            '<td>' + stateBadge(r.download_state) + '</td>' +
+                            '<td>' + stateBadge(r.slice_state) + '</td>' +
+                            '<td>' + stateBadge(r.upload_state) + '</td>' +
+                            '<td>' + (r.episode_count || '') + '</td>' +
+                            '<td>' + (r.downloaded_at || '') + '</td>' +
+                            '<td>' + (r.sliced_at || '') + '</td>' +
+                            '<td>' + (r.updated_at || '') + '</td>';
                         tbody.appendChild(tr);
                     });
                 })
                 .catch(() => {
                     document.getElementById('archiveRows').innerHTML =
-                        '<tr><td colspan="8" style="color:#c00;padding:8px;">请求失败</td></tr>';
+                        '<tr><td colspan="8" style="color:var(--status-error);padding:var(--spacing-sm);">请求失败</td></tr>';
                 });
         }
-        
+
         function stateBadge(s) {
             const map = {done: '✅', cutting: '✂️⏳', downloading: '⬇️⏳', failed: '❌', partial: '⚠️', none: '—'};
             return map[s] || (s ? escapeHtml(s) : '—');
         }
-        
+
         // 加载历史记录
         async function loadHistory() {
             const container = document.getElementById('historyContainer');
-            
+
             try {
                 const response = await fetch('/api/history?limit=50');
                 const history = await response.json();
-                
+
                 if (history.length === 0) {
                     container.innerHTML = `
                         <div class="empty-state">
@@ -1465,7 +1754,7 @@
                     `;
                     return;
                 }
-                
+
                 container.innerHTML = history.map(item => `
                     <div class="history-item">
                         <div class="history-header">
@@ -1507,52 +1796,52 @@
                 showNotification('重切失败: ' + error.message, 'error');
             }
         }
-        
+
         function formatDetails(details) {
             if (typeof details === 'object') {
                 return Object.entries(details).map(([k, v]) => `${escapeHtml(k)}: ${escapeHtml(v)}`).join(', ');
             }
             return escapeHtml(details);
         }
-        
+
         // 刷新统计
         async function refreshStats() {
             try {
                 const response = await fetch('/api/status');
                 const data = await response.json();
-                
+
                 document.getElementById('completedCount').textContent = data.completed_count;
                 document.getElementById('failedCount').textContent = data.failed_count;
             } catch (error) {
                 console.error('刷新统计失败:', error);
             }
         }
-        
+
         // 清理日志
         async function cleanupLogs() {
             if (!confirm('确定要清理过期日志吗？')) {
                 return;
             }
-            
+
             try {
                 const response = await fetch('/api/cleanup-logs', {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
                     body: JSON.stringify({ days: 30 })
                 });
-                
+
                 const result = await response.json();
                 showNotification(`清理完成，删除${result.deleted}个文件`, 'success');
             } catch (error) {
                 showNotification('清理失败: ' + error.message, 'error');
             }
         }
-        
+
         // 清空输入
         function clearInput() {
             document.getElementById('messageInput').value = '';
         }
-        
+
         // 加载示例
         function loadExample() {
             document.getElementById('messageInput').value = `【方式1】百度网盘链接（下载+切片）
@@ -1565,28 +1854,28 @@
 或
 /切片 归乡检察官`;
         }
-        
+
         // 显示通知
         function showNotification(message, type = 'info') {
             const notification = document.getElementById('notification');
             notification.textContent = message;
             notification.className = 'notification ' + type + ' show';
-            
+
             setTimeout(() => {
                 notification.classList.remove('show');
             }, 3000);
         }
-        
+
         // BaiduPCS-Go登录状态
         async function checkBaidupcsStatus() {
             try {
                 const response = await fetch('/api/baidupcs/status');
                 const data = await response.json();
-                
+
                 const statusEl = document.getElementById('baidupcsStatus');
                 const loginBtn = document.getElementById('loginBtn');
                 const logoutBtn = document.getElementById('logoutBtn');
-                
+
                 if (data.status === 'logged_in') {
                     statusEl.textContent = '✓ 已登录';
                     statusEl.classList.add('logged-in');
@@ -1603,16 +1892,15 @@
                 console.error('检查BaiduPCS-Go状态失败:', error);
             }
         }
-        
+
         // 登录BaiduPCS-Go
         async function loginBaidupcs() {
             try {
                 const response = await fetch('/api/baidupcs/login', {method: 'POST'});
                 const data = await response.json();
-                
+
                 if (data.status === 'success') {
                     showNotification('登录窗口已启动，请完成登录', 'success');
-                    // 5秒后刷新状态
                     setTimeout(checkBaidupcsStatus, 5000);
                 } else {
                     showNotification('登录失败: ' + data.error, 'error');
@@ -1621,17 +1909,17 @@
                 showNotification('登录失败: ' + error.message, 'error');
             }
         }
-        
+
         // 退出BaiduPCS-Go
         async function logoutBaidupcs() {
             if (!confirm('确定要退出登录吗？')) {
                 return;
             }
-            
+
             try {
                 const response = await fetch('/api/baidupcs/logout', {method: 'POST'});
                 const data = await response.json();
-                
+
                 if (data.status === 'success') {
                     showNotification('已退出登录', 'success');
                     checkBaidupcsStatus();
@@ -1642,13 +1930,12 @@
                 showNotification('退出失败: ' + error.message, 'error');
             }
         }
-        
+
         // ===== 上传功能 =====
 
         let uploadPollTimer = null;
-        let selectedDramas = {};  // {dramaName: [versions]}
+        let selectedDramas = {};
 
-        // 检查登录状态
         async function checkLoginStatus() {
             const account = document.getElementById('uploadAccount').value;
             if (!account) {
@@ -1672,7 +1959,6 @@
             }
         }
 
-        // 登录账号
         async function loginAccount() {
             const account = document.getElementById('uploadAccount').value;
             if (!account) {
@@ -1697,8 +1983,6 @@
 
                 if (result.status === 'success') {
                     showNotification('登录流程已启动，请在浏览器中完成登录', 'info');
-
-                    // 开始轮询登录状态
                     startLoginPolling(account);
                 } else {
                     showNotification('启动登录失败: ' + result.error, 'error');
@@ -1708,11 +1992,6 @@
             }
         }
 
-        // 轮询登录状态
-        // 注意：check_login 会开 headless 浏览器。如果它和可见的扫码窗口
-        // 抢同一个 profile 目录，扫码窗口会被挤掉（二维码还没扫就没了）。
-        // 所以必须盯着 login_in_progress：登录进程一结束就立刻停轮询，
-        // 不要再抢 profile。
         let loginPollTimer = null;
         async function startLoginPolling(account) {
             if (loginPollTimer) {
@@ -1729,7 +2008,6 @@
                         loginPollTimer = null;
                         showNotification(`${account} 登录成功！`, 'success');
                     } else if (result.login_in_progress === false) {
-                        // 登录进程已经结束（成功/超时/被关）——停止抢 profile
                         clearInterval(loginPollTimer);
                         loginPollTimer = null;
                         showNotification(`${account} 登录窗口已关闭，请重新点击登录`, 'warning');
@@ -1737,12 +2015,11 @@
                 } catch (error) {
                     console.error('轮询登录状态失败:', error);
                 }
-            }, 5000); // 每5秒检查一次
+            }, 5000);
 
             showNotification('等待登录中...（每5秒检查一次）', 'info');
         }
 
-        // 加载上传账号下拉（来自后端实际目录，不再硬编码）
         async function loadUploadAccounts() {
             try {
                 const response = await fetch('/api/upload/accounts');
@@ -1765,12 +2042,10 @@
             }
         }
 
-        // 加载剧列表
         async function loadDramas() {
             const account = document.getElementById('uploadAccount').value;
             const container = document.getElementById('dramaList');
-            
-            // 空账号=查看全部剧（不按归属过滤），符合"剧在列表就能上传"
+
             try {
                 const url = account
                     ? `/api/upload/dramas?account=${encodeURIComponent(account)}`
@@ -1779,25 +2054,24 @@
                 const data = await response.json();
                 const dramas = data.dramas || [];
                 const diagnostics = data.diagnostics || [];
-                
+
                 if (dramas.length === 0) {
-                    // 可解释的空状态：按诊断渲染，而不是只给一句空文案
                     if (diagnostics.length > 0) {
                         const diagHtml = diagnostics.map(d => `
-                            <div style="padding: 8px 0; color: #b45309;">
+                            <div style="padding: var(--spacing-xs) 0; color: var(--accent-amber);">
                                 ⚠️ ${escapeHtml(d.reason || '')}
                             </div>`).join('');
-                        container.innerHTML = `<div style="padding: 20px; text-align: center; color: #666;">
+                        container.innerHTML = `<div style="padding: var(--spacing-lg); text-align: center; color: var(--text-tertiary);">
                             暂无可上传的剧集<br><br>${diagHtml || ''}
-                            <div style="margin-top: 10px; color: #888; font-size: 13px;">
+                            <div style="margin-top: var(--spacing-sm); color: var(--text-tertiary); font-size: 0.8125rem;">
                                 提示：可在上方切换账号，或在切片页重新为该剧指定账号。
                             </div>
                         </div>`;
                     } else {
-                        container.innerHTML = `<div style="padding: 20px; text-align: center; color: #666;">
+                        container.innerHTML = `<div style="padding: var(--spacing-lg); text-align: center; color: var(--text-tertiary);">
                             暂无可上传的剧集<br>
-                            <div style="margin-top: 10px; color: #888; font-size: 13px;">
-                                ${escapeHtml(account)} 目录下暂无已渲染成片。若切片已完成，请检查是否卡在后处理或落在其他账号目录。
+                            <div style="margin-top: var(--spacing-sm); font-size: 0.8125rem;">
+                                ${escapeHtml(account)} 目录下暂无已渲染成片。
                             </div>
                         </div>`;
                     }
@@ -1805,17 +2079,17 @@
                     selectedDramas = {};
                     return;
                 }
-                
+
                 container.innerHTML = dramas.map(drama => {
                     const name = escapeHtml(drama.name);
                     const planBadge = (drama.plan_account && drama.plan_account !== drama.account)
-                        ? `<span class="plan-mismatch" style="color:#b45309;margin-left:6px;font-size:12px;">计划归 ${escapeHtml(drama.plan_account)}</span>`
+                        ? `<span style="color:var(--accent-amber);margin-left:var(--spacing-xs);font-size:0.75rem;">计划归 ${escapeHtml(drama.plan_account)}</span>`
                         : '';
                     const pendingBadge = drama.edl_pending
-                        ? `<span class="edl-pending" style="color:#6b7280;margin-left:6px;font-size:12px;">EDL已定·待渲染</span>`
+                        ? `<span style="color:var(--text-tertiary);margin-left:var(--spacing-xs);font-size:0.75rem;">EDL已定·待渲染</span>`
                         : '';
                     const stuckBadge = drama.stuck_tmp_count > 0
-                        ? `<span class="stuck-tmp" style="color:#b91c1c;margin-left:6px;font-size:12px;">${drama.stuck_tmp_count}个卡临时</span>`
+                        ? `<span style="color:var(--status-error);margin-left:var(--spacing-xs);font-size:0.75rem;">${drama.stuck_tmp_count}个卡临时</span>`
                         : '';
                     return `
                     <div class="drama-item">
@@ -1825,7 +2099,7 @@
                         ${planBadge}${pendingBadge}${stuckBadge}
                     </div>`;
                 }).join('');
-                // 事件委托替代剧名内联 onchange（防剧名含引号/HTML 的 DOM XSS）
+
                 if (!container.dataset.changeBound) {
                     container.addEventListener('change', (ev) => {
                         const cb = ev.target;
@@ -1836,26 +2110,23 @@
                     });
                     container.dataset.changeBound = '1';
                 }
-                
-                // 存储剧列表数据
+
                 window.dramasData = dramas;
                 selectedDramas = {};
-                
+
                 showNotification('已加载' + dramas.length + '部剧', 'success');
             } catch (error) {
-                container.innerHTML = `<div style="padding: 20px; text-align: center; color: #f44336;">加载失败: ${escapeHtml(error.message)}</div>`;
+                container.innerHTML = `<div style="padding: var(--spacing-lg); text-align: center; color: var(--status-error);">加载失败: ${escapeHtml(error.message)}</div>`;
             }
         }
-        
-        // 刷新剧列表
+
         function refreshDramas() {
             loadDramas();
         }
-        
-        // 切换剧选择
+
         function toggleDramaSelect(dramaName, checked, item) {
             const drama = window.dramasData?.find(d => d.name === dramaName);
-            
+
             if (checked && drama) {
                 selectedDramas[dramaName] = drama.versions;
                 if (item) item.classList.add('selected');
@@ -1864,9 +2135,7 @@
                 if (item) item.classList.remove('selected');
             }
         }
-        
-        // 开始上传期间的繁忙标志：提交任务+内容指纹+预检登录可长达分钟级，
-        // 期间禁用按钮并提示，避免"点了没反应"（后台实际在跑）。
+
         let startUploadBusy = false;
         function setStartUploadBusy(busy, text) {
             startUploadBusy = busy;
@@ -1877,41 +2146,25 @@
             }
         }
 
-        // 开始上传
         async function startUpload() {
-            console.log('startUpload 被调用');
-            // 账号仅用于浏览过滤，不强制、不校验归属；
-            // 实际上传账号跟随每部剧所在目录（见下方 items.push）。
             const account = document.getElementById('uploadAccount').value;
-            console.log('浏览账号:', account);
-            
+
             if (Object.keys(selectedDramas).length === 0) {
                 showNotification('请选择至少一部剧', 'error');
                 return;
             }
-            
-            // 立即反馈：禁用按钮 + 提示，后台在算内容指纹/预检登录（可达分钟级）
+
             setStartUploadBusy(true, '⏳ 正在提交任务…');
             showNotification('正在提交任务并计算内容指纹…', 'info');
-            
+
             try {
-            console.log('selectedDramas:', selectedDramas);
-            console.log('selectedDramas keys:', Object.keys(selectedDramas));
-            console.log('window.dramasData:', window.dramasData);
-            
-            // 生成批次 ID（时间戳），供清理计划器按批次聚合
             const batchId = 'batch_' + Date.now() + '_' + Math.floor(Math.random() * 1000);
-            
-            // 收集全部待上传条目（一次请求整批提交，避免半批次）
             const items = [];
+
             for (const [dramaName, versions] of Object.entries(selectedDramas)) {
                 const drama = window.dramasData?.find(d => d.name === dramaName);
-                if (!drama) {
-                    console.warn(`剧 ${dramaName} 不在 dramasData 中`);
-                    continue;
-                }
-                
-                // 扫描实际存在的视频文件
+                if (!drama) continue;
+
                 const dramaDir = drama.path;
                 let files = [];
                 try {
@@ -1922,24 +2175,19 @@
                     console.error('扫描文件失败:', error);
                     continue;
                 }
-                
+
                 for (const version of versions) {
-                    // 查找包含该版本号的视频文件
-                    const videoFile = files.find(f => 
-                        f.endsWith('.mp4') && 
+                    const videoFile = files.find(f =>
+                        f.endsWith('.mp4') &&
                         !f.includes('test') &&
                         f.includes(`_${version}_`)
                     );
-                    
-                    if (!videoFile) {
-                        console.warn(`V${version} 视频文件不存在`);
-                        continue;
-                    }
-                    
+
+                    if (!videoFile) continue;
+
                     items.push({
                         drama_name: dramaName,
                         video_path: `${dramaDir}/${videoFile}`,
-                        // 上传账号跟随剧实际所在目录，不校验 plan_account 归属
                         account: drama.account || account,
                         version: version,
                         batch_id: batchId,
@@ -1948,30 +2196,30 @@
                     });
                 }
             }
-            
+
             if (items.length === 0) {
                 showNotification('没有找到可上传的视频文件', 'error');
                 return;
             }
-            
-            // 一次请求整批提交（R4：原子批量，无半批次）
+
             let addedCount = 0;
             let detailMsg = '';
             let lastResult = null;
+
             try {
                 const response = await fetch('/api/upload/batches', {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
                     body: JSON.stringify({ items: items, batch_id: batchId })
                 });
-                
+
                 let result = {};
                 try {
                     result = await response.json();
                 } catch (jsonError) {
                     result = { status: 'unknown', error: `响应解析失败: ${jsonError}` };
                 }
-                
+
                 if (result.status === 'success') {
                     lastResult = result;
                     addedCount = result.accepted || 0;
@@ -1993,13 +2241,8 @@
                 showNotification(`批量添加异常: ${error}`, 'error');
                 return;
             }
-            
-            console.log('总计添加: ' + addedCount + '个任务');
-            
+
             if (addedCount === 0) {
-                // 全部被拒且均为「已在待上传队列中」类型（无 reason = 非内容级查重），
-                // 通常是上次服务重启后 worker 未启动的残留批次：给出清队列提示，
-                // 避免用户点「开始上传」陷入死胡同（重新提交永远被判重）。
                 const dups = (lastResult && lastResult.duplicates) || [];
                 const missN2 = (lastResult && lastResult.missing) ? lastResult.missing.length : 0;
                 const rejN2 = (lastResult && lastResult.rejected) ? lastResult.rejected.length : 0;
@@ -2015,7 +2258,7 @@
                                 headers: { 'Content-Type': 'application/json' },
                                 body: JSON.stringify({ status: 'pending' })
                             });
-                        } catch (e) { /* 清理失败也继续尝试重新提交 */ }
+                        } catch (e) { }
                         showNotification(`已清空待上传队列，重新提交...`, 'info');
                         startUpload();
                         return;
@@ -2024,11 +2267,9 @@
                 showNotification(`没有可上传的视频文件 ${detailMsg}`.trim(), 'error');
                 return;
             }
-            
-            // 记录批次 ID（供日志/展示）与自动清理开关（传给后端，由后端在批次自然结束时触发）
+
             const autoCleanupEnabled = document.getElementById('autoCleanup')?.checked || false;
-            
-            // 开始上传（auto_cleanup 由后端 worker 在批次自然结束时执行清理）
+
             try {
                 const startResponse = await fetch('/api/upload/start', {
                     method: 'POST',
@@ -2036,7 +2277,7 @@
                     body: JSON.stringify({ auto_cleanup: autoCleanupEnabled })
                 });
                 const startResult = await startResponse.json();
-                
+
                 if (startResult.status === 'success') {
                     showNotification(`已添加${addedCount}个任务，开始上传`, 'success');
                     startUploadPolling();
@@ -2047,30 +2288,27 @@
                 showNotification('开始上传失败: ' + error.message, 'error');
             }
             } finally {
-                // 复位按钮（成功/失败/提前返回都会走到这里）
                 setStartUploadBusy(false);
             }
         }
-        
-        // 暂停上传
+
         async function pauseUpload() {
             const response = await fetch('/api/upload/pause', { method: 'POST' });
             const result = await response.json();
-            
+
             if (result.status === 'success') {
                 showNotification('上传已暂停', 'info');
             } else {
                 showNotification('暂停失败: ' + result.error, 'error');
             }
         }
-        
-        // 停止上传
+
         async function stopUpload() {
             if (!confirm('确定要停止上传吗？')) return;
-            
+
             const response = await fetch('/api/upload/stop', { method: 'POST' });
             const result = await response.json();
-            
+
             if (result.status === 'success') {
                 showNotification('上传已停止', 'info');
                 stopUploadPolling();
@@ -2078,18 +2316,17 @@
                 showNotification('停止失败: ' + result.error, 'error');
             }
         }
-        
-        // 清除队列
+
         async function clearUploadQueue() {
             if (!confirm('确定要清除队列吗？')) return;
-            
+
             const response = await fetch('/api/upload/clear', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({ status: 'all' })
             });
             const result = await response.json();
-            
+
             if (result.status === 'success') {
                 showNotification(`已清除${result.cleared}个任务`, 'success');
                 updateUploadUI();
@@ -2097,15 +2334,14 @@
                 showNotification('清除失败: ' + result.error, 'error');
             }
         }
-        
-        // 打开草稿箱
+
         async function openDraftBox() {
             const account = document.getElementById('uploadAccount').value;
             if (!account) {
                 showNotification('请选择账号', 'error');
                 return;
             }
-            
+
             try {
                 const response = await fetch('/api/upload/open-draft', {
                     method: 'POST',
@@ -2113,7 +2349,7 @@
                     body: JSON.stringify({ account: account })
                 });
                 const result = await response.json();
-                
+
                 if (result.status === 'success') {
                     showNotification(result.message, 'success');
                     updateDraftBtn();
@@ -2124,8 +2360,7 @@
                 showNotification('打开草稿箱失败: ' + error.message, 'error');
             }
         }
-        
-        // 更新草稿箱按钮状态
+
         async function updateDraftBtn() {
             try {
                 const response = await fetch('/api/upload/draft-status');
@@ -2144,13 +2379,10 @@
                 console.error('更新草稿箱状态失败:', error);
             }
         }
-        
-        // 更新上传界面
-        // 上传前手动覆盖任务短标题（仅待上传任务；覆盖值优先于 edl_config）
+
         async function updateTaskTitle(id, value) {
             const title = (value || '').trim();
             if (!title) {
-                // 空值不提交，重新拉取状态恢复原显示
                 updateUploadUI();
                 return;
             }
@@ -2174,28 +2406,23 @@
             try {
                 const response = await fetch('/api/upload/status');
                 const status = await response.json();
-                
-                // 自动清理现由后端 worker 在批次自然结束时触发（见 upload_manager._finalize_batches），
-                // 前端只负责展示结果，不再依赖页面内存的 currentBatchId/wasUploading 判断。
-                // 刷新页面、关闭浏览器或服务重启不再影响清理执行（服务重启场景见启动清扫）。
+
                 window.wasUploading = status.uploading;
-                
-                // 更新统计
+
                 document.getElementById('uploadQueueCount').textContent = status.queue_length;
                 document.getElementById('uploadCurrentCount').textContent = status.current_task ? 1 : 0;
                 document.getElementById('uploadCompletedCount').textContent = status.completed_count;
                 document.getElementById('uploadFailedCount').textContent = status.failed_count;
-                
-                // 更新按钮状态
+
                 const startBtn = document.getElementById('startUploadBtn');
                 const pauseBtn = document.getElementById('pauseUploadBtn');
                 const stopBtn = document.getElementById('stopUploadBtn');
-                
+
                 if (status.uploading) {
                     startBtn.disabled = true;
                     pauseBtn.disabled = !status.paused;
                     stopBtn.disabled = false;
-                    
+
                     if (status.paused) {
                         pauseBtn.textContent = '▶️ 恢复';
                         pauseBtn.onclick = resumeUpload;
@@ -2204,38 +2431,30 @@
                         pauseBtn.onclick = pauseUpload;
                     }
                 } else {
-                    // 不禁用开始上传按钮，让 startUpload 方法检查条件；
-                    // 但提交任务期间（startUploadBusy）保持禁用，防重复点击。
                     startBtn.disabled = startUploadBusy;
                     pauseBtn.disabled = true;
                     stopBtn.disabled = true;
                     pauseBtn.textContent = '⏸️ 暂停';
                     pauseBtn.onclick = pauseUpload;
                 }
-                
-                // 更新草稿箱按钮状态
+
                 updateDraftBtn();
-                
-                // 更新队列
+
                 const queueContainer = document.getElementById('uploadQueue');
                 const allTasks = [...status.queue, ...status.completed, ...status.failed];
-                
-                // 焦点保护：用户正在编辑标题输入框时，记住 id 与光标位置，重渲染后恢复，
-                // 避免 2s 轮询重新渲染把正在输入的表单冲掉（失焦导致输入中断）。
+
                 const activeEl = document.activeElement;
                 const editingRole = (activeEl && activeEl.dataset &&
                     activeEl.dataset.role === 'task-title')
                     ? activeEl.dataset.role : null;
                 const editingTaskId = editingRole ? activeEl.dataset.id : null;
                 const caretPos = (editingRole === 'task-title') ? activeEl.selectionStart : null;
-                
+
                 if (allTasks.length === 0) {
-                    queueContainer.innerHTML = '<div style="padding: 20px; text-align: center; color: #666;">队列为空</div>';
+                    queueContainer.innerHTML = '<div style="padding: var(--spacing-lg); text-align: center; color: var(--text-tertiary);">队列为空</div>';
                 } else {
                     queueContainer.innerHTML = allTasks.map(task => {
                         const isPending = task.status === 'pending';
-                        // 待上传任务：可编辑短标题输入框（覆盖值优先于 edl_config）；
-                        // 非待上传任务：只读显示（上传值已进页面，改内存无意义）。
                         const titleHtml = isPending
                             ? `<input class="task-title-input" data-role="task-title" data-id="${task.id}"
                                  value="${escapeHtml(task.title || '')}" maxlength="30"
@@ -2257,8 +2476,7 @@
                             </div>`;
                     }).join('');
                 }
-                
-                // 恢复正在编辑的标题输入框焦点与光标位置；
+
                 if (editingTaskId && editingRole) {
                     const restored = queueContainer.querySelector(
                         `[data-role="${editingRole}"][data-id="${editingTaskId}"]`);
@@ -2269,8 +2487,7 @@
                         }
                     }
                 }
-                
-                // 更新日志
+
                 const logContainer = document.getElementById('uploadLog');
                 if (status.logs && status.logs.length > 0) {
                     logContainer.innerHTML = status.logs.map(log => `
@@ -2285,46 +2502,41 @@
                 console.error('更新上传状态失败:', error);
             }
         }
-        
-        // 恢复上传
+
         async function resumeUpload() {
             const response = await fetch('/api/upload/resume', { method: 'POST' });
             const result = await response.json();
-            
+
             if (result.status === 'success') {
                 showNotification('上传已恢复', 'success');
             } else {
                 showNotification('恢复失败: ' + result.error, 'error');
             }
         }
-        
-        // 启动上传轮询
+
         function startUploadPolling() {
             if (uploadPollTimer) clearInterval(uploadPollTimer);
             updateUploadUI();
             uploadPollTimer = setInterval(updateUploadUI, 2000);
         }
-        
-        // 停止上传轮询
+
         function stopUploadPolling() {
             if (uploadPollTimer) {
                 clearInterval(uploadPollTimer);
                 uploadPollTimer = null;
             }
         }
-        
-        // 刷新上传统计
+
         async function refreshUploadStats() {
             try {
                 const response = await fetch('/api/upload/status');
                 const status = await response.json();
-                
+
                 document.getElementById('uploadQueueCount').textContent = status.queue_length;
                 document.getElementById('uploadCurrentCount').textContent = status.current_task ? 1 : 0;
                 document.getElementById('uploadCompletedCount').textContent = status.completed_count;
                 document.getElementById('uploadFailedCount').textContent = status.failed_count;
-                
-                // 如果正在上传，启动轮询
+
                 if (status.uploading && !uploadPollTimer) {
                     startUploadPolling();
                 }
@@ -2332,11 +2544,13 @@
                 console.error('刷新上传统计失败:', error);
             }
         }
-        
+
         // ===== 批量切片相关函数 =====
-        
+
         let cutPollTimer = null;
         let selectedCutDramas = new Set();
+        let cutConfigByDrama = new Map();
+        let focusedCutDrama = '';
         let cutDramaAccounts = new Map();
         let currentCutPreviewDrama = '';
         const CUT_STAGES = [
@@ -2349,34 +2563,196 @@
             ['content_dedup', '内容检测'],
             ['post_process', '后处理/交付']
         ];
-        
-        // 刷新切片剧列表
+
+        function cutStageLabel(stage) {
+            if (stage === 'pending') return '等待开始';
+            if (stage === 'report') return '报告/交付';
+            if (stage === 'completed') return '已完成';
+            if (stage === 'failed') return '失败';
+            if (stage === 'cancelled') return '已停止';
+            const item = CUT_STAGES.find(row => row[0] === stage);
+            return item ? item[1] : (stage || '未知阶段');
+        }
+
+        function renderCutLive(status) {
+            const task = status.current_task || null;
+            const title = document.getElementById('cutLiveTitle');
+            const message = document.getElementById('cutLiveMessage');
+            const meta = document.getElementById('cutLiveMeta');
+            const fill = document.getElementById('cutProgressFill');
+            const list = document.getElementById('cutStageList');
+            if (!task) {
+                title.textContent = status.paused ? '切片已暂停' : '切片流水线空闲';
+                message.textContent = status.queue_length
+                    ? `${status.queue_length} 个任务等待开始`
+                    : '选择剧集后开始切片';
+                meta.textContent = status.queue_length ? '队列已就绪' : '等待任务';
+                fill.style.width = '0%';
+                list.innerHTML = CUT_STAGES.map(([id, label]) =>
+                    `<div class="cut-stage">${escapeHtml(label)}</div>`).join('');
+                return;
+            }
+            const currentStage = task.stage || 'material_scan';
+            const started = task.started_at ? `开始：${task.started_at}` : '正在初始化';
+            const progress = Math.max(0, Math.min(100, Number(task.progress || 0)));
+            title.textContent = `${task.drama_name || '切片任务'} · ${cutStageLabel(currentStage)}`;
+            message.textContent = `${progress}%`;
+            meta.textContent = `${task.stage_message || '处理中'} · 账号：${task.account || '服务端分配'} · ${started}`;
+            fill.style.width = `${progress}%`;
+            const activeIndex = CUT_STAGES.findIndex(row => row[0] === currentStage);
+            const completed = currentStage === 'completed' || currentStage === 'report';
+            list.innerHTML = CUT_STAGES.map(([id, label], index) => {
+                let cls = 'cut-stage';
+                if (completed || (activeIndex >= 0 && index < activeIndex)) cls += ' done';
+                if (!completed && activeIndex >= 0 && index === activeIndex) cls += ' active';
+                return `<div class="${cls}">${escapeHtml(label)}</div>`;
+            }).join('');
+        }
+
+        async function updateCutUI() {
+            try {
+                const response = await fetch('/api/cut/status');
+                const status = await response.json();
+
+                document.getElementById('cutQueueCount').textContent = status.queue_length;
+                document.getElementById('cutCurrentCount').textContent = status.current_task ? 1 : 0;
+                document.getElementById('cutCompletedCount').textContent = status.completed_count;
+                document.getElementById('cutFailedCount').textContent = status.failed_count;
+                renderCutLive(status);
+
+                if (typeof window._cutLastCompleted === 'number') {
+                    if (status.completed_count > window._cutLastCompleted) {
+                        showNotification(`切片完成：新完成 ${status.completed_count - window._cutLastCompleted} 个任务`, 'success');
+                    }
+                    if (status.failed_count > window._cutLastFailed) {
+                        showNotification(`切片失败：新失败 ${status.failed_count - window._cutLastFailed} 个任务`, 'error');
+                    }
+                }
+                window._cutLastCompleted = status.completed_count;
+                window._cutLastFailed = status.failed_count;
+
+                const startBtn = document.getElementById('startCutBtn');
+                const pauseBtn = document.getElementById('pauseCutBtn');
+                const stopBtn = document.getElementById('stopCutBtn');
+
+                if (status.cutting || status.stopping) {
+                    startBtn.disabled = true;
+                    pauseBtn.disabled = status.stopping || !status.paused;
+                    stopBtn.disabled = status.stopping;
+
+                    if (status.stopping) {
+                        pauseBtn.textContent = '⏸️ 暂停';
+                        pauseBtn.onclick = pauseCutting;
+                    } else if (status.paused) {
+                        pauseBtn.textContent = '▶️ 恢复';
+                        pauseBtn.onclick = resumeCutting;
+                    } else {
+                        pauseBtn.textContent = '⏸️ 暂停';
+                        pauseBtn.onclick = pauseCutting;
+                    }
+                } else {
+                    startBtn.disabled = false;
+                    pauseBtn.disabled = true;
+                    stopBtn.disabled = true;
+                    pauseBtn.textContent = '⏸️ 暂停';
+                    pauseBtn.onclick = pauseCutting;
+                }
+
+                const queueContainer = document.getElementById('cutQueue');
+                const allTasks = [...status.queue, ...status.completed, ...status.failed];
+
+                if (allTasks.length === 0) {
+                    queueContainer.innerHTML = '<div style="padding: var(--spacing-lg); text-align: center; color: var(--text-tertiary);">队列为空</div>';
+                } else {
+                    queueContainer.innerHTML = allTasks.map(task => `
+                        <div class="queue-item">
+                            <span class="status-badge ${escapeHtml(task.status)}">${
+                                task.status === 'pending' ? '待切片' :
+                                task.status === 'cutting' ? '切片中' :
+                                task.status === 'completed' ? '已完成' : '失败'
+                            }</span>
+                            <div class="queue-info">
+                                <div>${escapeHtml(task.drama_name)}</div>
+                                <div class="queue-progress">阶段：${escapeHtml(cutStageLabel(task.stage || task.status))} · ${escapeHtml(task.progress || 0)}%</div>
+                                ${task.stage_message ? `<div class="queue-progress">${escapeHtml(task.stage_message)}</div>` : ''}
+                                ${task.error ? `<div class="queue-progress">错误: ${escapeHtml(task.error)}</div>` : ''}
+                            </div>
+                            <div class="queue-actions">
+                                <button class="btn btn-secondary btn-small" data-drama-name="${escapeHtml(task.drama_name)}" onclick="previewCutDrama(this.dataset.dramaName)">方案</button>
+                            </div>
+                        </div>
+                    `).join('');
+                }
+
+                const logContainer = document.getElementById('cutLog');
+                if (status.logs && status.logs.length > 0) {
+                    logContainer.innerHTML = status.logs.map(log => `
+                        <div class="log-entry">
+                            <span class="timestamp">[${escapeHtml(log.timestamp)}]</span>
+                            <span class="level ${escapeHtml(log.level)}">${escapeHtml(log.level.toUpperCase())}</span>
+                            ${escapeHtml(log.message)}
+                        </div>
+                    `).join('');
+                }
+
+                if (!status.cutting && !status.stopping && cutPollTimer) {
+                    stopCutPolling();
+                }
+            } catch (error) {
+                console.error('更新切片状态失败:', error);
+            }
+        }
+
+        function startCutPolling() {
+            if (cutPollTimer) clearInterval(cutPollTimer);
+            updateCutUI();
+            cutPollTimer = setInterval(updateCutUI, 2000);
+        }
+
+        function stopCutPolling() {
+            if (cutPollTimer) {
+                clearInterval(cutPollTimer);
+                cutPollTimer = null;
+            }
+        }
+
+        async function refreshCutStats() {
+            try {
+                const response = await fetch('/api/cut/status');
+                const status = await response.json();
+
+                document.getElementById('cutQueueCount').textContent = status.queue_length;
+                document.getElementById('cutCurrentCount').textContent = status.current_task ? 1 : 0;
+                document.getElementById('cutCompletedCount').textContent = status.completed_count;
+                document.getElementById('cutFailedCount').textContent = status.failed_count;
+
+                if ((status.cutting || status.stopping) && !cutPollTimer) {
+                    startCutPolling();
+                }
+            } catch (error) {
+                console.error('刷新切片统计失败:', error);
+            }
+        }
+
         async function refreshCutDramas() {
             try {
                 const response = await fetch('/api/cut/dramas');
                 const data = await response.json();
-                
-                // P2-18: 转义辅助（防剧名含引号/HTML 的 DOM XSS）
-                function escapeHtml(s) {
-                    return String(s ?? '').replace(/[&<>"']/g, c => ({
-                        '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;'
-                    }[c]));
-                }
 
                 const container = document.getElementById('cutDramaList');
                 cutDramaAccounts = new Map(data.dramas.map(d => [d.name, d.account || '由服务端分配']));
                 selectedCutDramas = new Set();
-                
+
                 if (!data.dramas || data.dramas.length === 0) {
-                    container.innerHTML = '<div style="padding: 20px; text-align: center; color: #666;">没有找到可切片的剧</div>';
+                    container.innerHTML = '<div style="padding: var(--spacing-lg); text-align: center; color: var(--text-tertiary);">没有找到可切片的剧</div>';
                     return;
                 }
-                
+
                 container.innerHTML = data.dramas.map(drama => {
                     const name = escapeHtml(drama.name);
                     return `
                     <div class="drama-item">
-                        <input type="checkbox" class="cut-drama-cb" data-name="${name}" 
+                        <input type="checkbox" class="cut-drama-cb" data-name="${name}"
                                id="cutDrama_${name}" value="${name}">
                         <label for="cutDrama_${name}">
                             <strong>${name}</strong>
@@ -2385,7 +2761,7 @@
                         </label>
                     </div>`;
                 }).join('');
-                // P2-18: 事件委托替代剧名内联 onchange（防剧名含引号的 DOM XSS）
+
                 if (!container.dataset.changeBound) {
                     container.addEventListener('change', (ev) => {
                         const cb = ev.target;
@@ -2395,21 +2771,126 @@
                     });
                     container.dataset.changeBound = '1';
                 }
-                
+
                 showNotification('已刷新剧列表', 'success');
             } catch (error) {
                 console.error('刷新切片剧列表失败:', error);
                 showNotification('刷新失败: ' + error.message, 'error');
             }
         }
-        
-        // 切换切片剧选择
+
         function toggleCutDrama(dramaName, checked) {
             if (checked) {
                 selectedCutDramas.add(dramaName);
+                loadCutConfigCard(dramaName);
             } else {
                 selectedCutDramas.delete(dramaName);
+                if (focusedCutDrama === dramaName) {
+                    focusedCutDrama = '';
+                    const next = selectedCutDramas.values().next().value;
+                    if (next) {
+                        loadCutConfigCard(next);
+                    } else {
+                        const card = document.getElementById('cutConfigCard');
+                        if (card) card.hidden = true;
+                    }
+                }
             }
+        }
+
+        async function loadCutConfigCard(dramaName) {
+            focusedCutDrama = dramaName;
+            const card = document.getElementById('cutConfigCard');
+            const label = document.getElementById('cutConfigDrama');
+            if (card) card.hidden = false;
+            if (label) label.textContent = dramaName ? `（${dramaName}）` : '';
+            try {
+                const response = await fetch('/api/cut/config?drama=' + encodeURIComponent(dramaName));
+                const data = await response.json();
+                if (data.status === 'success' && data.config) {
+                    cutConfigByDrama.set(dramaName, data.config);
+                    populateCutConfigCard(data.config);
+                }
+            } catch (error) {
+                console.error('加载切制参数失败:', error);
+            }
+        }
+
+        function populateCutConfigCard(cfg) {
+            if (!cfg) return;
+            const set = (id, val) => {
+                const el = document.getElementById(id);
+                if (el) el.value = (val === null || val === undefined) ? '' : val;
+            };
+            set('cfgVersionCount', cfg.version_count);
+            set('cfgMinDur', cfg.min_dur);
+            set('cfgMaxDur', cfg.max_dur);
+            set('cfgReuse', cfg.reuse_material ? '1' : '0');
+            set('cfgWatermark', cfg.watermark || '');
+        }
+
+        function readCutConfigCard() {
+            const vc = document.getElementById('cfgVersionCount').value.trim();
+            const minDur = document.getElementById('cfgMinDur').value.trim();
+            const maxDur = document.getElementById('cfgMaxDur').value.trim();
+            const reuse = document.getElementById('cfgReuse').value;
+            const wm = document.getElementById('cfgWatermark').value.trim();
+            const cfg = {};
+            if (vc !== '') cfg.version_count = Math.max(1, Math.min(8, parseInt(vc, 10) || 8));
+            if (minDur !== '') cfg.min_dur = parseFloat(minDur) || 180;
+            if (maxDur !== '') cfg.max_dur = parseFloat(maxDur) || 330;
+            cfg.reuse_material = reuse === '1';
+            if (wm !== '') cfg.watermark = wm;
+            return cfg;
+        }
+
+        async function saveCutConfig() {
+            if (!focusedCutDrama) {
+                showNotification('请先选择一部剧', 'error');
+                return;
+            }
+            const cfg = readCutConfigCard();
+            try {
+                const response = await fetch('/api/cut/config', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify(Object.assign({ drama_name: focusedCutDrama }, cfg))
+                });
+                const data = await response.json();
+                if (data.status === 'success') {
+                    cutConfigByDrama.set(focusedCutDrama, data.config);
+                    populateCutConfigCard(data.config);
+                    showNotification(`已保存「${focusedCutDrama}」切制参数`, 'success');
+                } else {
+                    showNotification('保存失败: ' + (data.error || '未知错误'), 'error');
+                }
+            } catch (error) {
+                showNotification('保存失败: ' + error.message, 'error');
+            }
+        }
+
+        async function resetCutConfig() {
+            if (!focusedCutDrama) return;
+            try {
+                const response = await fetch('/api/cut/config?drama=' + encodeURIComponent(focusedCutDrama), {
+                    method: 'DELETE'
+                });
+                const data = await response.json();
+                if (data.status === 'success') {
+                    cutConfigByDrama.set(focusedCutDrama, data.config);
+                    populateCutConfigCard(data.config);
+                    showNotification('已恢复默认', 'success');
+                }
+            } catch (error) {
+                showNotification('恢复默认失败: ' + error.message, 'error');
+            }
+        }
+
+        function cutConfigFor(dramaName) {
+            if (dramaName === focusedCutDrama) {
+                return readCutConfigCard();
+            }
+            return cutConfigByDrama.get(dramaName) || null;
         }
 
         function previewCutByName() {
@@ -2509,33 +2990,32 @@
             refreshBtn.dataset.dramaName = dramaName;
             heading.textContent = `${dramaName} · 版本差异与内容风险`;
             panel.hidden = false;
-            body.innerHTML = '<div style="padding:14px;color:#666;">读取中...</div>';
+            body.innerHTML = '<div style="padding:var(--spacing-md);color:var(--text-tertiary);">读取中...</div>';
             try {
                 const response = await fetch(`/api/cut/insights?drama_name=${encodeURIComponent(dramaName)}`);
                 const data = await response.json();
                 if (!response.ok) {
-                    body.innerHTML = `<div style="padding:14px;color:#666;">${escapeHtml(data.error || '暂无切片方案')}</div>`;
+                    body.innerHTML = `<div style="padding:var(--spacing-md);color:var(--text-tertiary);">${escapeHtml(data.error || '暂无切片方案')}</div>`;
                     return;
                 }
                 if (!data.versions || data.versions.length === 0) {
-                    body.innerHTML = '<div style="padding:14px;color:#666;">暂无 EDL 方案</div>';
+                    body.innerHTML = '<div style="padding:var(--spacing-md);color:var(--text-tertiary);">暂无 EDL 方案</div>';
                     return;
                 }
                 body.innerHTML = renderCutInsights(data);
             } catch (error) {
-                body.innerHTML = `<div style="padding:14px;color:#b42318;">${escapeHtml(error.message)}</div>`;
+                body.innerHTML = `<div style="padding:var(--spacing-md);color:var(--status-error);">${escapeHtml(error.message)}</div>`;
             }
         }
-        
-        // 开始切片
+
         async function startCutting() {
             if (selectedCutDramas.size === 0) {
                 showNotification('请选择至少一部剧', 'error');
                 return;
             }
-            
+
             let addedCount = 0;
-            
+
             for (const dramaName of selectedCutDramas) {
                 try {
                     const response = await fetch('/api/cut/add', {
@@ -2543,12 +3023,13 @@
                         headers: { 'Content-Type': 'application/json' },
                         body: JSON.stringify({
                             drama_name: dramaName,
-                            account: cutDramaAccounts.get(dramaName) || undefined
+                            account: cutDramaAccounts.get(dramaName) || undefined,
+                            config: cutConfigFor(dramaName)
                         })
                     });
-                    
+
                     const result = await response.json();
-                    
+
                     if (result.status === 'success') {
                         addedCount++;
                     } else if (result.error && result.error.includes('已在队列中')) {
@@ -2558,15 +3039,14 @@
                     console.error('添加切片任务失败:', dramaName, error);
                 }
             }
-            
+
             if (addedCount > 0) {
                 showNotification(`已添加${addedCount}个任务`, 'success');
                 updateCutUI();
-                
-                // 自动开始切片
+
                 const response = await fetch('/api/cut/start', { method: 'POST' });
                 const result = await response.json();
-                
+
                 if (result.status === 'success') {
                     showNotification('开始切片', 'success');
                     startCutPolling();
@@ -2575,59 +3055,54 @@
                 }
             }
         }
-        
-        // 暂停切片
+
         async function pauseCutting() {
             const response = await fetch('/api/cut/pause', { method: 'POST' });
             const result = await response.json();
-            
+
             if (result.status === 'success') {
                 showNotification('切片已暂停', 'info');
             } else {
                 showNotification('暂停失败: ' + result.error, 'error');
             }
         }
-        
-        // 恢复切片
+
         async function resumeCutting() {
             const response = await fetch('/api/cut/resume', { method: 'POST' });
             const result = await response.json();
-            
+
             if (result.status === 'success') {
                 showNotification('切片已恢复', 'success');
             } else {
                 showNotification('恢复失败: ' + result.error, 'error');
             }
         }
-        
-        // 停止切片
+
         async function stopCutting() {
             if (!confirm('确定要停止切片吗？')) return;
-            
+
             const response = await fetch('/api/cut/stop', { method: 'POST' });
             const result = await response.json();
-            
+
             if (result.status === 'success') {
                 showNotification('切片已停止', 'info');
-                // 再轮询一次，等 worker 完成子进程清理后把当前任务复位。
                 await updateCutUI();
                 startCutPolling();
             } else {
                 showNotification('停止失败: ' + result.error, 'error');
             }
         }
-        
-        // 清除切片队列
+
         async function clearCutQueue() {
             if (!confirm('确定要清除队列吗？')) return;
-            
+
             const response = await fetch('/api/cut/clear', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({ status: 'all' })
             });
             const result = await response.json();
-            
+
             if (result.status === 'success') {
                 showNotification(`已清除${result.cleared}个任务`, 'success');
                 updateCutUI();
@@ -2636,186 +3111,6 @@
             }
         }
 
-        function cutStageLabel(stage) {
-            if (stage === 'pending') return '等待开始';
-            if (stage === 'report') return '报告/交付';
-            if (stage === 'completed') return '已完成';
-            if (stage === 'failed') return '失败';
-            if (stage === 'cancelled') return '已停止';
-            const item = CUT_STAGES.find(row => row[0] === stage);
-            return item ? item[1] : (stage || '未知阶段');
-        }
-
-        function renderCutLive(status) {
-            const task = status.current_task || null;
-            const title = document.getElementById('cutLiveTitle');
-            const message = document.getElementById('cutLiveMessage');
-            const meta = document.getElementById('cutLiveMeta');
-            const fill = document.getElementById('cutProgressFill');
-            const list = document.getElementById('cutStageList');
-            if (!task) {
-                title.textContent = status.paused ? '切片已暂停' : '切片流水线空闲';
-                message.textContent = status.queue_length
-                    ? `${status.queue_length} 个任务等待开始`
-                    : '选择剧集后开始切片';
-                meta.textContent = status.queue_length ? '队列已就绪' : '等待任务';
-                fill.style.width = '0%';
-                list.innerHTML = CUT_STAGES.map(([id, label]) =>
-                    `<div class="cut-stage">${escapeHtml(label)}</div>`).join('');
-                return;
-            }
-            const currentStage = task.stage || 'material_scan';
-            const started = task.started_at ? `开始：${task.started_at}` : '正在初始化';
-            const progress = Math.max(0, Math.min(100, Number(task.progress || 0)));
-            title.textContent = `${task.drama_name || '切片任务'} · ${cutStageLabel(currentStage)}`;
-            message.textContent = `${progress}%`;
-            meta.textContent = `${task.stage_message || '处理中'} · 账号：${task.account || '服务端分配'} · ${started}`;
-            fill.style.width = `${progress}%`;
-            const activeIndex = CUT_STAGES.findIndex(row => row[0] === currentStage);
-            const completed = currentStage === 'completed' || currentStage === 'report';
-            list.innerHTML = CUT_STAGES.map(([id, label], index) => {
-                let cls = 'cut-stage';
-                if (completed || (activeIndex >= 0 && index < activeIndex)) cls += ' done';
-                if (!completed && activeIndex >= 0 && index === activeIndex) cls += ' active';
-                return `<div class="${cls}">${escapeHtml(label)}</div>`;
-            }).join('');
-        }
-        
-        // 更新切片界面
-        async function updateCutUI() {
-            try {
-                const response = await fetch('/api/cut/status');
-                const status = await response.json();
-                
-                // 更新统计
-                document.getElementById('cutQueueCount').textContent = status.queue_length;
-                document.getElementById('cutCurrentCount').textContent = status.current_task ? 1 : 0;
-                document.getElementById('cutCompletedCount').textContent = status.completed_count;
-                document.getElementById('cutFailedCount').textContent = status.failed_count;
-                renderCutLive(status);
-
-                // 完成/失败状态实时通知（轮询间状态跃迁）
-                if (typeof window._cutLastCompleted === 'number') {
-                    if (status.completed_count > window._cutLastCompleted) {
-                        showNotification(`切片完成：新完成 ${status.completed_count - window._cutLastCompleted} 个任务`, 'success');
-                    }
-                    if (status.failed_count > window._cutLastFailed) {
-                        showNotification(`切片失败：新失败 ${status.failed_count - window._cutLastFailed} 个任务`, 'error');
-                    }
-                }
-                window._cutLastCompleted = status.completed_count;
-                window._cutLastFailed = status.failed_count;
-                
-                // 更新按钮状态
-                const startBtn = document.getElementById('startCutBtn');
-                const pauseBtn = document.getElementById('pauseCutBtn');
-                const stopBtn = document.getElementById('stopCutBtn');
-                
-                if (status.cutting || status.stopping) {
-                    startBtn.disabled = true;
-                    pauseBtn.disabled = status.stopping || !status.paused;
-                    stopBtn.disabled = status.stopping;
-                    
-                    if (status.stopping) {
-                        pauseBtn.textContent = '⏸️ 暂停';
-                        pauseBtn.onclick = pauseCutting;
-                    } else if (status.paused) {
-                        pauseBtn.textContent = '▶️ 恢复';
-                        pauseBtn.onclick = resumeCutting;
-                    } else {
-                        pauseBtn.textContent = '⏸️ 暂停';
-                        pauseBtn.onclick = pauseCutting;
-                    }
-                } else {
-                    startBtn.disabled = false;
-                    pauseBtn.disabled = true;
-                    stopBtn.disabled = true;
-                    pauseBtn.textContent = '⏸️ 暂停';
-                    pauseBtn.onclick = pauseCutting;
-                }
-                
-                // 更新队列
-                const queueContainer = document.getElementById('cutQueue');
-                const allTasks = [...status.queue, ...status.completed, ...status.failed];
-                
-                if (allTasks.length === 0) {
-                    queueContainer.innerHTML = '<div style="padding: 20px; text-align: center; color: #666;">队列为空</div>';
-                } else {
-                    queueContainer.innerHTML = allTasks.map(task => `
-                        <div class="queue-item">
-                            <span class="status-badge ${escapeHtml(task.status)}">${
-                                task.status === 'pending' ? '待切片' :
-                                task.status === 'cutting' ? '切片中' :
-                                task.status === 'completed' ? '已完成' : '失败'
-                            }</span>
-                            <div class="queue-info">
-                                <div>${escapeHtml(task.drama_name)}</div>
-                                <div class="queue-progress">阶段：${escapeHtml(cutStageLabel(task.stage || task.status))} · ${escapeHtml(task.progress || 0)}%</div>
-                                ${task.stage_message ? `<div class="queue-progress">${escapeHtml(task.stage_message)}</div>` : ''}
-                                ${task.error ? `<div class="queue-progress">错误: ${escapeHtml(task.error)}</div>` : ''}
-                            </div>
-                            <div class="queue-actions">
-                                <button class="btn btn-secondary btn-small" data-drama-name="${escapeHtml(task.drama_name)}" onclick="previewCutDrama(this.dataset.dramaName)">方案</button>
-                            </div>
-                        </div>
-                    `).join('');
-                }
-                
-                // 更新日志
-                const logContainer = document.getElementById('cutLog');
-                if (status.logs && status.logs.length > 0) {
-                    logContainer.innerHTML = status.logs.map(log => `
-                        <div class="log-entry">
-                            <span class="timestamp">[${escapeHtml(log.timestamp)}]</span>
-                            <span class="level ${escapeHtml(log.level)}">${escapeHtml(log.level.toUpperCase())}</span>
-                            ${escapeHtml(log.message)}
-                        </div>
-                    `).join('');
-                }
-
-                if (!status.cutting && !status.stopping && cutPollTimer) {
-                    stopCutPolling();
-                }
-            } catch (error) {
-                console.error('更新切片状态失败:', error);
-            }
-        }
-        
-        // 启动切片轮询
-        function startCutPolling() {
-            if (cutPollTimer) clearInterval(cutPollTimer);
-            updateCutUI();
-            cutPollTimer = setInterval(updateCutUI, 2000);
-        }
-        
-        // 停止切片轮询
-        function stopCutPolling() {
-            if (cutPollTimer) {
-                clearInterval(cutPollTimer);
-                cutPollTimer = null;
-            }
-        }
-        
-        // 刷新切片统计
-        async function refreshCutStats() {
-            try {
-                const response = await fetch('/api/cut/status');
-                const status = await response.json();
-                
-                document.getElementById('cutQueueCount').textContent = status.queue_length;
-                document.getElementById('cutCurrentCount').textContent = status.current_task ? 1 : 0;
-                document.getElementById('cutCompletedCount').textContent = status.completed_count;
-                document.getElementById('cutFailedCount').textContent = status.failed_count;
-                
-                // 如果正在切片，启动轮询
-                if ((status.cutting || status.stopping) && !cutPollTimer) {
-                    startCutPolling();
-                }
-            } catch (error) {
-                console.error('刷新切片统计失败:', error);
-            }
-        }
-        
         // 初始化
         function init() {
             connectSocket();
@@ -2824,24 +3119,20 @@
             refreshUploadStats();
             refreshCutStats();
             loadUploadAccounts();
-            
-            // 加载最近日志
+
             fetch('/api/logs?limit=50')
                 .then(r => r.json())
                 .then(logs => {
                     logs.reverse().forEach(addLog);
                 });
-            
-            // 启动轮询作为后备（每2秒检查一次）
+
             startPolling();
         }
-        
-        // 轮询后备机制
+
         let pollTimer = null;
         let seenLogIds = new Set();
-        
+
         function startPolling() {
-            // 加载已有日志
             fetch('/api/logs?limit=50')
                 .then(r => r.json())
                 .then(logs => {
@@ -2850,10 +3141,8 @@
                         seenLogIds.add(log.timestamp);
                     });
                 });
-            
-            // 每2秒轮询
+
             pollTimer = setInterval(() => {
-                // 检查状态
                 fetch('/api/status')
                     .then(r => r.json())
                     .then(data => {
@@ -2864,8 +3153,7 @@
                         }
                     })
                     .catch(e => console.error('轮询状态失败:', e));
-                
-                // 检查新日志
+
                 fetch('/api/logs?limit=10')
                     .then(r => r.json())
                     .then(logs => {
@@ -2879,7 +3167,7 @@
                     .catch(e => console.error('轮询日志失败:', e));
             }, 2000);
         }
-        
+
         init();
     </script>
 </body>

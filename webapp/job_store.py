@@ -133,6 +133,20 @@ class JobStore:
                 'CREATE INDEX IF NOT EXISTS idx_events_job '
                 'ON job_events (job_id, id)'
             )
+            # 每部剧的切制参数（覆盖默认值；未设的剧完全走代码默认）
+            conn.execute(
+                '''
+                CREATE TABLE IF NOT EXISTS cut_config (
+                  drama_name TEXT PRIMARY KEY,
+                  version_count INTEGER,
+                  min_dur REAL,
+                  max_dur REAL,
+                  reuse_material INTEGER DEFAULT 0,
+                  watermark TEXT,
+                  updated_at TEXT
+                )
+                '''
+            )
             # 显式列迁移：老库无 heartbeat_at 列则补上（幂等）
             try:
                 conn.execute('ALTER TABLE jobs ADD COLUMN heartbeat_at TEXT')
@@ -228,6 +242,74 @@ class JobStore:
     def touch_heartbeat(self, job_id):
         """刷新任务心跳（进程存活信号）。"""
         self.update(job_id, heartbeat_at=_now())
+
+    # ── 本剧切制参数（cut_config）────────────────────────
+    @staticmethod
+    def _row_to_cut_config(row):
+        if not row:
+            return None
+        d = dict(row)
+        return {
+            'drama_name': d.get('drama_name'),
+            'version_count': d.get('version_count'),
+            'min_dur': d.get('min_dur'),
+            'max_dur': d.get('max_dur'),
+            'reuse_material': bool(d.get('reuse_material')),
+            'watermark': d.get('watermark'),
+            'updated_at': d.get('updated_at'),
+        }
+
+    def get_cut_config(self, drama_name):
+        """读取某剧的切制参数覆盖；未设置返回 None（走代码默认）。"""
+        with self._conn() as conn:
+            row = conn.execute(
+                'SELECT * FROM cut_config WHERE drama_name=?',
+                (drama_name,)).fetchone()
+        return self._row_to_cut_config(row)
+
+    def upsert_cut_config(self, drama_name, version_count=None, min_dur=None,
+                          max_dur=None, reuse_material=None, watermark=None):
+        """写入/覆盖某剧切制参数。None 字段不写（保持旧值/默认）。"""
+        with self._conn() as conn:
+            conn.execute(
+                '''
+                INSERT INTO cut_config (drama_name, version_count, min_dur,
+                                        max_dur, reuse_material, watermark,
+                                        updated_at)
+                VALUES (?,?,?,?,?,?,?)
+                ON CONFLICT(drama_name) DO UPDATE SET
+                  version_count=COALESCE(excluded.version_count,
+                                         cut_config.version_count),
+                  min_dur=COALESCE(excluded.min_dur, cut_config.min_dur),
+                  max_dur=COALESCE(excluded.max_dur, cut_config.max_dur),
+                  reuse_material=COALESCE(excluded.reuse_material,
+                                          cut_config.reuse_material),
+                  watermark=COALESCE(excluded.watermark,
+                                     cut_config.watermark),
+                  updated_at=excluded.updated_at
+                ''',
+                (drama_name,
+                 version_count,
+                 min_dur, max_dur,
+                 (1 if reuse_material else 0)
+                     if reuse_material is not None else None,
+                 watermark, _now()),
+            )
+        return self.get_cut_config(drama_name)
+
+    def delete_cut_config(self, drama_name):
+        """删除某剧切制参数（恢复代码默认）。"""
+        with self._conn() as conn:
+            conn.execute('DELETE FROM cut_config WHERE drama_name=?',
+                         (drama_name,))
+        return True
+
+    def list_cut_configs(self):
+        """列出所有已设置的剧切制参数。"""
+        with self._conn() as conn:
+            rows = conn.execute(
+                'SELECT * FROM cut_config ORDER BY drama_name').fetchall()
+        return [self._row_to_cut_config(r) for r in rows]
 
     def stale_jobs(self, job_type='cut', statuses=('cutting',), window_seconds=30):
         """返回心跳过期（或从未心跳）的进行中任务——判为僵死。

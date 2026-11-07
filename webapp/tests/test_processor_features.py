@@ -23,7 +23,7 @@ from unittest import mock
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
 import processor
-from processor import PipelineProcessor, CONFIG
+from processor import PipelineProcessor, CONFIG, DEFAULT_CUT_CONFIG
 
 
 def _mk():
@@ -105,10 +105,11 @@ class TestComputeVersionBudget(unittest.TestCase):
         self.assertIsInstance(budget2, float)
 
     def test_clamp_lower_bound_small_story(self):
-        """剧情量极小（1 集）→ clamp 到 min_final 下限，不产生超短成片。"""
+        """剧情量极小（1 集）→ clamp 到 min_dur 下限，不产生超短成片。"""
         p, _ = _mk()
-        cfg = CONFIG['duration']
-        min_final = float(cfg['min_final'])
+        # 方案A：成片下限改由本剧 config（默认 min_dur=180）决定，
+        # 替代原 CONFIG['duration']['min_final']=210。
+        min_final = float(DEFAULT_CUT_CONFIG['min_dur'])
         eps = [{"episode": 1, "path": "x.mp4", "dur": 100.0, "cands": []}]
         with mock.patch.object(random, 'uniform', return_value=0.0):
             budget = p._compute_version_budget(
@@ -117,13 +118,25 @@ class TestComputeVersionBudget(unittest.TestCase):
         self.assertGreaterEqual(budget, min_final * 1.05 + p.MIN_SEG_DUR)
 
     def test_jitter_varies_between_calls(self):
-        """两次调用（不同抖动）通常产生不同预算。"""
+        """两次调用通常产生不同预算；若相同则必须都在 clamp 边界（合法同长）。
+
+        方案A（max_dur=330 收紧）后，高剧情量弧线常在 max_dur 处被夹住，
+        两版同长属正确行为（版本在内容上差异化）；只有既同长又非边界才失败。
+        """
         p, _ = _mk()
         eps = _eps_hl()
         b1 = p._compute_version_budget(self._plan(), 0, eps)
         b2 = p._compute_version_budget(self._plan(), 0, eps)
-        # 抖动 20-55s，两次几乎不可能完全相等（除非 clamp 到同一边界）
-        self.assertNotAlmostEqual(b1, b2, delta=0.5)
+        # clamp 边界预算：min=180→204（min_dur*1.05+MIN_SEG_DUR），
+        # max=330→346.5（max_dur*1.05）
+        rc = p._resolve_cut_config(None)
+        min_bound = rc['min_dur'] * 1.05 + p.MIN_SEG_DUR
+        max_bound = rc['max_dur'] * 1.05
+        same_at_boundary = (abs(b1 - b2) <= 0.5 and
+                            (abs(b1 - min_bound) < 0.01 or
+                             abs(b1 - max_bound) < 0.01))
+        self.assertTrue(abs(b1 - b2) > 0.5 or same_at_boundary,
+                        f'抖动应产生差异，或同长但都在 clamp 边界：{b1} vs {b2}')
 
     def test_angle_bonus_none_key_no_crash(self):
         """vplan.angle 为 None（dict.get(None) 合法）→ 不崩，角度加成 0。"""
