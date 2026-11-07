@@ -16,7 +16,8 @@ from flask import Flask, request, jsonify, send_from_directory
 from flask_socketio import SocketIO, emit
 
 # 导入处理器模块
-from processor import PipelineProcessor, Logger, StateManager, CONFIG
+from processor import PipelineProcessor, Logger, StateManager
+from config import CONFIG
 
 # 导入上传管理器
 from upload_manager import UploadManager

@@ -1,0 +1,84 @@
+# ===== 短剧工坊 业务参数配置示例（复制为 webapp/../config.yml 后按需修改）=====
+# config.yml 已在 .gitignore 中，绝不入库；本示例只登记业务参数默认值与含义。
+#
+# 分层优先级（高 → 低）：
+#   1. 环境变量 SHORTDRAMA_*（机器路径 / 可执行文件，见 .env.example）
+#   2. 本文件 config.yml（业务参数，嵌套结构；未列出的段回退代码内置默认）
+#   3. config.py 内 DEFAULT_CONFIG（内置兜底，与历史硬编码一致）
+#
+# 复制方式：cp config.yml.example config.yml，只改需要调整的键；未列出的段无需复制。
+
+# 下载（百度网盘 CLI）
+download:
+  max_workers: 2            # 同一百度账号 CLI 并发，过高会冲突
+  max_retries: 3
+  timeout: 1800             # 单任务下载总超时（s）
+  stall_timeout: 300        # 无新文件产出达此秒数判卡顿，杀进程重试
+  transfer_timeout: 120
+  delete_timeout: 60
+  default_pwd: '9999'       # 默认提取码
+  min_manual_files: 2
+  min_download_files: 10
+  min_completeness: 0.5     # 完成度低于此比例视为残缺，跳过切片并重试
+  resume_on_startup: true   # 启动时恢复崩溃遗留的下载任务
+
+# 切片 EDL 规则
+edl:
+  min_duration: 180
+  max_duration: 300
+  count: 5
+  retry: 2
+  segment_duration: [30, 75]
+  non_overlap: true         # 每集切互不重叠段
+  dedup_segments: true      # 跨版本禁止复用同一 (集,起点)
+  segment_dur: 20.0         # 非重叠段长（s）
+  target_dur: 200.0         # 每版目标时长（s）
+  min_versions: 1
+  max_versions: 8
+  allow_controlled_reuse: false
+  reuse_ratio: 0.0
+
+# 成品时长：剧情驱动 + 随机；enabled=false 退回 edl.target_dur 固定行为
+duration:
+  enabled: true
+  min_final: 210
+  max_final: 1200
+  per_unit: 32
+  per_spread: 8
+  jitter: [20, 55]
+  angle_bonus:
+    高潮: 30
+    反转: 45
+    虐心: 15
+    逆袭: 40
+    甜宠: 10
+    平淡: 0
+
+# 叙事因果链校验（fail-open：LLM 失败/无效 → 原样放行，不阻塞切片）
+causal_check:
+  enabled: true
+  max_replace: 2
+  retry: 1
+
+# 上传错峰发表时间槽位（仅计算/记录/展示，不自动定时发表）
+upload:
+  publish_schedule:
+    day_offset: 1
+    times: ['06:00', '09:00', '12:00', '15:00', '18:00', '21:00']
+
+# 镜头边界吸附（enabled=false 或检测失败 → 保守放行，不吸附）
+scene_snap:
+  enabled: true
+  threshold: 0.30
+  tol: 0.15
+
+# 成品质量门禁
+quality:
+  min_duration: 180
+  max_duration: 1260
+  min_size_mb: 10
+
+# 资源约束
+resource:
+  min_disk_gb: 100
+  max_concurrent: 2

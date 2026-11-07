@@ -13,35 +13,11 @@ import shutil
 import subprocess
 import sys
 
-# 环境变量 → (CONFIG key, 描述)。值非空才覆盖。
-ENV_OVERRIDES = {
-    'SHORTDRAMA_FFMPEG': ('ffmpeg_path', 'ffmpeg 可执行路径'),
-    'SHORTDRAMA_FFPROBE': ('ffprobe_path', 'ffprobe 可执行路径'),
-    'SHORTDRAMA_DOWNLOAD_DIR': ('download_base_dir', '素材根目录'),
-    'SHORTDRAMA_OUTPUT_DIR': ('output_dir', '成片输出根目录'),
-    'SHORTDRAMA_DATA_DIR': ('data_dir', '数据目录'),
-    'SHORTDRAMA_LOG_DIR': ('log_dir', '日志目录'),
-    'SHORTDRAMA_BAIDUPCS': ('baidupcs_path', 'BaiduPCS-Go 可执行路径'),
-    'SHORTDRAMA_ASR_SCRIPT': ('asr_script', 'ASR 脚本路径'),
-    'SHORTDRAMA_SCRIPTS_DIR': ('scripts_dir', '脚本目录'),
-}
+# 环境覆盖逻辑已迁入 config.py；此处再导出，保持 `from health import apply_env_overrides` 兼容。
+from config import ENV_OVERRIDES, apply_env_overrides  # noqa: F401
 
 # 关键路径映射：从 CONFIG key 派生需要检查的文件
 _PATH_KEYS = ['baidupcs_path', 'ffmpeg_path', 'ffprobe_path', 'asr_script']
-
-
-def apply_env_overrides(config):
-    """应用环境变量覆盖（返回覆盖数量；幂等）。"""
-    applied = 0
-    for env_key, (cfg_key, _desc) in ENV_OVERRIDES.items():
-        value = os.environ.get(env_key)
-        if value:
-            config[cfg_key] = value
-            applied += 1
-    # ffprobe 未显式覆盖时由 ffmpeg_dir 推导
-    if not config.get('ffprobe_path') and config.get('ffmpeg_dir'):
-        config['ffprobe_path'] = os.path.join(config['ffmpeg_dir'], 'ffprobe.exe')
-    return applied
 
 
 def _probe_exe(path, args=None, timeout=10):

@@ -31,7 +31,7 @@ from datetime import datetime
 from typing import List, Dict, Optional
 
 try:
-    from processor import CONFIG
+    from config import CONFIG
 except Exception:
     # 独立运行（单元测试）时允许注入配置
     CONFIG = None

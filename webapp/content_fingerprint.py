@@ -37,7 +37,7 @@ _POPCOUNT = np.array(
 def _ffmpeg_path():
     """延迟取 ffmpeg 路径（避免模块加载时依赖 processor）。"""
     try:
-        from processor import CONFIG
+        from config import CONFIG
         p = CONFIG.get('ffmpeg_path') or (
             os.path.join(CONFIG.get('ffmpeg_dir', ''), 'ffmpeg.exe'))
         if p and os.path.isfile(p):

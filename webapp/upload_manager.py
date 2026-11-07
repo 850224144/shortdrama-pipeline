@@ -31,7 +31,7 @@ def _connect_db(path):
 from wechat_uploader import WeChatChannelsUploader
 
 # 导入配置
-from processor import CONFIG
+from config import CONFIG
 
 # DrissionPage 已随 wechat_uploader 加载；此处模块级导入便于 mock 与复用
 from DrissionPage import ChromiumPage, ChromiumOptions

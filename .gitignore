@@ -35,6 +35,7 @@ tools/BaiduPCS-Go-*/
 .env
 .env.*
 !.env.example
+config.yml
 webapp/_login_*.py
 
 # ===== 归档（历史遗留/诊断脚本，非源码，不入库）=====
