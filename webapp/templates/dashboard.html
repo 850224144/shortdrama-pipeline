@@ -1541,19 +1541,30 @@
                         <button class="btn btn-secondary" onclick="window.open('http://dramaid.lol/','_blank')">↗ 打开原站</button>
                     </div>
                     <div id="dramaidHint" class="dramaid-hint" style="margin-top:var(--spacing-sm);color:var(--muted-foreground);font-size:13px;">
-                        免登录可查；搜索结果来自共享资料库，点「复制 ID」可一键取用剧集 ID（event/... 格式）。
+                        免登录可查；点「复制 ID」取用剧集 ID（event/... 格式）。「内部 ID」是数字 ID，供下方按 ID 查上下架状态使用。
+                    </div>
+                    <div class="dramaid-status" style="margin-top:var(--spacing-md);border-top:1px solid var(--border);padding-top:var(--spacing-md);">
+                        <h3 style="font-size:14px;margin-bottom:var(--spacing-sm);font-weight:600;">🔎 按 ID 查上下架状态（发布前确认用）</h3>
+                        <div class="upload-controls">
+                            <input type="text" id="dramaidStatusId" placeholder="输入内部数字 ID（如 18657）..." style="flex:1;"
+                                   onkeydown="if(event.key==='Enter'){event.preventDefault();queryDramaidStatus();}">
+                            <button class="btn btn-primary" onclick="queryDramaidStatus()">查询状态</button>
+                        </div>
+                        <div id="dramaidStatusResult" style="margin-top:var(--spacing-sm);font-size:13px;min-height:1em;"></div>
                     </div>
                     <table style="width:100%;margin-top:var(--spacing-md);border-collapse:collapse;">
                         <thead>
                             <tr>
-                                <th style="width:34%;">剧名</th>
-                                <th style="width:14%;">剧场</th>
-                                <th style="width:42%;">剧集 ID</th>
+                                <th style="width:30%;">剧名</th>
+                                <th style="width:11%;">剧场</th>
+                                <th style="width:9%;">内部 ID</th>
+                                <th style="width:32%;">剧集 ID</th>
+                                <th style="width:8%;">状态</th>
                                 <th style="width:10%;">操作</th>
                             </tr>
                         </thead>
                         <tbody id="dramaidRows">
-                            <tr><td colspan="4" style="text-align:center;color:var(--muted-foreground);padding:24px;">输入剧名开始搜索</td></tr>
+                            <tr><td colspan="6" style="text-align:center;color:var(--muted-foreground);padding:24px;">输入剧名开始搜索</td></tr>
                         </tbody>
                     </table>
                     <div class="dramaid-pagination" style="margin-top:var(--spacing-sm);display:flex;justify-content:space-between;align-items:center;">
@@ -1921,17 +1932,17 @@
             dramaidState = { page, keyword, type, total: 0, pages: 1 };
             const tbody = document.getElementById('dramaidRows');
             if (!keyword) {
-                tbody.innerHTML = '<tr><td colspan="4" style="text-align:center;color:var(--muted-foreground);padding:24px;">输入剧名开始搜索</td></tr>';
+                tbody.innerHTML = '<tr><td colspan="6" style="text-align:center;color:var(--muted-foreground);padding:24px;">输入剧名开始搜索</td></tr>';
                 updateDramaidPager();
                 return;
             }
-            tbody.innerHTML = '<tr><td colspan="4" style="text-align:center;padding:24px;">搜索中…</td></tr>';
+            tbody.innerHTML = '<tr><td colspan="6" style="text-align:center;padding:24px;">搜索中…</td></tr>';
             try {
                 const params = new URLSearchParams({ keyword, drama_type: type, page: String(page), page_size: '20' });
                 const resp = await fetch('/api/dramaid/search?' + params.toString());
                 const data = await resp.json();
                 if (data && data.error) {
-                    tbody.innerHTML = `<tr><td colspan="4" style="text-align:center;color:#e67e22;padding:24px;">${escapeHtml(data.error)}</td></tr>`;
+                    tbody.innerHTML = `<tr><td colspan="6" style="text-align:center;color:#e67e22;padding:24px;">${escapeHtml(data.error)}</td></tr>`;
                     updateDramaidPager();
                     return;
                 }
@@ -1939,23 +1950,26 @@
                 dramaidState.total = data.total || 0;
                 dramaidState.pages = Math.max(1, Math.ceil(dramaidState.total / 20));
                 if (!rows.length) {
-                    tbody.innerHTML = '<tr><td colspan="4" style="text-align:center;color:var(--muted-foreground);padding:24px;">未找到匹配剧集</td></tr>';
+                    tbody.innerHTML = '<tr><td colspan="6" style="text-align:center;color:var(--muted-foreground);padding:24px;">未找到匹配剧集</td></tr>';
                 } else {
                     tbody.innerHTML = rows.map(r => {
                         const name = escapeHtml(r.drama_name || '');
                         const theater = escapeHtml(r.theater_name || '');
                         const id = escapeHtml(r.drama_id || '');
+                        const inner = r.id != null ? escapeHtml(String(r.id)) : '';
                         return `<tr>
                             <td>${name}</td>
                             <td>${theater || '—'}</td>
+                            <td>${inner ? `<span style="font-family:monospace;font-size:12px;cursor:pointer;color:var(--accent);" data-inner="${inner}" title="点击复制内部 ID" onclick="copyDramaidInner(this)">${inner}</span>` : '—'}</td>
                             <td style="word-break:break-all;font-family:monospace;font-size:12px;">${id}</td>
+                            <td>${dramaidBadge(r)}</td>
                             <td><button class="btn btn-secondary" style="padding:2px 8px;font-size:12px;" data-id="${id}" onclick="copyDramaidId(this)">📋 复制 ID</button></td>
                         </tr>`;
                     }).join('');
                 }
                 updateDramaidPager();
             } catch (e) {
-                tbody.innerHTML = `<tr><td colspan="4" style="text-align:center;color:#e74c3c;padding:24px;">搜索失败：${escapeHtml(e.message || String(e))}</td></tr>`;
+                tbody.innerHTML = `<tr><td colspan="6" style="text-align:center;color:#e74c3c;padding:24px;">搜索失败：${escapeHtml(e.message || String(e))}</td></tr>`;
             }
         }
 
@@ -1986,6 +2000,57 @@
                     catch (e) { showNotification('复制失败，请手动复制', 'error'); }
                     document.body.removeChild(ta);
                 });
+        }
+
+        // 上下架状态徽章（is_published: 1 已上架 / 0 已下架；deleted_at 非空 = 回收站）
+        function dramaidBadge(r) {
+            const on = !!r.is_published;
+            const pub = on ? '已上架' : '已下架';
+            const pubStyle = on
+                ? 'background:rgba(46,160,67,.15);color:#2ea043;padding:2px 8px;border-radius:4px;font-size:12px;'
+                : 'background:rgba(230,126,34,.15);color:#e67e22;padding:2px 8px;border-radius:4px;font-size:12px;';
+            const del = r.deleted_at
+                ? '<span style="background:rgba(231,76,60,.15);color:#e74c3c;padding:2px 8px;border-radius:4px;font-size:12px;margin-left:4px;">回收站</span>'
+                : '';
+            return `<span style="${pubStyle}">${pub}</span>${del}`;
+        }
+
+        function copyDramaidInner(span) {
+            const id = span.dataset.inner;
+            if (!id) return;
+            (navigator.clipboard ? navigator.clipboard.writeText(id) : Promise.reject())
+                .then(() => showNotification('已复制内部 ID', 'success'))
+                .catch(() => {
+                    const ta = document.createElement('textarea');
+                    ta.value = id;
+                    document.body.appendChild(ta);
+                    ta.select();
+                    try { document.execCommand('copy'); showNotification('已复制内部 ID', 'success'); }
+                    catch (e) { showNotification('复制失败，请手动复制', 'error'); }
+                    document.body.removeChild(ta);
+                });
+        }
+
+        // 按内部 ID 查单部剧集的上下架状态（发布前确认用）
+        async function queryDramaidStatus() {
+            const input = document.getElementById('dramaidStatusId');
+            const box = document.getElementById('dramaidStatusResult');
+            const id = (input.value || '').trim();
+            if (!id) { box.innerHTML = '<span style="color:var(--muted-foreground);">请输入内部数字 ID</span>'; return; }
+            if (!/^\d+$/.test(id)) { box.innerHTML = '<span style="color:#e67e22;">ID 须为纯数字（内部 ID，如 18657）</span>'; return; }
+            box.innerHTML = '<span style="color:var(--muted-foreground);">查询中…</span>';
+            try {
+                const resp = await fetch('/api/dramaid/status?id=' + encodeURIComponent(id));
+                const data = await resp.json();
+                if (data && data.error) {
+                    box.innerHTML = `<span style="color:#e67e22;">${escapeHtml(data.error)}（id=${escapeHtml(id)}）</span>`;
+                    return;
+                }
+                box.innerHTML = `<div>${data.is_published ? '<span style="background:rgba(46,160,67,.15);color:#2ea043;padding:2px 8px;border-radius:4px;">已上架</span>' : '<span style="background:rgba(230,126,34,.15);color:#e67e22;padding:2px 8px;border-radius:4px;">已下架</span>'}${data.deleted_at ? '<span style="background:rgba(231,76,60,.15);color:#e74c3c;padding:2px 8px;border-radius:4px;margin-left:4px;">回收站</span>' : ''}　<b>${escapeHtml(data.drama_name || '（未知剧名）')}</b>　剧场：${escapeHtml(data.theater_name || '—')}</div>
+                    <div style="margin-top:4px;color:var(--muted-foreground);font-size:12px;">剧集 ID：<code style="word-break:break-all;">${escapeHtml(data.drama_id || '—')}</code>　类型：${escapeHtml(data.drama_type || '—')}</div>`;
+            } catch (e) {
+                box.innerHTML = `<span style="color:#e74c3c;">查询失败：${escapeHtml(e.message || String(e))}</span>`;
+            }
         }
 
         // BaiduPCS-Go登录状态
