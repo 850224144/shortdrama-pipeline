@@ -109,18 +109,33 @@ class UploadManager(BaseQueueManager):
     def _resolve_task_drama_id(self, task):
         """上传前解析剧集 ID（A3 混合语义）：绑定优先，未绑定自动查首条。
 
-        返回 (drama_id, source)。drama_id 可为 None；source ∈ bound|autolookup|
-        none|error。任何失败不抛异常——调用方跳过填链接、照常保存草稿。
+        统一返回 dict（自描述，避免位置元组元数不一致）：
+          {drama_id: str|None, source: str, matched_name: str|None, error: str|None}
+          source ∈ bound|autolookup|none|error；matched_name/error 仅日志展示用。
+        任何失败不抛异常——调用方跳过填链接、照常保存草稿。
+
+        注：dramaid_client.resolve() 返回 4 元组 (drama_id, source, matched_name,
+        error)；本函数显式解包并归一成 dict，防止上游改元数时静默错位。
         """
         if task.get('drama_id'):
-            return task['drama_id'], task.get('drama_id_source') or 'bound'
+            return {
+                'drama_id': task['drama_id'],
+                'source': task.get('drama_id_source') or 'bound',
+                'matched_name': task.get('drama_name'),
+                'error': None,
+            }
         client = getattr(self, '_dramaid_client', None)
         if client is None:
-            return None, 'none'
+            return {'drama_id': None, 'source': 'none',
+                    'matched_name': None, 'error': None}
         try:
-            return client.resolve(task.get('drama_name') or '')
+            drama_id, source, matched_name, error = client.resolve(
+                task.get('drama_name') or '')
+            return {'drama_id': drama_id, 'source': source,
+                    'matched_name': matched_name, 'error': error}
         except Exception as exc:
-            return None, f'error:{exc}'
+            return {'drama_id': None, 'source': f'error:{exc}',
+                    'matched_name': None, 'error': str(exc)}
 
     def _restore_unfinished_queue(self):
         """从 upload_records 恢复 pending/uploading 任务。"""
@@ -1335,16 +1350,21 @@ class UploadManager(BaseQueueManager):
             # 剧集 ID（保存草稿前填「链接 → 视频号剧集」用，A3 混合语义）：
             # 任务有绑定 ID 用之；未绑定则自动查上游首条；查不到/失败则不填，
             # 照常保存草稿（不阻断发布）。结果写回 task 供日志与前端展示。
-            drama_id, drama_src = self._resolve_task_drama_id(task)
+            resolved = self._resolve_task_drama_id(task)
+            drama_id = resolved['drama_id']
+            drama_src = resolved['source']
             task['drama_id'] = drama_id
             task['drama_id_source'] = drama_src
             if drama_id:
+                matched = resolved.get('matched_name')
+                extra = f'（匹配 {matched}）' if matched and matched != task['drama_name'] else ''
                 self._log('info',
                           f'V{task["version"]} 剧集链接将用 [{drama_src}] ID：'
-                          f'{drama_id}（剧名 {task["drama_name"]}）')
+                          f'{drama_id}{extra}（剧名 {task["drama_name"]}）')
             else:
+                detail = f'：{resolved["error"]}' if resolved.get('error') else ''
                 self._log('warn',
-                          f'V{task["version"]} 未取得剧集 ID（{drama_src}），'
+                          f'V{task["version"]} 未取得剧集 ID（{drama_src}）{detail}，'
                           f'跳过填链接，照常保存草稿')
 
             # 执行上传（传递位置参数）
