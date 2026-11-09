@@ -72,6 +72,8 @@ class BatchCutManager(BaseQueueManager):
                     'account': params.get('account', '小桃追剧中'),
                     'resume': bool(params.get('resume', False)),
                     'force': bool(params.get('force', False)),
+                    'auto_selected': bool(params.get('auto_selected', False)),
+                    'auto_run_id': params.get('auto_run_id'),
                     'status': status,
                     'stage': job.get('stage') or status,
                     'progress': int(job.get('progress') or 0),
@@ -136,6 +138,8 @@ class BatchCutManager(BaseQueueManager):
                 'resume': bool(task.get('resume', False)),
                 'force': bool(task.get('force', False)),
                 'config': task.get('config'),
+                'auto_selected': bool(task.get('auto_selected', False)),
+                'auto_run_id': task.get('auto_run_id'),
             },
             'result': result,
             'error': task.get('error'),
@@ -173,7 +177,8 @@ class BatchCutManager(BaseQueueManager):
             pass
 
     def add_to_queue(self, drama_name, account='小桃追剧中', resume=False,
-                     force=False, config=None):
+                     force=False, config=None, auto_selected=False,
+                     auto_run_id=None):
         """添加切片任务到队列。
 
         config：本剧切制参数覆盖（version_count/min_dur/max_dur/reuse_material/
@@ -192,6 +197,8 @@ class BatchCutManager(BaseQueueManager):
                 'resume': bool(resume),
                 'force': bool(force),
                 'config': config,
+                'auto_selected': bool(auto_selected),
+                'auto_run_id': auto_run_id,
                 'status': 'pending',
                 'stage': 'pending',
                 'progress': 0,
@@ -212,7 +219,7 @@ class BatchCutManager(BaseQueueManager):
                 self._log('error', f'任务持久化失败：{drama_name}')
             return {'status': 'success', 'id': task['id']}
 
-    def start_cutting(self):
+    def start_cutting(self, task_ids=None, pipeline_acquired=False):
         """开始切片。"""
         with self.lock:
             if self.cutting:
@@ -220,14 +227,22 @@ class BatchCutManager(BaseQueueManager):
             if self.cut_thread and self.cut_thread.is_alive():
                 return {'status': 'failed', 'error': '上一轮任务正在停止，请稍候'}
 
-            pending = [t for t in self.queue if t['status'] == 'pending']
+            wanted = set(task_ids or [])
+            pending = [t for t in self.queue if t['status'] == 'pending' and
+                       (not wanted or t.get('id') in wanted)]
             if not pending:
                 return {'status': 'failed', 'error': '队列为空'}
-            if not execution_gate.try_acquire_pipeline():
+            acquired_here = False
+            if not pipeline_acquired and not execution_gate.try_acquire_pipeline():
                 return {'status': 'failed', 'error': '主处理任务正在运行，请等待完成'}
+            elif not pipeline_acquired:
+                acquired_here = True
 
             self._cancel_event = threading.Event()
+            # This worker owns a gate acquired here or handed in by the
+            # automatic-selection orchestrator; release it only after the queue drains.
             self._pipeline_owned = True
+            self._only_task_ids = set(task_ids or [])
             self.cutting = True
             self.paused = False
             self.stopping = False
@@ -245,8 +260,10 @@ class BatchCutManager(BaseQueueManager):
                     target=self._heartbeat_loop, name='cut-heartbeat', daemon=True)
                 self._heartbeat_thread.start()
             except Exception:
+                if acquired_here and self._pipeline_owned:
+                    execution_gate.release_pipeline()
                 self._pipeline_owned = False
-                execution_gate.release_pipeline()
+                self._only_task_ids = set()
                 self.cutting = False
                 raise
             return {'status': 'success'}
@@ -492,7 +509,9 @@ class BatchCutManager(BaseQueueManager):
                         should_wait = True
                     else:
                         should_wait = False
-                        task = next((t for t in self.queue if t['status'] == 'pending'), None)
+                        wanted = set(getattr(self, '_only_task_ids', []) or [])
+                        task = next((t for t in self.queue if t['status'] == 'pending' and
+                                     (not wanted or t.get('id') in wanted)), None)
                         if task is None:
                             self.cutting = False
                             self._log('info', '切片完成：所有任务已处理')
@@ -538,8 +557,14 @@ class BatchCutManager(BaseQueueManager):
                     task_cfg = task.get('config') if task is not None else None
                     if task_cfg is not None:
                         cut_kwargs['config'] = task_cfg
-                    result = self.processor.manual_cut(task['drama_name'],
-                                                       **cut_kwargs)
+                    if task.get('auto_selected') and hasattr(
+                            self.processor, 'manual_cut_for_account'):
+                        result = self.processor.manual_cut_for_account(
+                            task['drama_name'], task.get('account', '小桃追剧中'),
+                            **cut_kwargs)
+                    else:
+                        result = self.processor.manual_cut(task['drama_name'],
+                                                           **cut_kwargs)
                     cancelled = bool(
                         result.get('cancelled') or
                         result.get('status') == 'cancelled' or
@@ -672,6 +697,7 @@ class BatchCutManager(BaseQueueManager):
                     if self._pipeline_owned:
                         self._pipeline_owned = False
                         execution_gate.release_pipeline()
+                    self._only_task_ids = set()
             self._stop_heartbeat()
 
     def _log(self, level, message):

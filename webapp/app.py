@@ -52,6 +52,9 @@ from api.cleanup import create_cleanup_bp
 from api.upload import create_upload_bp
 from api.cut import create_cut_bp
 from api.dramaid import create_dramaid_bp
+from api.candidates import create_candidates_bp
+from candidate_library import init_database as _candidate_library_init
+from automatic_selection import AutomaticSelection
 
 apply_env_overrides(CONFIG)
 
@@ -110,6 +113,10 @@ upload_manager.set_cleanup_callback(
 batch_cut_manager = BatchCutManager(processor, CONFIG['data_dir'],
                                     output_root=CONFIG['output_dir'])
 
+# 新增的自动选剧编排器：只挂接现有下载器和切片队列，不改变原有入口。
+_candidate_library_init()
+automatic_selection = AutomaticSelection(processor, batch_cut_manager, CONFIG, logger)
+
 # 主消息处理任务控制器；processing_state 保留为兼容别名。
 process_controller = ProcessJobController(processor, on_status=socketio.emit)
 processing_state = process_controller.state
@@ -127,6 +134,8 @@ deps = {
     'artifact_cleanup': artifact_cleanup,
     'batch_cut_manager': batch_cut_manager,
     'dramaid_client': dramaid_client,
+    'automatic_selection': automatic_selection,
+    'project_root': os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
 }
 
 # ── 注册业务域蓝图 ──
@@ -139,6 +148,7 @@ app.register_blueprint(create_cleanup_bp(deps))
 app.register_blueprint(create_upload_bp(deps))
 app.register_blueprint(create_cut_bp(deps))
 app.register_blueprint(create_dramaid_bp(deps))
+app.register_blueprint(create_candidates_bp(deps))
 
 
 # ── WebSocket 事件 ──────────────────────────────────────

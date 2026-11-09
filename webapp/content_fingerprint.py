@@ -350,7 +350,6 @@ class FingerprintStore:
         out.sort(key=lambda x: -x['similarity'])
         return out
 
-
 # 默认阈值（设计 2.4；CONFIG 可覆盖）
 def dedup_thresholds(config=None):
     """读取内容去重阈值（CONFIG['content_dedup']，缺省保守默认）。"""

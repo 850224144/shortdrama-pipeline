@@ -640,7 +640,7 @@ class PipelineProcessor:
                 self.processing = False
     
     def manual_cut(self, drama_name, resume=False, force=False, cancel_event=None,
-                   config=None):
+                   config=None, account=None):
         """手动切片 - 从素材目录直接切片
 
         resume=True：失败续跑，只重渲染保留的 edl_config，不重新生成 EDL；
@@ -720,6 +720,9 @@ class PipelineProcessor:
             'error': None,
             'cut_config': cut_cfg,
         }
+        if account:
+            download_result['account'] = account
+            download_result['auto_selected'] = True
         
         # 切片
         result = self.cut_batch([download_result], resume=resume, force=force,
@@ -764,6 +767,24 @@ class PipelineProcessor:
                 (r.get('error') for r in failed_cuts if r.get('error')),
                 '切片失败'),
         }
+
+    def manual_cut_for_account(self, drama_name, account, resume=False,
+                               force=False, cancel_event=None, config=None):
+        """新增的自动选剧切片入口；指定账号，不改变手动切片的默认分配。"""
+        if not drama_name:
+            return {'status': 'failed', 'error': '缺少剧名'}
+        source_dir = os.path.join(CONFIG['download_base_dir'], drama_name)
+        if not os.path.isdir(source_dir):
+            return {'status': 'failed', 'error': f'素材目录不存在：{drama_name}'}
+        files = self._scan_files_recursive(source_dir)
+        mp4s = self._dedupe_episodes_by_number(
+            [p for p in files if p.lower().endswith('.mp4') and
+             '.downloading' not in p.lower()])
+        if len(mp4s) < 2:
+            return {'status': 'failed', 'error': f'素材文件不足：{len(mp4s)}集'}
+        return self.manual_cut(drama_name, resume=resume, force=force,
+                               cancel_event=cancel_event, config=config,
+                               account=account)
     
     def download_batch(self, links, cancel_event=None):
         """并发下载所有链接"""
@@ -2263,11 +2284,12 @@ class PipelineProcessor:
                 'error': '没有素材文件'
             }
         
-        submit_order = self.get_submit_order()
-        account = self.assign_account(drama_name, submit_order)
+        account = ((download_result.get('account')
+                    if download_result.get('auto_selected') else None)
+                   or self.assign_account(drama_name))
         # 输出目录按水印分类：output/福桃说剧/ 或 output/小桃追剧中/
         output_subdir = self.get_output_subdir(
-            drama_name, submit_order, account=account)
+            drama_name, account=account)
         out_dir = os.path.join(CONFIG['output_dir'], output_subdir, drama_name)
         
         # 去重检查：按计划版本数判断是否真的完成，而非“有任意成片就跳过”。
@@ -2442,7 +2464,9 @@ class PipelineProcessor:
             self._emit_cut_progress('content_dedup', 90,
                                     '计算成片指纹并比较版本重合')
             best_videos, dedup_report = self._dedup_versions_by_content(
-                best_videos, drama_name, out_dir, src_dir)
+                best_videos, drama_name, out_dir, src_dir,
+                account=download_result.get('account') if
+                download_result.get('auto_selected') else None)
 
             # 后处理
             self._update_state('processing', drama_name, 80, '后处理中')
@@ -2506,11 +2530,11 @@ class PipelineProcessor:
             # P7: 账号取实际输出目录（output/{账号}/{剧名}），与交付报告/水印一致
             try:
                 acc_dir = os.path.dirname(out_dir.rstrip('/\\'))
-                account = os.path.basename(acc_dir)
+                account = download_result.get('account') or os.path.basename(acc_dir)
                 if not account or account == 'output':
                     account = self.assign_account(drama_name)
             except Exception:
-                account = self.assign_account(drama_name)
+                account = download_result.get('account') or self.assign_account(drama_name)
             self.state_manager.add_completed(drama_name, account, {
                 'ai': len(ai_videos),
                 'edl': len(edl_videos),
@@ -5049,7 +5073,7 @@ class PipelineProcessor:
         return int(m.group(1)) if m else None
 
     def _dedup_versions_by_content(self, best_videos, drama_name, out_dir,
-                                   src_dir=None):
+                                   src_dir=None, account=None):
         """内容级去重（设计 2.3①）：版本间感知哈希相似度检测。
 
         在 _select_best_videos 之后、_post_process 之前调用。对 best_videos
@@ -5082,7 +5106,7 @@ class PipelineProcessor:
 
         # 1. 逐版本算指纹 + 存库（重切覆盖）
         fps = {}
-        account = self.assign_account(drama_name)
+        account = account or self.assign_account(drama_name)
         for v in best_videos:
             fname = v.get('filename', '')
             path = v.get('path') or v.get('final_path')

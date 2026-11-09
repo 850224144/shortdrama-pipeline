@@ -1291,6 +1291,12 @@
             </div>
         </div>
 
+        <div class="card" style="display:flex;gap:var(--spacing-md);align-items:center;flex-wrap:wrap;">
+            <button class="btn btn-primary" id="autoSelectBtn" onclick="startAutoSelection()">🎯 自动选剧下载</button>
+            <button class="btn btn-secondary" id="autoSelectStopBtn" onclick="stopAutoSelection()" disabled>⏹ 停止本轮</button>
+            <span id="autoSelectStatus" style="color:var(--text-secondary);">每次默认两部，切片完成后停下，不自动上传</span>
+        </div>
+
         <div class="card">
             <div class="tabs">
                 <div class="tab active" onclick="switchTab('logs')">📝 实时日志</div>
@@ -1298,6 +1304,7 @@
                 <div class="tab" onclick="switchTab('upload')">🚀 批量上传</div>
                 <div class="tab" onclick="switchTab('cut')">✂️ 批量切片</div>
                 <div class="tab" onclick="switchTab('archive')">🗂️ 剧级档案</div>
+                <div class="tab" onclick="switchTab('candidates')">📚 候选与素材维护</div>
                 <div class="tab" onclick="switchTab('dramaid')">📚 共享资料库</div>
             </div>
 
@@ -1526,6 +1533,43 @@
                 </div>
             </div>
 
+            <div class="tab-content" id="candidatesTab">
+                <div class="upload-panel">
+                    <h2>📚 候选库与素材维护</h2>
+                    <div class="upload-controls">
+                        <input type="file" id="candidateCsvFile" accept=".csv,text/csv">
+                        <button class="btn btn-primary" onclick="importCandidateCsv()">导入全量 CSV</button>
+                        <button class="btn btn-secondary" onclick="loadCandidates()">刷新候选</button>
+                        <button class="btn btn-secondary" onclick="reconcileMaterials()">本地状态对账</button>
+                        <button class="btn btn-secondary" onclick="scanMaterialFingerprints()">检测换皮重复</button>
+                        <button class="btn btn-secondary" onclick="loadDuplicatePairs()">复核疑似重复</button>
+                        <button class="btn btn-secondary" onclick="loadRecycleBin()">查看回收站</button>
+                        <button class="btn btn-danger" onclick="emptyRecycleBin()">清空回收站</button>
+                    </div>
+                    <div id="candidateImportStatus" style="margin:var(--spacing-sm) 0;color:var(--text-secondary);"></div>
+                    <div class="upload-controls">
+                        <input id="candidateQ" placeholder="搜索剧名、题材、评级" style="flex:1" onkeydown="if(event.key==='Enter')loadCandidates()">
+                        <select id="candidateChannel"><option value="">全部频道</option><option>女</option><option>男</option><option>通用</option></select>
+                        <select id="candidateCategory"><option value="">全部类目</option></select>
+                        <select id="candidateState"><option value="active">有效候选</option><option value="stale">本次未出现</option><option value="weak">弱档标记</option><option value="duplicate">疑似重复</option><option value="recycled">已回收</option><option value="">全部</option></select>
+                        <button class="btn btn-primary" onclick="loadCandidates()">筛选</button>
+                    </div>
+                    <div style="overflow:auto;max-height:60vh;">
+                        <table style="width:100%;margin-top:var(--spacing-md);border-collapse:collapse;">
+                            <thead><tr><th>剧名</th><th>频道</th><th>类目/题材</th><th>评级</th><th>上架日期</th><th>链接</th><th>下载</th><th>切片/上传</th><th>候选状态</th><th>维护</th></tr></thead>
+                            <tbody id="candidateRows"></tbody>
+                        </table>
+                    </div>
+                    <div class="upload-controls" style="margin-top:var(--spacing-md);">
+                        <button class="btn btn-secondary" onclick="candidatePage(-1)">上一页</button>
+                        <span id="candidatePageLabel">第 1 页</span>
+                        <button class="btn btn-secondary" onclick="candidatePage(1)">下一页</button>
+                    </div>
+                    <div id="recycleBinItems" style="margin-top:var(--spacing-md);"></div>
+                    <div id="duplicatePairs" style="margin-top:var(--spacing-md);"></div>
+                </div>
+            </div>
+
             <div class="tab-content" id="dramaidTab">
                 <div class="upload-panel">
                     <h2>📚 共享资料库（dramaid.lol 按剧名查剧集 ID）</h2>
@@ -1733,10 +1777,180 @@
             if (tab === 'upload') {
                 loadUploadAccounts();
             }
+            if (tab === 'candidates') {
+                loadCandidateStatus();
+                loadCandidates();
+                loadRecycleBin();
+                loadDuplicatePairs();
+            }
             if (tab === 'dramaid') {
                 // 懒加载：首次进入初始化分页按钮状态（不自动搜，等用户输入）
                 if (typeof updateDramaidPager === 'function') updateDramaidPager();
             }
+        }
+
+        let candidatePageNo = 1;
+        let candidateAutoPoll = null;
+
+        async function startAutoSelection() {
+            const btn = document.getElementById('autoSelectBtn');
+            btn.disabled = true;
+            try {
+                const response = await fetch('/api/candidates/auto-select', {
+                    method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify({count:2})
+                });
+                const data = await response.json();
+                if (data.status !== 'started') {
+                    showNotification(data.error || '自动选剧未启动', 'error');
+                    btn.disabled = false;
+                    return;
+                }
+                document.getElementById('autoSelectStopBtn').disabled = false;
+                document.getElementById('autoSelectStatus').textContent = '自动选剧已启动：正在按上架日期筛选并补位下载';
+                showNotification('自动选剧下载已启动', 'success');
+                if (candidateAutoPoll) clearInterval(candidateAutoPoll);
+                candidateAutoPoll = setInterval(pollAutoSelection, 3000);
+                pollAutoSelection();
+            } catch (error) {
+                showNotification('启动失败：' + error.message, 'error');
+                btn.disabled = false;
+            }
+        }
+
+        async function pollAutoSelection() {
+            try {
+                const response = await fetch('/api/candidates/auto-select/status');
+                const data = await response.json();
+                let run = data.run;
+                if (!run) return;
+                if (run.status === 'selecting' || run.status === 'cutting') {
+                    const refresh = await fetch('/api/materials/reconcile/auto-cut',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({run_id:run.id})});
+                    if (refresh.ok) run = await refresh.json();
+                }
+                const labels = {selecting:'筛选候选',downloading:'下载中',downloaded:'下载完成',queued:'已进入切片队列',cut_done:'切片完成',cut_failed:'切片失败',completed:'本轮完成',partial_failure:'部分完成',failed:'失败',cancelled:'已停止'};
+                const pieces = (run.items || []).map(item => `${item.account}：${item.candidate_title}（${labels[item.status] || item.status}${item.error ? '，'+item.error : ''}）`);
+                document.getElementById('autoSelectStatus').textContent = pieces.length ? pieces.join('；') : (run.error || '正在准备候选');
+                const active = Boolean(data.running);
+                document.getElementById('autoSelectBtn').disabled = active;
+                document.getElementById('autoSelectStopBtn').disabled = !active;
+                if (!active) {
+                    clearInterval(candidateAutoPoll);
+                    candidateAutoPoll = null;
+                    showNotification(run.error ? '自动选剧结束，部分任务需要查看' : '自动选剧与切片已结束', run.error ? 'info' : 'success');
+                }
+            } catch (error) { console.error('读取自动选剧状态失败', error); }
+        }
+
+        async function stopAutoSelection() {
+            if (!confirm('停止本轮自动选剧？当前下载命令结束后停止补位。')) return;
+            const response = await fetch('/api/candidates/auto-select/stop', {method:'POST'});
+            const data = await response.json();
+            showNotification(data.message || data.error || '已发送停止请求', data.status === 'success' ? 'info' : 'error');
+        }
+
+        async function loadCandidateStatus() {
+            const response = await fetch('/api/candidates/status');
+            const data = await response.json();
+            const latest = data.latest_import;
+            document.getElementById('candidateImportStatus').textContent = latest
+                ? `候选 ${data.candidate_count} 部；最近导入 ${latest.imported_at}，${latest.filename}，读取 ${latest.rows_seen} 行，去重更新 ${latest.rows_upserted} 部。固定路径：${data.fixed_path}`
+                : `尚未导入候选 CSV。固定路径：${data.fixed_path}`;
+        }
+
+        async function importCandidateCsv() {
+            const file = document.getElementById('candidateCsvFile').files[0];
+            if (!file) { showNotification('请先选择 CSV 文件', 'error'); return; }
+            const form = new FormData(); form.append('file', file);
+            const response = await fetch('/api/candidates/import', {method:'POST', body:form});
+            const data = await response.json();
+            if (!response.ok || data.status !== 'success') { showNotification(data.error || '导入失败', 'error'); return; }
+            showNotification(`导入完成：${data.rows_upserted} 部候选`, 'success');
+            await loadCandidateStatus(); await loadCandidates();
+        }
+
+        async function loadCandidates() {
+            const params = new URLSearchParams({page:String(candidatePageNo),limit:'50'});
+            const q = document.getElementById('candidateQ').value.trim();
+            const channel = document.getElementById('candidateChannel').value;
+            const category = document.getElementById('candidateCategory').value;
+            const state = document.getElementById('candidateState').value;
+            if (q) params.set('q', q); if (channel) params.set('channel', channel); if (category) params.set('category', category); if (state) params.set('state', state);
+            const response = await fetch('/api/candidates/list?' + params.toString());
+            const data = await response.json();
+            const tbody = document.getElementById('candidateRows');
+            if (!response.ok) { tbody.innerHTML = `<tr><td colspan="10">${escapeHtml(data.error || '加载失败')}</td></tr>`; return; }
+            tbody.innerHTML = (data.items || []).map(item => {
+                const link = item.source_url ? `<a target="_blank" rel="noopener" href="${escapeHtml(item.source_url)}">打开</a>` : '—';
+                const stateText = item.recycled_at ? '已回收' : item.weak_marked ? '弱档' : item.duplicate_marked ? '疑似重复' : item.publish_status || '未标记';
+                const urlTitle = encodeURIComponent(item.title);
+                return `<tr><td>${escapeHtml(item.title)}</td><td>${escapeHtml(item.channel)}</td><td>${escapeHtml(item.category)} / ${escapeHtml(item.topic)}</td><td>${escapeHtml(item.rating)}</td><td>${escapeHtml(item.listing_date)}</td><td>${link}</td><td>${escapeHtml(item.download_state || 'none')}</td><td>${escapeHtml(item.slice_state || 'none')} / ${escapeHtml(item.upload_state || 'none')}</td><td>${escapeHtml(stateText)}</td><td><button class="btn btn-secondary btn-small" onclick="markCandidate('${urlTitle}','weak_marked',${item.weak_marked ? 'false':'true'})">弱档标记</button> <button class="btn btn-secondary btn-small" onclick="markCandidate('${urlTitle}','duplicate_marked',${item.duplicate_marked ? 'false':'true'})">重复标记</button> ${!item.recycled_at ? `<button class="btn btn-danger btn-small" onclick="recycleCandidate('${urlTitle}')">移入回收站</button>` : ''}</td></tr>`;
+            }).join('') || '<tr><td colspan="10">没有候选记录</td></tr>';
+            const catSelect = document.getElementById('candidateCategory');
+            const prevCat = catSelect.value;
+            catSelect.innerHTML = '<option value="">全部类目</option>' + (data.categories || []).map(x => `<option value="${escapeHtml(x)}">${escapeHtml(x)}</option>`).join('');
+            if ((data.categories || []).includes(prevCat)) catSelect.value = prevCat;
+            document.getElementById('candidatePageLabel').textContent = `第 ${data.page} 页 / 共 ${data.total} 部`;
+        }
+
+        function candidatePage(delta) { candidatePageNo = Math.max(1, candidatePageNo + delta); loadCandidates(); }
+
+        async function markCandidate(encodedTitle, key, value) {
+            const body = {title:decodeURIComponent(encodedTitle)}; body[key] = value;
+            const response = await fetch('/api/candidates/flags',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});
+            const data = await response.json(); if (data.status === 'success') loadCandidates(); else showNotification(data.error || '更新失败','error');
+        }
+
+        async function reconcileMaterials() {
+            const response = await fetch('/api/materials/reconcile',{method:'POST'}); const data = await response.json();
+            showNotification(data.status === 'success' ? '本地素材和切片队列对账完成' : (data.error || '对账失败'), data.status === 'success' ? 'success':'error');
+            loadCandidates();
+        }
+
+        async function scanMaterialFingerprints() {
+            const response = await fetch('/api/materials/fingerprint-scan',{method:'POST'});
+            const data = await response.json();
+            if (data.status === 'success') showNotification(`指纹扫描 ${data.report.scanned} 部，疑似重复 ${data.report.matches} 项`, 'success');
+            else showNotification(data.error || '指纹扫描失败','error');
+            loadCandidates(); loadDuplicatePairs();
+        }
+
+        async function loadDuplicatePairs() {
+            const response = await fetch('/api/candidates/duplicates'); const data = await response.json();
+            document.getElementById('duplicatePairs').innerHTML = '<h3>疑似换皮重复（需人工复核）</h3>' +
+                ((data.items || []).map(x => `<div style="padding:8px;border-bottom:1px solid var(--surface-3);">${escapeHtml(x.left_title)} ↔ ${escapeHtml(x.right_title)} · 相似度 ${Number(x.similarity).toFixed(3)} · ${escapeHtml(x.status)} <button class="btn btn-secondary btn-small" onclick="reviewDuplicate('${encodeURIComponent(x.left_title)}','${encodeURIComponent(x.right_title)}',${Number(x.similarity || 0)},'confirmed')">确认重复</button> <button class="btn btn-secondary btn-small" onclick="reviewDuplicate('${encodeURIComponent(x.left_title)}','${encodeURIComponent(x.right_title)}',${Number(x.similarity || 0)},'dismissed')">排除</button></div>`).join('') || '<div>暂无疑似项</div>');
+        }
+
+        async function reviewDuplicate(left, right, similarity, status) {
+            const response = await fetch('/api/candidates/duplicates/review',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({left_title:decodeURIComponent(left),right_title:decodeURIComponent(right),similarity,status})});
+            const data = await response.json(); if (data.status === 'success') { loadDuplicatePairs(); loadCandidates(); } else showNotification(data.error || '复核保存失败','error');
+        }
+
+        async function recycleCandidate(encodedTitle) {
+            const title = decodeURIComponent(encodedTitle);
+            if (!confirm(`把「${title}」的本地素材目录移入素材维护回收站？`)) return;
+            const response = await fetch('/api/materials/recycle',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({title})});
+            const data = await response.json(); showNotification(data.status === 'success' ? '已移入回收站' : (data.error || '回收失败'), data.status === 'success' ? 'success':'error');
+            loadCandidates(); loadRecycleBin();
+        }
+
+        async function loadRecycleBin() {
+            const response = await fetch('/api/materials/recycle-bin'); const data = await response.json();
+            document.getElementById('recycleBinItems').innerHTML = '<h3>素材维护回收站</h3>' + ((data.items || []).map(x => `<div>${escapeHtml(x.name)} · ${escapeHtml(x.recycled_at)} <button class="btn btn-danger btn-small" onclick="deleteRecycleItem('${encodeURIComponent(x.path)}')">确认删除此项</button></div>`).join('') || '<div>回收站为空</div>');
+        }
+
+        async function deleteRecycleItem(encodedPath) {
+            const path = decodeURIComponent(encodedPath);
+            if (!confirm('永久删除此回收项及其本地素材？此操作不可撤销。')) return;
+            const response = await fetch('/api/materials/recycle-bin/item',{method:'DELETE',headers:{'Content-Type':'application/json'},body:JSON.stringify({path})});
+            const data = await response.json();
+            showNotification(data.status === 'success' ? '回收项已删除' : (data.error || '删除失败'),data.status === 'success' ? 'success':'error');
+            loadRecycleBin(); loadCandidates();
+        }
+
+        async function emptyRecycleBin() {
+            if (!confirm('确定永久清空素材维护回收站？此操作不可撤销。')) return;
+            const response = await fetch('/api/materials/recycle-bin/empty',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({confirm:true})});
+            const data = await response.json(); showNotification(data.status === 'success' ? '回收站已清空' : (data.error || '清空失败'), data.status === 'success' ? 'success':'error'); loadRecycleBin();
         }
 
         // 全局转义辅助（防剧名含引号/HTML 的 DOM XSS）

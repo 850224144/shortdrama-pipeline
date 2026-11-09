@@ -35,6 +35,7 @@ def _connect_db(path):
     独立实现避免循环 import（upload_manager 依赖 processor，processor 需用 archive）。
     """
     conn = sqlite3.connect(path, timeout=5)
+    conn.row_factory = sqlite3.Row
     try:
         conn.execute("PRAGMA journal_mode=WAL")
         conn.execute("PRAGMA busy_timeout=5000")
@@ -189,6 +190,106 @@ def get_archive_by_source(source_url):
     if not row:
         return None
     return dict(zip(('drama_name', 'local_dir', 'download_state', 'downloaded_at'), row))
+
+
+def merge_auto_download_archive(old_name, new_name, source_url, local_dir=None):
+    """Merge the legacy downloader's cloud-folder archive into candidate title."""
+    old_name = str(old_name or '').strip()
+    new_name = str(new_name or '').strip()
+    source_url = str(source_url or '').strip()
+    if not old_name or not new_name or not source_url:
+        return False
+    conn = _conn()
+    try:
+        source = conn.execute(
+            'SELECT * FROM drama_archive WHERE drama_name=? AND source_url=?',
+            (old_name, source_url)).fetchone()
+        destination = conn.execute(
+            'SELECT * FROM drama_archive WHERE drama_name=?', (new_name,)).fetchone()
+        if old_name == new_name:
+            if not source or source['download_state'] != 'done':
+                return False
+            conn.execute('''UPDATE drama_archive SET local_dir=COALESCE(?, local_dir),
+                           updated_at=CURRENT_TIMESTAMP WHERE drama_name=?''',
+                         (local_dir, new_name))
+            conn.commit()
+            return True
+        if not source or source['download_state'] != 'done' or not destination:
+            return False
+        if (destination['download_state'] != 'downloading' or
+                destination['source_url'] != source_url):
+            return False
+        conn.execute('''UPDATE drama_archive SET
+                           local_dir=COALESCE(?, ?),
+                           download_size=COALESCE(?, download_size),
+                           download_files=COALESCE(?, download_files),
+                           episode_count=COALESCE(?, episode_count),
+                           downloaded_at=COALESCE(?, downloaded_at),
+                           updated_at=CURRENT_TIMESTAMP
+                         WHERE drama_name=?''',
+                     (local_dir, source['local_dir'], source['download_size'],
+                      source['download_files'], source['episode_count'],
+                      source['downloaded_at'], new_name))
+        conn.execute('DELETE FROM drama_archive WHERE drama_name=? AND source_url=?',
+                     (old_name, source_url))
+        conn.commit()
+        return True
+    finally:
+        conn.close()
+
+
+def rename_download_archive(old_name, new_name, source_url=None):
+    """把下载器按网盘目录名写下的档案行归并到候选标题目录。
+
+    下载失败时下载器可能已按网盘文件夹名（provisional）写了独立档案行；
+    该行与候选标题行（本次下载前预留为 downloading）指同一批素材。
+    安全合并：仅当候选行属于同来源且仍处 downloading 预留态时才写入，
+    避免覆盖其它候选/正式档案。返回 True=已归并或无需处理；False=不安全，
+    保持网盘目录名档案不动（调用方会以候选标题另记失败，二者互不覆盖）。
+    """
+    old_name = str(old_name or '').strip()
+    new_name = str(new_name or '').strip()
+    source_url = str(source_url or '').strip()
+    if not old_name or not new_name:
+        return False
+    if old_name == new_name:
+        return True
+    conn = _conn()
+    try:
+        cols = _cols(conn)
+        source = conn.execute(
+            'SELECT * FROM drama_archive WHERE drama_name=?', (old_name,)).fetchone()
+        if not source:
+            return True  # 网盘目录名没有独立档案行，无需处理
+        destination = conn.execute(
+            'SELECT * FROM drama_archive WHERE drama_name=?', (new_name,)).fetchone()
+        if destination:
+            if source_url and destination['source_url'] != source_url:
+                return False  # 候选行属于其它来源，不能覆盖
+            if destination['download_state'] != 'downloading':
+                return False  # 候选行已是终态/正式态，不动它
+            # 把网盘行的状态信息带到候选行（候选行保留自己预留的 rating/category 等）。
+            merge_cols = ('download_state', 'download_error', 'download_size',
+                          'download_files', 'episode_count', 'downloaded_at', 'local_dir')
+            sets = [(c, source[c]) for c in merge_cols
+                    if c in cols and source[c] is not None]
+            if not sets:
+                return False
+            for col, val in sets:
+                conn.execute(
+                    'UPDATE drama_archive SET %s=?, updated_at=CURRENT_TIMESTAMP '
+                    'WHERE drama_name=?' % col, (val, new_name))
+            conn.execute('DELETE FROM drama_archive WHERE drama_name=?', (old_name,))
+            conn.commit()
+            return True
+        # 候选标题行不存在：网盘行整体改名（保 source_url 防重复）。
+        conn.execute(
+            'UPDATE drama_archive SET drama_name=?, updated_at=CURRENT_TIMESTAMP '
+            'WHERE drama_name=?', (new_name, old_name))
+        conn.commit()
+        return True
+    finally:
+        conn.close()
 
 
 def should_download(drama_name, local_dir, source_url=None):

@@ -22,7 +22,7 @@ import archive  # noqa: E402
 
 DL_BASE = r'E:\短剧素材'
 OUTPUT_BASE = r'D:\短剧工作区\output'
-CSV_PATH = r'D:\短剧工坊\素材\精选下载列表.csv'
+CSV_PATH = r'D:\短剧工坊\素材\候选库\候选库.csv'
 
 
 def scan_downloads():
@@ -109,7 +109,9 @@ def load_csv_sources():
         if i_cat is not None and i_cat < len(row) and row[i_cat].strip():
             item['category'] = row[i_cat].strip()
         if item:
-            result[name] = item
+            # 空字段回填仅适用于已处理剧；CSV 不覆盖档案内已有元数据。
+            old = result.get(name, {})
+            result[name] = {**old, **{k: v for k, v in item.items() if v}}
     return result
 
 
@@ -129,7 +131,11 @@ def main():
     processed = set(downloads) | set(slices)
     for name, flds in csv_src.items():
         if name in processed:
-            archive.upsert_archive(name, **flds)
+            row = archive.get_archive(name) or {}
+            missing = {key: value for key, value in flds.items()
+                       if value and not row.get(key)}
+            if missing:
+                archive.upsert_archive(name, **missing)
 
     total = archive.search_archive(limit=1000)
     print(f'回填完成：下载 {len(downloads)} 剧 + 切片 {len(slices)} 剧 + CSV 来源匹配 {sum(1 for n in csv_src if n in processed)} 剧')

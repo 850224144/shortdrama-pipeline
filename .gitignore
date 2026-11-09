@@ -52,3 +52,6 @@ webapp/upload_records.db
 webapp/upload_records.db-wal
 webapp/upload_records.db-shm
 test_upload_probe.mp4
+
+# 候选库 CSV 导入快照（运行时数据）
+data/candidate_imports/
