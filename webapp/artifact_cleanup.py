@@ -22,6 +22,7 @@
   - 其他批次或账号仍引用同一素材时禁止删除。
 """
 import os
+import re
 import json
 import time
 import shutil
@@ -818,6 +819,163 @@ class ArtifactCleanup:
                      job['batch_id'], job['job_type'], job['target_path']))
         except Exception as e:
             logger.debug(f'更新清理任务状态失败: {e}')
+
+    # ── 一键删除已上传 ──────────────────────────────────────
+    def _scan_drama_versions(self, drama_dir):
+        """扫描剧目录，返回 (present_versions, unparsed, stuck_tmp)。
+
+        present_versions: 匹配 `_N_` 的 mp4 版本集合（排除文件名含 'test'）。
+        unparsed: 存在但版本号解析失败的 mp4 文件列表。
+        stuck_tmp: 仍卡在 .mp4.tmp 的文件列表。
+        """
+        present, unparsed, stuck = set(), [], []
+        if not os.path.isdir(drama_dir):
+            return present, unparsed, stuck
+        for file in os.listdir(drama_dir):
+            lower = file.lower()
+            if lower.endswith('.mp4.tmp'):
+                stuck.append(file)
+                continue
+            if not lower.endswith('.mp4') or 'test' in lower:
+                continue
+            m = re.search(r'_(\d+)_', file)
+            if m:
+                present.add(int(m.group(1)))
+            else:
+                unparsed.append(file)
+        return present, unparsed, stuck
+
+    def _drama_fully_uploaded_job(self, batch_id, account, drama, group):
+        """整剧已上传完成 → 返回整目录回收 job（job_type='drama_output'）；否则 None。
+
+        判定：该剧有 ≥1 条 completed 记录，且目录内每个现存 mp4 版本都已上传，
+        且无未解析 mp4、无卡 .mp4.tmp。edl_config 无对应 mp4 的版本视为已废弃
+        规划，不阻止整目录删除（mp4 才是交付物；edl_config 可由切剧重新生成，
+        且整目录移入的是可恢复的回收站）。
+
+        另：若其他批次仍有 pending/uploading 记录引用同一成品目录，则拒绝
+        整目录删除（回退逐文件），防止过早移走仍在排队的目录。
+        """
+        completed_versions = {rec.get('version') for rec in group}
+        if not completed_versions:
+            return None
+        video_path = next((r.get('video_path') for r in group if r.get('video_path')), '')
+        if not video_path:
+            return None
+        drama_dir = os.path.dirname(video_path)
+        ok, err = self._validate_output_dir(drama_dir)
+        if not ok:
+            return None
+        present, unparsed, stuck = self._scan_drama_versions(drama_dir)
+        if unparsed or stuck:
+            return None
+        if not present.issubset(completed_versions):
+            return None
+        ref = self._other_references_output(drama_dir, None, None)
+        if ref:
+            return None
+        rp = self._build_recycle_path(batch_id, account, drama,
+                                      os.path.basename(drama_dir), is_dir=True)
+        if not rp:
+            return None
+        return {
+            'batch_id': batch_id,
+            'account': account,
+            'drama_name': drama,
+            'job_type': 'drama_output',
+            'version': None,
+            'target_path': drama_dir,
+            'recycle_path': rp,
+            'strategy': STRATEGY_RECYCLE,
+        }
+
+    def _recycle_version_file(self, rec, batch_id):
+        """逐文件回收单个已上传成品（部分上传剧的回退路径，保持原行为）。"""
+        target = (rec.get('video_path') or '').strip()
+        drama = rec.get('drama_name')
+        version = rec.get('version')
+        if not target:
+            return {'status': 'skipped', 'drama': drama, 'version': version,
+                    'reason': '无 video_path'}
+        ok, err = self._validate_file_under_output(target)
+        if not ok:
+            return {'status': 'skipped', 'drama': drama, 'version': version,
+                    'reason': f'路径越界: {err}'}
+        if not os.path.exists(target):
+            return {'status': 'skipped', 'drama': drama, 'version': version,
+                    'reason': '目标文件不存在'}
+        job = {
+            'batch_id': batch_id,
+            'account': rec.get('account'),
+            'drama_name': drama,
+            'job_type': 'version',
+            'version': version,
+            'target_path': target,
+            'strategy': STRATEGY_RECYCLE,
+        }
+        rp = self._build_recycle_path(batch_id, rec.get('account'), drama,
+                                      os.path.basename(target))
+        if not rp:
+            return {'status': 'failed', 'drama': drama, 'version': version,
+                    'reason': '回收路径非法'}
+        job['recycle_path'] = rp
+        res = self._execute_job(job)
+        res['drama'] = drama
+        res['version'] = version
+        return res
+
+    def recycle_uploaded(self, records: List[Dict], batch_id: str = None) -> Dict:
+        """一键删除「已上传」成品：把已完成上传记录对应的成品/剧目录移入回收站。
+
+        非永久删除（回收站可恢复），与自动清理同一套 manifest+移动机制。
+        仅回收状态为 completed 的记录；路径安全校验失败 / 文件缺失则跳过，
+        绝不触碰未上传文件。records 每项需含：
+          drama_name, version, account, video_path
+
+        按 (account, drama_name) 分组：整剧已上传完成 → 整目录回收
+        （job_type='drama_output'，连 edl_config/covers/报告一起移走）；
+        部分上传 → 只回收已上传的成品文件（目录保留，仍有未上传版本）。
+        返回 {status, batch_id, moved, dirs_moved, files_moved, skipped, failed, results}。
+        """
+        batch_id = batch_id or f'delete_uploaded_{datetime.now().strftime("%Y%m%d_%H%M%S")}'
+        results = []
+        groups = {}
+        for rec in records or []:
+            key = (rec.get('account'), rec.get('drama_name'))
+            groups.setdefault(key, []).append(rec)
+
+        for (account, drama), group in groups.items():
+            dir_job = self._drama_fully_uploaded_job(batch_id, account, drama, group)
+            if dir_job is not None:
+                if not os.path.exists(dir_job['target_path']):
+                    results.append({'status': 'skipped', 'drama': drama, 'version': None,
+                                    'dir': True, 'reason': '剧目录不存在'})
+                    continue
+                res = self._execute_job(dir_job)
+                res['drama'] = drama
+                res['version'] = None
+                res['dir'] = True
+                results.append(res)
+            else:
+                for rec in group:
+                    results.append(self._recycle_version_file(rec, batch_id))
+
+        moved = sum(1 for r in results if r['status'] == 'moved')
+        failed = sum(1 for r in results if r['status'] == 'failed')
+        skipped = sum(1 for r in results if r['status'] == 'skipped')
+        dirs_moved = sum(1 for r in results if r['status'] == 'moved' and r.get('dir'))
+        files_moved = moved - dirs_moved
+        if moved and not failed:
+            overall = 'success'
+        elif moved and failed:
+            overall = 'partial'
+        elif failed:
+            overall = 'failed'
+        else:
+            overall = 'success'  # 全部跳过（无已上传文件）也算成功，无可删
+        return {'status': overall, 'batch_id': batch_id, 'moved': moved,
+                'dirs_moved': dirs_moved, 'files_moved': files_moved,
+                'skipped': skipped, 'failed': failed, 'results': results}
 
     # ── 查询 ──────────────────────────────────────────────────
     def list_startup_cleanup_batches(self) -> List[str]:

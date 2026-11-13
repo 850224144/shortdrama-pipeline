@@ -298,5 +298,58 @@ class CleanupTestCase(unittest.TestCase):
         self.assertTrue(os.path.exists(os.path.join(d['out_dir'], '测试剧_1_逆袭_去重版.mp4')))
 
 
+    def test_recycle_uploaded_whole_dir_when_fully_uploaded(self):
+        """一键删除已上传：整剧全部版本 completed → 整目录回收（含 edl/封面/报告）。
+
+        回归：原实现只移 mp4 文件，剧目录（edl_config/covers/报告）残留导致
+        可上传列表仍显示该剧（edl_pending）。整剧已传完 → 整目录一个
+        drama_output 任务移入回收站，且 manifest 可恢复。
+        """
+        d = self._make_drama('batch_fulldel', versions=(1, 2),
+                             record_status=('completed', 'completed'))
+        out_dir = d['out_dir']
+        with open(os.path.join(out_dir, '测试剧_交付报告.md'), 'w',
+                  encoding='utf-8') as f:
+            f.write('报告')
+        conn = sqlite3.connect(self.cleanup.db_path)
+        conn.row_factory = sqlite3.Row
+        rows = conn.execute(
+            "SELECT * FROM upload_records WHERE batch_id='batch_fulldel' "
+            "AND status='completed'").fetchall()
+        conn.close()
+        records = [{'drama_name': r['drama_name'], 'version': r['version'],
+                    'account': r['account'], 'video_path': r['video_path']}
+                   for r in rows]
+        res = self.cleanup.recycle_uploaded(records)
+        self.assertEqual(res['dirs_moved'], 1, res)
+        self.assertEqual(res['files_moved'], 0, res)
+        self.assertFalse(os.path.exists(out_dir), '整目录应移入回收站')
+        man = json.load(open(res['results'][0]['manifest'], encoding='utf-8'))
+        self.assertEqual(man['job_type'], 'drama_output')
+        self.assertTrue(os.path.exists(man['recycle_path']))
+
+    def test_recycle_uploaded_partial_keeps_dir(self):
+        """一键删除已上传：部分上传 → 只移已传文件，目录与未传版本保留。"""
+        d = self._make_drama('batch_partdel', versions=(1, 2),
+                             record_status=('completed', 'failed'))
+        out_dir = d['out_dir']
+        conn = sqlite3.connect(self.cleanup.db_path)
+        conn.row_factory = sqlite3.Row
+        rows = conn.execute(
+            "SELECT * FROM upload_records WHERE batch_id='batch_partdel' "
+            "AND status='completed'").fetchall()
+        conn.close()
+        records = [{'drama_name': r['drama_name'], 'version': r['version'],
+                    'account': r['account'], 'video_path': r['video_path']}
+                   for r in rows]
+        res = self.cleanup.recycle_uploaded(records)
+        self.assertEqual(res['dirs_moved'], 0, res)
+        self.assertEqual(res['files_moved'], 1, res)
+        self.assertTrue(os.path.isdir(out_dir), '部分上传目录应保留')
+        self.assertTrue(
+            os.path.exists(os.path.join(out_dir, '测试剧_2_逆袭_去重版.mp4')),
+            '未传 v2 应保留')
+
+
 if __name__ == '__main__':
     unittest.main(verbosity=2)

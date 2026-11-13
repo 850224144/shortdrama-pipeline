@@ -1328,13 +1328,19 @@
                         <button class="btn btn-secondary" onclick="loginAccount()">🔓 登录账号</button>
                         <button class="btn btn-secondary" onclick="refreshDramas()">🔄 刷新剧列表</button>
                         <button class="btn btn-primary" id="startUploadBtn" onclick="startUpload()">▶️ 开始上传</button>
+                        <button class="btn btn-success" id="resumeUploadBtn" onclick="resumeUpload()" style="display:none;" title="处理待补传队列（服务重启后残留的 pending 任务），不重复上传">▶️ 继续上传</button>
                         <button class="btn btn-secondary" id="pauseUploadBtn" onclick="pauseUpload()" disabled>⏸️ 暂停</button>
                         <button class="btn btn-danger" id="stopUploadBtn" onclick="stopUpload()" disabled>⏹️ 停止</button>
                         <button class="btn btn-secondary" onclick="clearUploadQueue()">🧹 清除队列</button>
+                        <button class="btn btn-danger" id="deleteUploadedBtn" onclick="deleteUploaded()">🗑️ 一键删除已上传</button>
                         <button class="btn btn-success" id="openDraftBtn" onclick="openDraftBox()">📋 打开草稿箱</button>
                         <label>
                             <input type="checkbox" id="autoCleanup">
                             上传成功后自动清理（移入回收站）
+                        </label>
+                        <label>
+                            <input type="checkbox" id="scheduledPublish" checked>
+                            ⏰ 定时发表（按计划时间发表，而非保存草稿）
                         </label>
                     </div>
 
@@ -2523,12 +2529,17 @@
                     const stuckBadge = drama.stuck_tmp_count > 0
                         ? `<span style="color:var(--status-error);margin-left:var(--spacing-xs);font-size:0.75rem;">${drama.stuck_tmp_count}个卡临时</span>`
                         : '';
+                    const uploadedBadge = drama.all_uploaded
+                        ? `<span style="color:var(--status-success);margin-left:var(--spacing-xs);font-size:0.75rem;">✅ 已上传</span>`
+                        : (drama.uploaded_count > 0
+                            ? `<span style="color:var(--accent-amber);margin-left:var(--spacing-xs);font-size:0.75rem;">⚠️ ${drama.uploaded_count}/${drama.version_count} 已传</span>`
+                            : '');
                     return `
                     <div class="drama-item">
                         <input type="checkbox" class="upload-drama-cb" data-name="${name}">
                         <span class="drama-name">${name}</span>
                         <span class="version-count">${drama.version_count}个版本</span>
-                        ${planBadge}${pendingBadge}${stuckBadge}
+                        ${planBadge}${pendingBadge}${stuckBadge}${uploadedBadge}
                     </div>`;
                 }).join('');
 
@@ -2696,17 +2707,28 @@
                         return;
                     }
                 }
-                showNotification(`没有可上传的视频文件 ${detailMsg}`.trim(), 'error');
+                const queuedN = dups.filter(d => !d.reason).length;
+                const doneN = dups.length - queuedN;
+                let noUploadMsg;
+                if (doneN > 0 && queuedN > 0) {
+                    noUploadMsg = `所选 ${dups.length} 个均已上传或已在待上传队列，无需重复上传。其中 ${doneN} 个已上传完成、${queuedN} 个待补传：请在微信视频号登录后点「继续上传」。`;
+                } else if (doneN > 0) {
+                    noUploadMsg = `所选 ${dups.length} 个均已上传完成，无需重复上传。`;
+                } else {
+                    noUploadMsg = `没有可上传的视频文件 ${detailMsg}`.trim();
+                }
+                showNotification(noUploadMsg, 'error');
                 return;
             }
 
             const autoCleanupEnabled = document.getElementById('autoCleanup')?.checked || false;
+            const scheduledEnabled = document.getElementById('scheduledPublish')?.checked || false;
 
             try {
                 const startResponse = await fetch('/api/upload/start', {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ auto_cleanup: autoCleanupEnabled })
+                    body: JSON.stringify({ auto_cleanup: autoCleanupEnabled, scheduled: scheduledEnabled })
                 });
                 const startResult = await startResponse.json();
 
@@ -2764,6 +2786,38 @@
                 updateUploadUI();
             } else {
                 showNotification('清除失败: ' + result.error, 'error');
+            }
+        }
+
+        let deleteUploadedBusy = false;
+        async function deleteUploaded() {
+            if (deleteUploadedBusy) return;
+            const account = document.getElementById('uploadAccount').value;
+            if (!confirm(account
+                ? `确定把【${account}】已上传的成品移入回收站吗？\n已全部上传的短剧目录（含 EDL/封面/报告）会一并移入回收站。`
+                : '确定把所有账号已上传的成品移入回收站吗？\n已全部上传的短剧目录（含 EDL/封面/报告）会一并移入回收站。')) return;
+
+            deleteUploadedBusy = true;
+            const btn = document.getElementById('deleteUploadedBtn');
+            if (btn) { btn.disabled = true; btn.textContent = '⏳ 正在删除…'; }
+            try {
+                const response = await fetch('/api/upload/delete-uploaded', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify(account ? { account } : {})
+                });
+                const result = await response.json();
+                if (result.status === 'success') {
+                    showNotification(result.message || `已删除${result.moved}个已上传成品`, 'success');
+                    refreshDramas();
+                } else {
+                    showNotification('删除失败: ' + (result.error || '未知错误'), 'error');
+                }
+            } catch (error) {
+                showNotification('删除失败: ' + error.message, 'error');
+            } finally {
+                deleteUploadedBusy = false;
+                if (btn) { btn.disabled = false; btn.textContent = '🗑️ 一键删除已上传'; }
             }
         }
 
@@ -2849,11 +2903,13 @@
                 const startBtn = document.getElementById('startUploadBtn');
                 const pauseBtn = document.getElementById('pauseUploadBtn');
                 const stopBtn = document.getElementById('stopUploadBtn');
+                const resumeBtn = document.getElementById('resumeUploadBtn');
 
                 if (status.uploading) {
                     startBtn.disabled = true;
                     pauseBtn.disabled = !status.paused;
                     stopBtn.disabled = false;
+                    resumeBtn.style.display = 'none';  // 上传中隐藏「继续上传」
 
                     if (status.paused) {
                         pauseBtn.textContent = '▶️ 恢复';
@@ -2868,12 +2924,16 @@
                     stopBtn.disabled = true;
                     pauseBtn.textContent = '⏸️ 暂停';
                     pauseBtn.onclick = pauseUpload;
+                    // 有 pending 待补传 → 显示「继续上传」（补传入口，勿走选文件）
+                    resumeBtn.style.display = (status.queue_length > 0) ? '' : 'none';
                 }
 
                 updateDraftBtn();
 
                 const queueContainer = document.getElementById('uploadQueue');
-                const allTasks = [...status.queue, ...status.completed, ...status.failed];
+                const pendingTasks = status.queue || [];
+                const completedTasks = status.completed || [];
+                const failedTasks = status.failed || [];
 
                 const activeEl = document.activeElement;
                 const editingRole = (activeEl && activeEl.dataset &&
@@ -2882,34 +2942,53 @@
                 const editingTaskId = editingRole ? activeEl.dataset.id : null;
                 const caretPos = (editingRole === 'task-title') ? activeEl.selectionStart : null;
 
-                if (allTasks.length === 0) {
+                const renderTaskItem = (task) => {
+                    const isPending = task.status === 'pending';
+                    const titleHtml = isPending
+                        ? `<input class="task-title-input" data-role="task-title" data-id="${task.id}"
+                             value="${escapeHtml(task.title || '')}" maxlength="30"
+                             onchange="updateTaskTitle(${task.id}, this.value)"
+                             title="短标题（上传前可编辑，失焦/回车生效）" />`
+                        : `<span class="task-title-static">${escapeHtml(task.title || '')}</span>`;
+                    return `
+                        <div class="queue-item">
+                            <span class="status-badge ${escapeHtml(task.status)}">${
+                                task.status === 'pending' ? '待上传' :
+                                task.status === 'uploading' ? '上传中' :
+                                task.status === 'completed' ? '已完成' : '失败'
+                            }</span>
+                            <div class="queue-info">
+                                <div>${escapeHtml(task.drama_name)} V${escapeHtml(task.version)}</div>
+                                <div style="margin-top:3px;">${titleHtml}</div>
+                                ${task.publish_time
+                                    ? `<div style="margin-top:3px;font-size:12px;color:var(--muted-foreground);">计划发表: ${escapeHtml(task.publish_time)}${task.published ? ' ✅已发表' : (task.status === 'completed' ? ' 📝草稿' : '')}</div>`
+                                    : ''}
+                                ${task.drama_id
+                                    ? `<div style="margin-top:3px;font-size:12px;color:var(--muted-foreground);">剧集ID: <code style="word-break:break-all;">${escapeHtml(task.drama_id)}</code>${task.drama_id_source === 'bound' ? '（已绑定）' : '（自动查）'}</div>`
+                                    : '<div style="margin-top:3px;font-size:12px;color:var(--muted-foreground);">剧集ID: 上传时自动查</div>'}
+                                ${task.error_message ? `<div class="queue-progress">错误: ${escapeHtml(task.error_message)}</div>` : ''}
+                            </div>
+                        </div>`;
+                };
+
+                if (pendingTasks.length === 0 && completedTasks.length === 0 && failedTasks.length === 0) {
                     queueContainer.innerHTML = '<div style="padding: var(--spacing-lg); text-align: center; color: var(--text-tertiary);">队列为空</div>';
                 } else {
-                    queueContainer.innerHTML = allTasks.map(task => {
-                        const isPending = task.status === 'pending';
-                        const titleHtml = isPending
-                            ? `<input class="task-title-input" data-role="task-title" data-id="${task.id}"
-                                 value="${escapeHtml(task.title || '')}" maxlength="30"
-                                 onchange="updateTaskTitle(${task.id}, this.value)"
-                                 title="短标题（上传前可编辑，失焦/回车生效）" />`
-                            : `<span class="task-title-static">${escapeHtml(task.title || '')}</span>`;
-                        return `
-                            <div class="queue-item">
-                                <span class="status-badge ${escapeHtml(task.status)}">${
-                                    task.status === 'pending' ? '待上传' :
-                                    task.status === 'uploading' ? '上传中' :
-                                    task.status === 'completed' ? '已完成' : '失败'
-                                }</span>
-                                <div class="queue-info">
-                                    <div>${escapeHtml(task.drama_name)} V${escapeHtml(task.version)}</div>
-                                    <div style="margin-top:3px;">${titleHtml}</div>
-                                    ${task.drama_id
-                                        ? `<div style="margin-top:3px;font-size:12px;color:var(--muted-foreground);">剧集ID: <code style="word-break:break-all;">${escapeHtml(task.drama_id)}</code>${task.drama_id_source === 'bound' ? '（已绑定）' : '（自动查）'}</div>`
-                                        : '<div style="margin-top:3px;font-size:12px;color:var(--muted-foreground);">剧集ID: 上传时自动查</div>'}
-                                    ${task.error_message ? `<div class="queue-progress">错误: ${escapeHtml(task.error_message)}</div>` : ''}
-                                </div>
-                            </div>`;
-                    }).join('');
+                    let queueHtml = '';
+                    if (pendingTasks.length > 0) {
+                        queueHtml += `<div style="margin:10px 0 4px;font-weight:600;font-size:13px;color:var(--text-secondary);">⏳ 待补传/上传中 ${pendingTasks.length} 个（点「继续上传」处理，勿重新选文件）</div>`;
+                        queueHtml += pendingTasks.map(renderTaskItem).join('');
+                    }
+                    if (failedTasks.length > 0) {
+                        queueHtml += `<div style="margin:12px 0 4px;font-weight:600;font-size:13px;color:var(--text-secondary);">❌ 失败 ${failedTasks.length} 个</div>`;
+                        queueHtml += failedTasks.map(renderTaskItem).join('');
+                    }
+                    if (completedTasks.length > 0) {
+                        queueHtml += `<details style="margin-top:8px;"><summary style="cursor:pointer;font-weight:600;font-size:13px;color:var(--text-secondary);">✅ 已完成 ${completedTasks.length} 个（点击展开）</summary>`;
+                        queueHtml += completedTasks.map(renderTaskItem).join('');
+                        queueHtml += `</details>`;
+                    }
+                    queueContainer.innerHTML = queueHtml;
                 }
 
                 if (editingTaskId && editingRole) {
@@ -2944,6 +3023,8 @@
 
             if (result.status === 'success') {
                 showNotification('上传已恢复', 'success');
+            } else if (result.login_required) {
+                showNotification(result.error || '账号未登录，请先在微信视频号登录后重试', 'error');
             } else {
                 showNotification('恢复失败: ' + result.error, 'error');
             }
@@ -2972,7 +3053,9 @@
                 document.getElementById('uploadCompletedCount').textContent = status.completed_count;
                 document.getElementById('uploadFailedCount').textContent = status.failed_count;
 
-                if (status.uploading && !uploadPollTimer) {
+                // 有 pending 待补传（服务重启后 uploading=False 但队列非空）也要启动轮询，
+                // 否则 updateUploadUI 从不运行，「继续上传」按钮和队列面板停留在初始态。
+                if ((status.uploading || status.queue_length > 0) && !uploadPollTimer) {
                     startUploadPolling();
                 }
             } catch (error) {

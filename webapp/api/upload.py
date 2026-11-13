@@ -6,6 +6,18 @@ import json
 from flask import Blueprint, request, jsonify, Response
 
 
+def _parse_bool(value, default=False):
+    """宽松布尔解析：真布尔直返；字符串按 true/1/yes 判定；其余回退默认。
+
+    （reviewer S1：原 bool(value) 对字符串 'false' 误判 True。）
+    """
+    if isinstance(value, bool):
+        return value
+    if value is None:
+        return default
+    return str(value).lower() in ('true', '1', 'yes')
+
+
 def create_upload_bp(deps):
     bp = Blueprint('upload', __name__)
     CONFIG = deps['CONFIG']
@@ -165,8 +177,10 @@ def create_upload_bp(deps):
         """开始上传"""
         try:
             data = request.get_json(force=True) or {}
-            auto_cleanup = bool(data.get('auto_cleanup', False))
-            return jsonify(upload_manager.start_upload(auto_cleanup=auto_cleanup))
+            auto_cleanup = _parse_bool(data.get('auto_cleanup', False))
+            scheduled = _parse_bool(data.get('scheduled', False))
+            return jsonify(upload_manager.start_upload(auto_cleanup=auto_cleanup,
+                                                       scheduled=scheduled))
         except Exception as e:
             return jsonify({'status': 'failed', 'error': str(e)}), 500
 
@@ -236,6 +250,12 @@ def create_upload_bp(deps):
         dramas = []
         diagnostics = []
 
+        # 已上传（completed）记录集合：(剧名, 版本, 账号)，供列表标记状态/一键删除
+        completed_set = {
+            (r['drama_name'], r['version'], r['account'])
+            for r in upload_manager.list_completed_records()
+        }
+
         if os.path.exists(output_dir):
             _order = submit_order
             for account in sorted(os.listdir(output_dir)):
@@ -276,6 +296,10 @@ def create_upload_bp(deps):
                             for name in os.listdir(drama_dir))
 
                     if versions or edl_pending or stuck_tmp or unparsed:
+                        uploaded_versions = [
+                            v for v in sorted(set(versions))
+                            if (drama, v, account) in completed_set
+                        ]
                         entry = {
                             'account': account,
                             'name': drama,
@@ -286,6 +310,10 @@ def create_upload_bp(deps):
                             'edl_pending': edl_pending,
                             'stuck_tmp_count': len(stuck_tmp),
                             'unparsed_count': len(unparsed),
+                            # 已上传（completed）标记：哪些版本已传过、是否全部已传
+                            'uploaded_versions': uploaded_versions,
+                            'uploaded_count': len(uploaded_versions),
+                            'all_uploaded': bool(versions) and len(uploaded_versions) == len(set(versions)),
                         }
                         # 仅在请求账号范围内返回；诊断信息随每项附带
                         if not account_filter or account == account_filter:
@@ -302,5 +330,36 @@ def create_upload_bp(deps):
                             })
 
         return jsonify({'dramas': dramas, 'diagnostics': diagnostics})
+
+    @bp.route('/api/upload/delete-uploaded', methods=['POST'])
+    def delete_uploaded():
+        """一键删除已上传成品：把已完成上传记录的成品文件移入回收站。
+
+        请求体：{account?: str} 可选——限定只删该账号已上传的成品；
+        不传则删除所有账号已上传的成品。仅删 status='completed' 的记录，
+        路径越界 / 文件缺失跳过，绝不触碰未上传文件。返回 moved/skipped/failed 统计。
+        """
+        try:
+            data = request.get_json(force=True) or {}
+            account = data.get('account') or None
+            records = upload_manager.list_completed_records(account=account)
+            if not records:
+                return Response(json.dumps(
+                    {'status': 'success', 'moved': 0, 'skipped': 0, 'failed': 0,
+                     'message': '没有已上传的记录可删除', 'results': []},
+                    ensure_ascii=False), mimetype='application/json')
+            result = artifact_cleanup.recycle_uploaded(records)
+            dirs = result.get('dirs_moved', 0)
+            files = result.get('files_moved', 0)
+            if dirs:
+                result['message'] = (f"已清理 {dirs} 个已上传剧目录、{files} 个已上传成品"
+                                     f"（跳过 {result['skipped']}，失败 {result['failed']}）")
+            else:
+                result['message'] = f"已删除 {files} 个已上传成品" \
+                                    f"（跳过 {result['skipped']}，失败 {result['failed']}）"
+            return Response(json.dumps(result, ensure_ascii=False), mimetype='application/json')
+        except Exception as e:
+            return Response(json.dumps({'status': 'failed', 'error': str(e)},
+                                        ensure_ascii=False), mimetype='application/json', status=500)
 
     return bp
