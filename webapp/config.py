@@ -113,11 +113,13 @@ DEFAULT_CONFIG = {
     },
 
     # 上传计划发表时间：入队时按版本号自动计算（当天+day_offset 日，times 槽位循环）。
-    # V1→times[0]，V2→times[1]…，同批多版本错峰发表；仅计算/记录/展示，不自动定时发表。
+    # V1→times[0]，V2→times[1]…，同批多版本错峰发表。scheduled=True 时按此时间
+    # 在发布页选「定时」→点「发表」；scheduled=False 时仅记录/展示（保存草稿）。
     'upload': {
         'publish_schedule': {
             'day_offset': 1,   # 发表日期 = 当天 + 1 天
-            'times': ['06:00', '09:00', '12:00', '15:00', '18:00', '21:00'],  # 错峰槽位循环
+            # 用户固定偏好：每 2 小时一档，9 档按版本号循环（8 版批次落前 8 档）
+            'times': ['07:00', '09:00', '11:00', '13:00', '15:00', '17:00', '19:00', '21:00', '23:00'],
         },
     },
 
@@ -213,3 +215,37 @@ def reset_config(yaml_path=None):
 
 # 模块级单例，兼容现有 ``from config import CONFIG`` / ``CONFIG['x']`` / ``CONFIG.get(...)``。
 CONFIG = get_config()
+
+
+def get_publish_schedule():
+    """定时发表槽位配置（运行时 ``CONFIG`` 优先，缺失/异常回退 ``DEFAULT_CONFIG``）。
+
+    L4：入队算点 ``upload_manager._compute_publish_time`` 读运行时 ``CONFIG``，
+    而过期顺延 ``wechat_uploader._ensure_future_publish_time`` 曾读 ``DEFAULT_CONFIG``；
+    运行时改过槽位/档数就会得到两套时间轴。统一从本函数取，消除双源。
+
+    Returns:
+        dict: ``{'day_offset': int, 'times': [str, ...]}``，各键均已校正为合法值
+        （day_offset 至少 1，times 非空）。
+    """
+    default = {}
+    try:
+        default = (DEFAULT_CONFIG.get('upload') or {}).get('publish_schedule') or {}
+    except Exception:
+        default = {}
+    try:
+        sched = (CONFIG.get('upload') or {}).get('publish_schedule') or {}
+    except Exception:
+        sched = {}
+    sched = sched or default or {}
+    try:
+        day_offset = int(sched.get('day_offset') or default.get('day_offset') or 1)
+    except (TypeError, ValueError):
+        day_offset = 1
+    if day_offset < 1:
+        day_offset = 1
+    times = [str(t).strip() for t in (sched.get('times') or default.get('times') or [])
+             if str(t).strip()]
+    if not times:
+        times = ['21:00']
+    return {'day_offset': day_offset, 'times': times}

@@ -67,6 +67,7 @@ class UploadManager(BaseQueueManager):
         # 标记该次运行被人工停止。旧 worker 结束时用自己运行的 epoch 判定，
         # 不会读到新运行的标志（并发窗口 P1 修复）。
         self._run_auto_cleanup = False
+        self._scheduled_publish = False
         self._stopped = False
         self._cleanup_callback = None
         self._run_epoch = 0
@@ -128,14 +129,23 @@ class UploadManager(BaseQueueManager):
         if client is None:
             return {'drama_id': None, 'source': 'none',
                     'matched_name': None, 'error': None}
-        try:
-            drama_id, source, matched_name, error = client.resolve(
-                task.get('drama_name') or '')
-            return {'drama_id': drama_id, 'source': source,
-                    'matched_name': matched_name, 'error': error}
-        except Exception as exc:
-            return {'drama_id': None, 'source': f'error:{exc}',
-                    'matched_name': None, 'error': str(exc)}
+        name = task.get('drama_name') or ''
+        # 网络/上游瞬时失败重试（退避 2s/4s/6s），避免把「能查到的剧集 ID」因
+        # 抖动误判成查不到而跳过填链接；真查不到（source='none'）不重试。
+        last = {'drama_id': None, 'source': 'none', 'matched_name': None, 'error': None}
+        for attempt in range(4):
+            try:
+                drama_id, source, matched_name, error = client.resolve(name)
+                last = {'drama_id': drama_id, 'source': source,
+                        'matched_name': matched_name, 'error': error}
+                if source != 'error':
+                    break
+            except Exception as exc:
+                last = {'drama_id': None, 'source': f'error:{exc}',
+                        'matched_name': None, 'error': str(exc)}
+            if attempt < 3:
+                time.sleep(2 * (attempt + 1))
+        return last
 
     def _restore_unfinished_queue(self):
         """从 upload_records 恢复 pending/uploading 任务。"""
@@ -231,6 +241,7 @@ class UploadManager(BaseQueueManager):
             'publish_time': 'TEXT',  # 计划发表时间（当天+day_offset 日，槽位按版本号循环）
             'drama_id': 'TEXT',  # 剧集 ID（event/... 格式，保存草稿前填剧集链接用）
             'drama_id_source': "TEXT DEFAULT 'none'",  # bound|autolookup|none|error
+            'published': 'INTEGER DEFAULT 0',  # 定时发表（选定时→点发表）成功标志
         }
         existing_cols = {row[1] for row in cursor.execute('PRAGMA table_info(upload_records)').fetchall()}
         for col, ddl in new_columns.items():
@@ -258,6 +269,7 @@ class UploadManager(BaseQueueManager):
                 cover_failed_count INTEGER DEFAULT 0,
                 status TEXT DEFAULT 'running',
                 auto_cleanup INTEGER DEFAULT 0,   -- 批次自然结束后是否由后端触发自动清理
+                scheduled INTEGER DEFAULT 0,      -- 本批次是否定时发表（False=保存草稿）
                 cleanup_status TEXT,              -- 清理整体状态：success/partial/failed
                 cleanup_error TEXT,
                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
@@ -265,11 +277,19 @@ class UploadManager(BaseQueueManager):
             )
         ''')
         
-        # 迁移：为既有批次表补充 auto_cleanup / cleanup_status 列（幂等）
+        # 迁移：为既有批次表补充 auto_cleanup / scheduled / cleanup_status 列（幂等）
         batch_cols = {row[1] for row in cursor.execute('PRAGMA table_info(upload_batches)').fetchall()}
         if 'auto_cleanup' not in batch_cols:
             try:
                 cursor.execute('ALTER TABLE upload_batches ADD COLUMN auto_cleanup INTEGER DEFAULT 0')
+            except sqlite3.OperationalError as e:
+                if 'duplicate column' not in str(e).lower():
+                    raise
+        if 'scheduled' not in batch_cols:
+            # L3：定时发表模式随批次落库，resume/重启后从批次行恢复，
+            # 不依赖 upload_manager 单例的内存实例属性（否则跨批次串号）。
+            try:
+                cursor.execute('ALTER TABLE upload_batches ADD COLUMN scheduled INTEGER DEFAULT 0')
             except sqlite3.OperationalError as e:
                 if 'duplicate column' not in str(e).lower():
                     raise
@@ -407,21 +427,39 @@ class UploadManager(BaseQueueManager):
         except Exception:
             pass
 
+    def _sync_drama_archive(self, task, outcome):
+        """上传完成后联动剧级档案（drama_archive）。
+
+        手动上传的剧可能从未进入剧级档案（无 download/slice 记录），
+        上传成功/失败时 upsert 确保行存在，让剧级档案能看到该剧及其上传状态。
+        upload_state 由 archive.aggregate_upload_state 查询时实时聚合（无 upload_state 列）。
+        outcome: 'done'（上传成功）/ 'failed'（上传失败）——仅写日志，状态来自聚合。
+        """
+        try:
+            from archive import upsert_archive
+            upsert_archive(
+                task['drama_name'],
+                account=task.get('account'),
+                local_dir=task.get('output_dir') or task.get('source_dir'))
+        except Exception as e:
+            self._log('warning', f'剧级档案联动失败：{task["drama_name"]} - {e}')
+
     @staticmethod
     def _compute_publish_time(version) -> str:
         """按版本号计算计划发表时间：当天+day_offset 日的 times 槽位循环。
 
         槽位按 (版本号-1) % len(times) 取，V1→times[0]，V2→times[1]…循环，
-        使同批多版本错峰发表。CONFIG['upload']['publish_schedule'] 可调；
-        缺省/配置异常回退 当天+1 日、09:00/12:00/15:00/18:00/21:00 五档。
+        使同批多版本错峰发表。槽位统一取自 ``config.get_publish_schedule()``
+        （运行时 CONFIG 优先），与过期顺延 ``_ensure_future_publish_time`` 同源，
+        避免 L4 双配置口径；配置异常回退 当天+1 日、21:00。
         """
         try:
-            cfg = CONFIG.get('upload', {}) or {}
-            sched = cfg.get('publish_schedule') or {}
+            from config import get_publish_schedule
+            sched = get_publish_schedule()
         except Exception:
             sched = {}
-        day_offset = int(sched.get('day_offset', 1) or 1)
-        times = sched.get('times') or ['06:00', '09:00', '12:00', '15:00', '18:00', '21:00']
+        day_offset = int(sched.get('day_offset') or 1)
+        times = sched.get('times') or ['21:00']
         try:
             slot = times[(int(version) - 1) % len(times)]
         except Exception:
@@ -485,12 +523,19 @@ class UploadManager(BaseQueueManager):
             with _connect_db(self.db_path) as conn:
                 cursor = conn.cursor()
                 cursor.execute('''
-                    SELECT id FROM upload_records 
-                    WHERE drama_name=? AND version=? AND account=? AND status IN ('pending', 'uploading')
+                    SELECT id, status FROM upload_records 
+                    WHERE drama_name=? AND version=? AND account=? AND status IN ('pending', 'uploading', 'completed')
                 ''', (drama_name, version, _account))
                 existing = cursor.fetchone()
             
             if existing:
+                if existing[1] == 'completed':
+                    # 2026-11-10 人鱼赴归潮 V5 实测：同剧同版本同账号已上传完成，
+                    # 因指纹表无该行 + uploaded 标志失效，纯指纹查重漏拦。
+                    # 精确查重（不依赖指纹）直接拒绝。
+                    return {'status': 'failed',
+                            'error': f'[{_account}] {drama_name} V{version} 已上传完成'
+                                     f'（记录 #{existing[0]}），拒绝重复上传'}
                 return {'status': 'failed', 'error': f'[{_account}] V{version}已在队列中'}
 
             # R9 内容级查重：同账号已传/已入队内容相似成片 → 拒绝（防平台判重）
@@ -591,17 +636,24 @@ class UploadManager(BaseQueueManager):
                                     'version': version, 'video_path': video_path})
                     continue
 
-                # 重复检查：同账号同剧同版本已在 pending/uploading
+                # 重复检查：同账号同剧同版本已在 pending/uploading 或已上传完成
                 with _connect_db(self.db_path) as conn:
                     cur = conn.cursor()
                     cur.execute('''
-                        SELECT id FROM upload_records
+                        SELECT id, status FROM upload_records
                         WHERE drama_name=? AND version=? AND account=?
-                          AND status IN ('pending', 'uploading')
+                          AND status IN ('pending', 'uploading', 'completed')
                     ''', (drama, version, account))
-                    if cur.fetchone():
-                        duplicates.append({'index': idx, 'drama_name': drama,
-                                           'version': version, 'account': account})
+                    _dup = cur.fetchone()
+                    if _dup:
+                        if _dup[1] == 'completed':
+                            duplicates.append({'index': idx, 'drama_name': drama,
+                                               'version': version, 'account': account,
+                                               'reason': 'already_uploaded',
+                                               'conflict': f'已上传完成（记录 #{_dup[0]}）'})
+                        else:
+                            duplicates.append({'index': idx, 'drama_name': drama,
+                                               'version': version, 'account': account})
                         continue
 
                 # R9 内容级查重：同账号已传/已入队内容相似 → 拒收（宁可少传不可封号）
@@ -711,10 +763,75 @@ class UploadManager(BaseQueueManager):
                     'rejected': rejected, 'ids': ids,
                     'accepted_details': accepted_details}
     
-    def start_upload(self, auto_cleanup: bool = False):
+    def _batch_ids_in_queue(self):
+        """队列里出现的批次号（去重排序）。"""
+        return sorted({t.get('batch_id') for t in self.queue if t.get('batch_id')})
+
+    def _persist_run_mode(self):
+        """把本次运行的定时/清理模式写到批次行（review L3，供 resume/重启恢复）。
+
+        `_scheduled_publish` / `_run_auto_cleanup` 是实例属性，而
+        `upload_manager` 是模块级单例：resume 入口不带模式参数，恢复 worker 若只
+        看内存属性就会沿用上一批次的模式。落库到 upload_batches（一批次一次运行）
+        后，resume 从批次行恢复即可。返回更新的批次行数。
+        """
+        batch_ids = self._batch_ids_in_queue()
+        if not batch_ids:
+            self._log('warning', '队列无批次号，本次运行模式未落库（resume 将回退保存草稿）')
+            return 0
+        try:
+            with _connect_db(self.db_path) as conn:
+                marks = ','.join('?' for _ in batch_ids)
+                cur = conn.execute(
+                    f'UPDATE upload_batches SET scheduled=?, auto_cleanup=? '
+                    f'WHERE batch_id IN ({marks})',
+                    [1 if self._scheduled_publish else 0,
+                     1 if self._run_auto_cleanup else 0] + batch_ids)
+                conn.commit()
+                return cur.rowcount
+        except Exception as e:
+            self._log('warning', f'运行模式落库失败（resume 将回退保存草稿）: {e}')
+            return 0
+
+    def _restore_run_mode(self):
+        """从队列首批次行恢复定时/清理模式（review L3：恢复即延续原批次）。
+
+        批次行缺失（旧库未落库）时保守回退「保存草稿 + 不自动清理」并留 WARN：
+        误按定时发表发布未确认内容、或误触发清理删文件，代价都高于多存一份草稿。
+        绝不沿用单例里上一批次的内存标志——那正是跨批次串号的根因。
+        """
+        batch_ids = self._batch_ids_in_queue()
+        head = batch_ids[0] if batch_ids else None
+        scheduled = auto_cleanup = None
+        if head:
+            try:
+                with _connect_db(self.db_path) as conn:
+                    conn.row_factory = sqlite3.Row
+                    row = conn.execute(
+                        'SELECT scheduled, auto_cleanup FROM upload_batches '
+                        'WHERE batch_id=?', (head,)).fetchone()
+                if row is not None:
+                    scheduled = bool(row['scheduled'])
+                    auto_cleanup = bool(row['auto_cleanup'])
+            except Exception as e:
+                self._log('warning', f'读取批次运行模式失败: {e}')
+        if scheduled is None:
+            self._log('warning',
+                      f'批次 {head} 无模式记录，恢复上传回退为保存草稿/不自动清理')
+        self._scheduled_publish = bool(scheduled)
+        self._run_auto_cleanup = bool(auto_cleanup)
+        self._log('info',
+                  f'恢复上传：批次 {head} 模式 scheduled={self._scheduled_publish} '
+                  f'auto_cleanup={self._run_auto_cleanup}')
+        if len(batch_ids) > 1:
+            self._log('warning',
+                      f'恢复会话含多批次 {batch_ids}，按首批次 {head} 的模式运行')
+
+    def start_upload(self, auto_cleanup: bool = False, scheduled: bool = False):
         """开始上传（先预检登录，全部有效才真正开传）。
 
         auto_cleanup: 本次运行是否启用后端自动清理（批次自然结束后触发）。
+        scheduled: True=定时发表（选定时→点发表）；False=保存草稿（默认）。
         """
         with self.lock:
             if self.uploading or self.prechecking:
@@ -731,6 +848,9 @@ class UploadManager(BaseQueueManager):
             self.paused = False
             self._stopped = False
             self._run_auto_cleanup = bool(auto_cleanup)
+            self._scheduled_publish = bool(scheduled)
+            # L3：模式随批次落库，resume/重启后从批次行恢复（不依赖单例内存属性）
+            self._persist_run_mode()
             self._run_epoch += 1
             self.current_account = self.queue[0].get('account')
 
@@ -753,7 +873,9 @@ class UploadManager(BaseQueueManager):
             return {'status': 'success'}
     
     def resume_upload(self):
-        """恢复上传"""
+        """恢复上传。启动 worker 前先同步检测账号登录态：
+        未登录 → 返回 login_required（**不标 failed**，保持 pending 等登录后重试）；
+        已登录 → 启动 worker 处理队列里已有的 pending（不重新选文件，天然不重复上传）。"""
         with self.lock:
             if self.uploading:
                 self.paused = False
@@ -765,15 +887,41 @@ class UploadManager(BaseQueueManager):
                 return {'status': 'failed', 'error': '上传 worker 仍在运行，请稍后再试'}
             if not self.queue:
                 return {'status': 'failed', 'error': '队列为空'}
+            accounts = []
+            for t in self.queue:
+                if t.get('account') and t.get('account') not in accounts:
+                    accounts.append(t.get('account'))
+        # 锁外做登录检测（开浏览器较慢，避免长持 self.lock 阻塞队列操作）
+        for acct in accounts:
+            u = WeChatChannelsUploader(acct)
+            try:
+                if not u.check_login():
+                    return {'status': 'failed',
+                            'error': f'账号 {acct} 未登录，请先在微信视频号登录后重试',
+                            'login_required': True}
+            except Exception as e:
+                return {'status': 'failed',
+                        'error': f'账号 {acct} 登录检测失败：{e}',
+                        'login_required': True}
+        # 检测通过，重新进锁启动 worker（二次校验状态未变）
+        with self.lock:
+            if self.uploading:
+                return {'status': 'failed', 'error': '状态已变化，请重试'}
+            if self.upload_thread is not None and self.upload_thread.is_alive():
+                return {'status': 'failed', 'error': '上传 worker 仍在运行，请稍后再试'}
+            if not self.queue:
+                return {'status': 'failed', 'error': '队列为空'}
             self.uploading = True
             self.prechecking = True
             self.paused = False
             self._stopped = False
+            # L3：恢复即延续原批次——模式从批次行取回，不继承上一批次的内存标志
+            self._restore_run_mode()
             self._run_epoch += 1
             self.current_account = self.queue[0].get('account')
             self.upload_thread = threading.Thread(target=self._upload_worker, daemon=True)
             self.upload_thread.start()
-            self._log('info', f'恢复上传：{len(self.queue)}个任务（重启后恢复）')
+            self._log('info', f'恢复上传：{len(self.queue)}个任务（登录校验通过）')
             return {'status': 'success'}
     
     def stop_upload(self):
@@ -899,6 +1047,33 @@ class UploadManager(BaseQueueManager):
         records = [dict(row) for row in cursor.fetchall()]
         conn.close()
         return records
+
+    def list_completed_records(self, account: str = None) -> List[Dict]:
+        """返回已上传（status='completed'）的记录，供可上传列表标状态/一键删除用。
+
+        只返回真正上传成功的记录（不返回 pending/uploading/failed）。
+        可指定账号过滤；返回字段：id, drama_name, version, account, video_path, completed_at。
+        """
+        conn = _connect_db(self.db_path)
+        conn.row_factory = sqlite3.Row
+        cursor = conn.cursor()
+        if account:
+            cursor.execute('''
+                SELECT id, drama_name, version, account, video_path, completed_at
+                FROM upload_records
+                WHERE status='completed' AND account=?
+                ORDER BY drama_name, version
+            ''', (account,))
+        else:
+            cursor.execute('''
+                SELECT id, drama_name, version, account, video_path, completed_at
+                FROM upload_records
+                WHERE status='completed'
+                ORDER BY drama_name, version
+            ''')
+        records = [dict(row) for row in cursor.fetchall()]
+        conn.close()
+        return records
     
     def _upload_worker(self):
         """上传工作线程 - 缩小锁范围，避免死锁"""
@@ -985,16 +1160,21 @@ class UploadManager(BaseQueueManager):
                         self._log('success', f'上传成功：{task["drama_name"]} V{task["version"]}')
                         # R9：上传成功后登记内容指纹 uploaded=1（跨批/跨剧查重依据）
                         self._mark_fingerprint_uploaded(task.get('video_path'))
+                        # 剧级档案联动：确保剧级档案行存在（手动上传的剧可能从未入档）。
+                        # upload_state 由 archive.aggregate_upload_state 实时聚合（无 upload_state 列）。
+                        self._sync_drama_archive(task, 'done')
                     else:
                         task['status'] = 'failed'
                         task['completed_at'] = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
                         self.failed.append(task)
                         self._log('error', f'上传失败：{task["drama_name"]} V{task["version"]} - {task.get("error_message")}')
+                        self._sync_drama_archive(task, 'failed')
             
                 # 更新数据库（不持锁）—— 同步实际使用的文案与封面状态，留审计痕迹
                 _topics_db = json.dumps(task.get('topics', []), ensure_ascii=False) if task.get('topics') else None
                 _cover_status = task.get('cover_status', 'not_requested')
                 _draft_saved = 1 if task.get('draft_saved') else 0
+                _published = 1 if task.get('published') else 0
                 _draft_verified_at = datetime.now().strftime('%Y-%m-%d %H:%M:%S') if _draft_saved else None
                 with _connect_db(self.db_path) as conn:
                     cursor = conn.cursor()
@@ -1003,13 +1183,13 @@ class UploadManager(BaseQueueManager):
                         SET status=?, completed_at=?, error_message=?,
                             title=?, description=?, topics=?, cover_path=?,
                             cover_status=?, draft_saved=?, draft_verified_at=?,
-                            source_dir=?, output_dir=?, publish_time=?
+                            source_dir=?, output_dir=?, publish_time=?, published=?
                         WHERE id=?
                     ''', (task['status'], task['completed_at'], task.get('error_message'),
                           task.get('title'), task.get('description'), _topics_db,
                           task.get('cover_path'), _cover_status, _draft_saved,
                           _draft_verified_at, task.get('source_dir'), task.get('output_dir'),
-                          task.get('publish_time'), task['id']))
+                          task.get('publish_time'), _published, task['id']))
             
                 # 检查账号切换（短暂持锁）
                 with self.lock:
@@ -1066,7 +1246,9 @@ class UploadManager(BaseQueueManager):
     
     def _precheck_logins(self) -> bool:
         """上传前校验队列里每个账号的登录态。全通过返回 True；
-        有未登录的账号则把整条队列标失败并返回 False（不启动上传）。"""
+        有未登录账号则只把该账号的任务标失败并结算其批次，登录正常的账号
+        照常上传（账号级隔离，不再因一个账号掉线拖垮整批）；全部账号未登录
+        才返回 False（不启动上传）。"""
         self.prechecking = True
         try:
             with self.lock:
@@ -1101,15 +1283,6 @@ class UploadManager(BaseQueueManager):
                         self.failed.append(t)
                         failed_now.append(t)
                         self.queue.remove(t)
-                # 其余账号这次也不传：登录失效通常意味着整批都要先处理，
-                # 留着会在 prechecking=False 后无人消费，挂在队列里。
-                for t in list(self.queue):
-                    t['status'] = 'failed'
-                    t['error_message'] = '预检未通过（其他账号登录失效），请重新提交'
-                    t['completed_at'] = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
-                    self.failed.append(t)
-                    failed_now.append(t)
-                    self.queue.remove(t)
 
             for t in failed_now:
                 try:
@@ -1121,6 +1294,23 @@ class UploadManager(BaseQueueManager):
                 except Exception as e:
                     self._log('error', f'写失败记录出错：{e}')
 
+            # 掉线账号的批次单独结算（登录失败≠上传完成，不触发自动清理）。
+            failed_batches = {t.get('batch_id') for t in failed_now if t.get('batch_id')}
+            if failed_batches:
+                try:
+                    self._finalize_batches(failed_batches, auto_cleanup=False)
+                except Exception as e:
+                    self._log('error', f'预检失败批次结算失败：{e}')
+
+            # 仍有登录正常的账号 → 继续上传其任务（不再整批返回 False）。
+            with self.lock:
+                remaining = [t for t in self.queue if t.get('account') not in bad]
+            if remaining:
+                self._log('warning',
+                          f'部分账号未登录（{", ".join(bad)}），已跳过其任务；'
+                          f'继续上传 {len(remaining)} 个任务')
+                return True
+            self._log('error', '全部待传账号均未登录，上传终止')
             return False
         finally:
             self.prechecking = False
@@ -1380,6 +1570,8 @@ class UploadManager(BaseQueueManager):
                 cover_path=cover_path,
                 drama_name=task['drama_name'],
                 drama_id=drama_id,
+                publish_time=task.get('publish_time'),
+                scheduled=bool(getattr(self, '_scheduled_publish', False)),
             )
 
             if isinstance(outcome, dict):
@@ -1387,8 +1579,17 @@ class UploadManager(BaseQueueManager):
                 task['cover_status'] = cover_info.get('status', 'not_requested')
                 task['cover_path'] = cover_info.get('cover_path') or task.get('cover_path')
                 task['draft_saved'] = bool(outcome.get('draft_saved'))
+                task['published'] = bool(outcome.get('published'))
                 if outcome.get('status') == 'success':
                     return True
+                elif outcome.get('status') == 'pending_confirm':
+                    # 定时发表未确认：不假报失败（作品可能已发表），交人工复核。
+                    # 标 failed 但错误信息明确指向已发布列表人工确认，防误重传重复发表。
+                    task['error_message'] = (
+                        outcome.get('error') or outcome.get('publish_note')
+                        or '定时发表未确认，请到已发布列表人工复核')
+                    task['pending_confirm'] = True
+                    return False
                 else:
                     task['error_message'] = outcome.get('error') or '上传失败'
                     return False

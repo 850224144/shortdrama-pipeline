@@ -953,11 +953,16 @@ return (() => {
             'evidence': evidence,
         }
 
-    def _wait_for_video_upload(self, timeout=300, settle_seconds=10):
+    def _wait_for_video_upload(self, timeout=300, settle_seconds=10, bail_on_no_ui=True):
         """等待视频真正上传完成。
 
         保存草稿按钮在上传中也可能可见且 enabled，因此绝不能作为完成信号。
         完成必须同时满足：上传活跃信号消失、存在完成证据、状态连续稳定。
+
+        bail_on_no_ui: 30s 内没观察到进度UI时是否提前返回。保存草稿模式可以提前
+        返回（后续草稿保存重试会兜底），定时发表模式不行——定时⟂草稿，没有重试
+        环节，提前返回会导致视频还没传完就点「发表」，平台静默丢弃（实测 491MB
+        视频设置文件后 43s 就点了发表，必然失败）。
         """
         self._scroll_page_to_bottom()
         started = time.monotonic()
@@ -992,7 +997,12 @@ return (() => {
                 logger.error(f'平台报告视频上传失败，停止等待: {state}')
                 return None
 
-            if positive_ready and not upload_active and saw_upload_active:
+            remote_ready = bool(readiness.get('remote_media_ready'))
+            # 远程视频源（finder.video.qq.com + duration>0）是上传已完成的最硬证据。
+            # 公众号/视频号当前版本常不渲染进度条，saw_upload_active 永远为 False，
+            # 只等活跃信号会一直等到超时（实测页面早已可见远程视频元数据仍判定未完成）。
+            if (positive_ready and not upload_active
+                    and (saw_upload_active or (remote_ready and elapsed >= 20))):
                 if ready_since is None:
                     ready_since = now
                     ready_polls = 1
@@ -1023,7 +1033,7 @@ return (() => {
             # 无进度UI兜底：30s 内未观察到上传活跃信号（cancel/progress），
             # 说明走的是无进度条的上传路径（实测V2重传、小视频），
             # 提前交给保存重试验证（视频就绪则保存成功，未就绪则重试）。
-            if now >= 30 and not saw_upload_active:
+            if bail_on_no_ui and now >= 30 and not saw_upload_active:
                 logger.warning(
                     f'30s 内未观察到上传进度UI（cancel/progress），'
                     f'可能无进度信号上传路径，提前交给保存重试验证'
@@ -1562,18 +1572,27 @@ return (() => {
             return 0
         return self._compact(self._read_draft_list_text()).count(t)
 
-    def _capture_draft_baseline(self, title, publish_url):
+    def _capture_draft_baseline(self, title, publish_url, description=None):
         """保存前统计草稿箱里该标题的出现次数（基线），随后返回发布页。
 
         返回基线计数；捕获失败返回 None（调用方不得把它当 0，否则重复标题
         的旧草稿会构成假阳性）。「本次新增草稿」判定依赖 count_after > 基线。
+
+        短标题不体现在草稿箱列表标题（列表展示描述首行派生标题），因此标题与
+        描述首行分别记基线，返回 {'title': T0, 'desc': D0}；保存后各自在同一
+        序列上比较（review L1：此前取 max(T0,D0) 再拿描述计数比，T0>D0 时会把
+        已保存误判为未保存）。
         """
         draft_url = 'https://channels.weixin.qq.com/platform/post/draftListManager'
         try:
             self.page.get(draft_url)
             time.sleep(4)
-            base = self._count_title_in_draft_box(title)
-            logger.info(f'草稿箱基线（标题出现次数）: {base}')
+            base = {'title': self._count_title_in_draft_box(title), 'desc': None}
+            if description:
+                _d = self._compact((description or '').split('\n')[0])
+                if _d:
+                    base['desc'] = self._compact(self._read_draft_list_text()).count(_d)
+            logger.info(f'草稿箱基线（标题/描述首行出现次数）: {base}')
             self.page.get(publish_url)
             time.sleep(5)
             return base
@@ -1581,7 +1600,8 @@ return (() => {
             logger.warning(f'捕获草稿基线失败，退回子串校验（可能误判）: {e}')
             return None
 
-    def _wait_for_draft_saved(self, previous_url, title, timeout=90, baseline_count=None):
+    def _wait_for_draft_saved(self, previous_url, title, timeout=90, baseline_count=None,
+                              description=None):
         """点击保存草稿后，导航到草稿箱检查标题是否存在——最可靠的验证。
 
         此前用「成功提示文案 / URL 跳转 / 保存按钮消失」三个信号判成功，
@@ -1589,12 +1609,21 @@ return (() => {
         按钮也未必消失，导致真实保存成功却被误判为失败（实际草稿已入箱）。
         现在改为到草稿箱 /platform/post/draftListManager 读取列表，确认标题
         真的出现才算保存成功。
+
+        注意：草稿箱列表展示的是「描述首行」派生的标题，而非短标题字段
+        （短标题是独立 SEO 字段，不进列表标题）。因此除 title 外还需用
+        description 首行兜底匹配，否则短标题与描述首行不一致时会误判失败。
         """
         draft_url = 'https://channels.weixin.qq.com/platform/post/draftListManager'
         started = time.time()
         # 给平台一点时间落库
         time.sleep(3)
         last_nav = 0
+        # 兜底匹配串：描述首行（去空白/标点），与草稿箱列表标题对齐
+        desc_first = ''
+        if description:
+            _d = (description or '').split('\n')[0]
+            desc_first = ''.join(_d.split())
         while time.time() - started < timeout:
             try:
                 # 处理"将此次编辑保留? 不保存保存"离开确认弹窗——点"保存"（=保存草稿）。
@@ -1614,14 +1643,30 @@ return (() => {
                 # 本次新增草稿判定：提供基线时要求计数严格大于基线（重复标题不误判）；
                 # 未提供基线（向后兼容/测试）退回标题子串匹配。
                 if baseline_count is not None:
-                    count_now = compact_body.count(expected_title)
-                    if count_now > baseline_count:
-                        logger.info(
-                            f'草稿箱已确认本次新增: 标题出现次数 {baseline_count}→{count_now}'
-                        )
+                    # 基线：dict={'title':T0,'desc':D0}（标题/描述首行分别计数）；
+                    # 旧调用传 int 时视为两条序列共用同一基线。
+                    if isinstance(baseline_count, dict):
+                        base_t = baseline_count.get('title')
+                        base_d = baseline_count.get('desc')
+                    else:
+                        base_t = base_d = baseline_count
+                    t_now = compact_body.count(expected_title) if expected_title else 0
+                    if base_t is not None and expected_title and t_now > base_t:
+                        logger.info(f'草稿箱已确认本次新增: 标题出现次数 {base_t}→{t_now}')
                         return True
+                    # 标题未增量时用描述首行兜底（草稿箱标题=描述首行派生），
+                    # 与描述首行自己的基线比较，口径一致
+                    if desc_first and base_d is not None:
+                        d_now = compact_body.count(desc_first)
+                        if d_now > base_d:
+                            logger.info(
+                                f'草稿箱已确认本次新增: 描述首行出现次数 {base_d}→{d_now}')
+                            return True
                 elif expected_title and expected_title in compact_body:
                     logger.info(f'草稿箱已找到标题: {title}')
+                    return True
+                elif desc_first and desc_first in compact_body:
+                    logger.info(f'草稿箱已找到描述首行（草稿标题）: {description[:30] if description else ""}')
                     return True
                 # 没找到：草稿可能还在处理，等一会重新导航刷新列表
                 time.sleep(3)
@@ -1666,7 +1711,7 @@ return (() => {
             f"{result.get('error') if isinstance(result, dict) else result}")
         return False
 
-    def _save_draft(self, title, baseline_count=None):
+    def _save_draft(self, title, baseline_count=None, description=None):
         logger.info('开始保存草稿...')
         
         # 步骤1: 关闭可能的通知弹窗
@@ -1724,13 +1769,29 @@ return (() => {
         # 捕获了却从未使用。校验函数 _wait_for_draft_saved 此前零调用（只被测试
         # 引用），等于一直空转。现改为调用它：等成功提示文案、URL 跳转（draft/
         # 草稿列表且正文含本条标题）、或保存按钮消失，都没有才判失败。
-        if not self._wait_for_draft_saved(previous_url, title, baseline_count=baseline_count):
+        if not self._wait_for_draft_saved(previous_url, title, baseline_count=baseline_count,
+                                          description=description):
             logger.error('草稿保存未确认：平台无成功提示/URL 未跳转/按钮未消失')
             self._save_debug_state('draft_save_unverified')
             return False
 
         logger.info(f'[{self.account_name}] ✅ 草稿保存成功')
         return True
+    
+    def _page_connection_alive(self):
+        """浏览器页面连接是否仍可用（DrissionPage CDP 连接）。
+
+        连接断开（用户关窗/浏览器崩溃/CDP 掉线）时 page 属性访问抛异常；
+        此时视频已随页面丢失，重试保存草稿无意义，应尽快失败释放 worker，
+        而不是在死连接上重试 5 次 × 30 秒（期间 uploading=True 阻塞新上传）。
+        """
+        try:
+            if self.page is None:
+                return False
+            _ = self.page.url
+            return True
+        except Exception:
+            return False
     
     def _login_state(self):
         """读取当前页面的登录态，返回 'logged_in' / 'logged_out' / 'unknown'。
@@ -2018,28 +2079,565 @@ return (() => {
         return {
             'status': 'failed',
             'draft_saved': False,
+            'published': False,
             'cover': {'status': 'not_requested', 'error': None, 'cover_path': None},
             'error': error or '上传失败',
         }
 
-    def upload_to_draft(self, video_path, title, tags, description, cover_path=None,
-                        drama_name=None, drama_id=None):
+    @staticmethod
+    def _default_publish_time():
+        """定时发表缺省时间：从 ``config.get_publish_schedule()`` 推导（day_offset + 首个槽位）。
+
+        不再硬编码 21:00——与 9 档槽位（07:00–23:00）保持一致；配置读不到时回退
+        当天+1日 21:00（保守）。L4：与入队算点/过期顺延共用同一处配置读取，
+        避免运行时 ``CONFIG`` 与 ``DEFAULT_CONFIG`` 双源。
         """
-        上传视频到草稿箱
+        from datetime import datetime, timedelta
+        try:
+            from config import get_publish_schedule
+            sched = get_publish_schedule()
+            day_offset = int(sched.get('day_offset') or 1)
+            slot = str((sched.get('times') or ['21:00'])[0]).strip() or '21:00'
+            target = (datetime.now() + timedelta(days=day_offset)).date()
+            return f'{target.isoformat()} {slot}'
+        except Exception as e:
+            logger.warning(f'读 config 推导默认发表时间失败，回退 21:00: {e}')
+            target = (datetime.now() + timedelta(days=1)).date()
+            return f'{target.isoformat()} 21:00'
+
+    def _ensure_future_publish_time(self, publish_time):
+        """保证定时发表时间在将来；已过期则顺延到下一个未来槽位。
+
+        入队时按 +day_offset 算的 publish_time，若批次晚于该时刻才上传（如深夜
+        跨天上传），定时分支会设不上「过去时间」→ _set_scheduled_publish 静默
+        失败 → 回退保存草稿（用户勾了定时却没发表）。此处把过期时间顺延到
+        最近的未来槽位，让定时发表真正可设。返回顺延后的 'YYYY-MM-DD HH:MM'。
+
+        L4：槽位取自 ``config.get_publish_schedule()``（运行时 CONFIG 优先），与
+        入队算点 ``upload_manager._compute_publish_time`` 同一处读取，避免运行时
+        改过槽位后顺延结果落到默认配置的时间轴。
+        """
+        from datetime import datetime, timedelta
+        try:
+            target = datetime.strptime(str(publish_time).strip(), '%Y-%m-%d %H:%M')
+        except (TypeError, ValueError):
+            return publish_time  # 解析不了，交回原逻辑（默认时间兜底）
+        now = datetime.now()
+        if target > now:
+            return publish_time  # 未过期，原样使用
+        # 过期 → 从今天起找最近未来槽位（明天 07:00 必未来，3 天兜底充足）
+        try:
+            from config import get_publish_schedule
+            times = get_publish_schedule().get('times')
+        except Exception:
+            times = None
+        slots = [str(t).strip() for t in (times or ['21:00']) if str(t).strip()] or ['21:00']
+        for day_off in range(0, 3):
+            day = (now + timedelta(days=day_off)).date()
+            for slot in slots:
+                cand = datetime.strptime(f'{day.isoformat()} {slot}', '%Y-%m-%d %H:%M')
+                if cand > now:
+                    return f'{day.isoformat()} {slot}'
+        return publish_time
+
+    def _set_scheduled_publish(self, publish_time):
+        """在发布页设置「定时发表」：选定时 radio + 日历选日期 + 时间面板选时分。
+
+        平台硬约束：选中「定时」后无法保存草稿（定时⟂保存草稿）；发表时间输入是
+        只读组件，直接设 value 不生效（实测），必须走日历/时间面板：
+          1. 点「定时」radio（value=1）
+          2. 点「发表时间」输入 → 打开日期选择器（dl.weui-desktop-picker__date）
+          3. 导航到目标月份（点上一月/下一月箭头）
+          4. 点目标日的 <a>（跳过 disabled/faded）
+          5. 点「请选择时间」输入 → 打开时间面板（dl.weui-desktop-picker__time）
+          6. 点小时 <li> 和分钟 <li>（时分两列，实测选后日期输入同步）
+        返回是否设置成功（回读发表时间输入 == publish_time）。
+        """
+        import re as _re
+        m = _re.match(r'^(\d{4})-(\d{2})-(\d{2})\s+(\d{2}):(\d{2})', str(publish_time or ''))
+        if not m:
+            logger.warning(f'定时发表时间格式无法解析: {publish_time!r}')
+            return False
+        year, month, day, hour, minute = (int(x) for x in m.groups())
+        hh, mm = f'{hour:02d}', f'{minute:02d}'
+
+        def js(s):
+            return self.page.run_js(s)
+
+        # 1) 选「定时」radio（value=1，且可见）
+        r = js("const f=document.querySelector('iframe');const d=f.contentDocument;"
+               "const r=[...d.querySelectorAll('input[type=radio]')]"
+               ".find(e=>e.value==='1'&&e.getBoundingClientRect().width>0);"
+               "if(r){r.click();r.checked=true;return true;}return false;")
+        if not r:
+            logger.error('未找到「定时」单选按钮')
+            return False
+        time.sleep(1.5)
+
+        # 2) 打开日期选择器（点「发表时间」输入）
+        js("const f=document.querySelector('iframe');const d=f.contentDocument;"
+           "const e=[...d.querySelectorAll('input')]"
+           ".find(x=>/请选择发表时间/.test(x.placeholder||''));"
+           "if(e){e.click();e.focus();}")
+        time.sleep(1.5)
+
+        # 3) 导航到目标月份（读年月标签，点箭头直至匹配）
+        #    上限按目标月与当前月差放宽（至少 12 次，最多 36 次）；label 解析失败即停，
+        #    避免死循环或超长导航。
+        from datetime import datetime as _dt
+        _now = _dt.now()
+        _month_diff = (year - _now.year) * 12 + (month - _now.month)
+        _max_nav = min(36, max(12, abs(_month_diff) + 2))
+        for _nav in range(_max_nav):
+            labels = js("const f=document.querySelector('iframe');const d=f.contentDocument;"
+                        "const ls=[...d.querySelectorAll('.weui-desktop-picker__panel__label')]"
+                        ".map(x=>(x.innerText||'').trim());return ls;")
+            if not labels or len(labels) < 2:
+                break
+            cy = int(_re.sub(r'\D', '', labels[0]) or 0)
+            cm = int(_re.sub(r'\D', '', labels[1]) or 0)
+            if not cy or not cm:
+                logger.warning(f'日期面板年月标签无法解析: {labels}')
+                break
+            if cy == year and cm == month:
+                break
+            nxt = (year, month) > (cy, cm)
+            arrow = 'right' if nxt else 'left'
+            js("const f=document.querySelector('iframe');const d=f.contentDocument;"
+               f"const b=d.querySelector('button.weui-desktop-btn__icon__{arrow}');"
+               "if(b){b.click();return true;}return false;")
+            time.sleep(1)
+
+        # 4) 点目标日的 <a>（非 disabled/faded）
+        r = js("const f=document.querySelector('iframe');const d=f.contentDocument;"
+               f"const a=[...d.querySelectorAll('td a')]"
+               f".find(x=>(x.innerText||'').trim()==='{day}'&&!/disabled/.test(x.className));"
+               "if(a){a.click();return true;}return false;")
+        if not r:
+            logger.error(f'未找到日期 {year}-{month}-{day} 的可点击日格')
+            return False
+        time.sleep(1.5)
+
+        # 5) 打开时间面板（点「请选择时间」输入）
+        js("const f=document.querySelector('iframe');const d=f.contentDocument;"
+           "const e=[...d.querySelectorAll('input')].find(x=>x.placeholder==='请选择时间');"
+           "if(e){e.click();e.focus();}")
+        time.sleep(1.5)
+
+        # 6) 选时 + 选分（时分两列 <li>）
+        js("const f=document.querySelector('iframe');const d=f.contentDocument;"
+           "const ol=d.querySelector('ol.weui-desktop-picker__time__hour');"
+           f"const li=[...ol.querySelectorAll('li')].find(x=>(x.innerText||'').trim()==='{hh}');"
+           "if(li)li.click();")
+        time.sleep(0.8)
+        js("const f=document.querySelector('iframe');const d=f.contentDocument;"
+           "const ol=d.querySelector('ol.weui-desktop-picker__time__minute');"
+           f"const li=[...ol.querySelectorAll('li')].find(x=>(x.innerText||'').trim()==='{mm}');"
+           "if(li)li.click();")
+        time.sleep(1.5)
+
+        # 7) 回读确认
+        got = js("const f=document.querySelector('iframe');const d=f.contentDocument;"
+                 "const e=[...d.querySelectorAll('input')]"
+                 ".find(x=>/请选择发表时间/.test(x.placeholder||''));"
+                 "return e?e.value:'';")
+        ok = str(got or '').strip() == str(publish_time).strip()
+        logger.info(f'定时发表时间设置: {got!r}（期望 {publish_time}）{"✅" if ok else "❌"}')
+        return ok
+
+    def _switch_to_immediate_publish(self):
+        """发表失败回退保存草稿前，把「定时」切回「即时发表」。
+
+        平台规则：定时⟂保存草稿（二者互斥）。_set_scheduled_publish 成功后页面
+        停在「定时」模式，此时保存草稿按钮不可用；不切回即时，回退 _save_draft
+        会失败，内容仍可能丢。点 value=0 的 radio 即回到即时。
+        """
+        try:
+            ok = self.page.run_js(
+                "const f=document.querySelector('iframe');const d=f.contentDocument;"
+                "const r=[...d.querySelectorAll('input[type=radio]')]"
+                ".find(e=>e.value==='0'&&e.getBoundingClientRect().width>0);"
+                "if(r){r.click();r.checked=true;return true;}return false;")
+            logger.info(f'定时发表失败，切换回即时发表: {bool(ok)}')
+            time.sleep(1.5)
+            return bool(ok)
+        except Exception as e:
+            logger.warning(f'切换回即时发表失败（继续保存草稿）: {e}')
+            return False
+
+    def _click_publish_button(self):
+        """点击发布页「发表」按钮（递归 iframe+shadow root JS，与保存草稿同法）。"""
+        return self.page.run_js(r'''
+return (() => {
+    const normalize = value => (value || '').replace(/\s+/g, ' ').trim();
+    const labels = ['发表', '发表视频', '发布', '发布视频', '发布作品'];
+    const seenRoots = new WeakSet();
+    const visible = element => {
+        try {
+            if (!element || !element.isConnected) return false;
+            if (element.closest('[aria-hidden="true"],[hidden]')) return false;
+            const ownerWindow = element.ownerDocument && element.ownerDocument.defaultView;
+            if (!ownerWindow) return false;
+            const style = ownerWindow.getComputedStyle(element);
+            return style.display !== 'none' &&
+                style.visibility !== 'hidden' &&
+                Number(style.opacity || 1) > 0;
+        } catch (e) { return false; }
+    };
+    const isDisabled = element => {
+        try {
+            const ownerWindow = element.ownerDocument && element.ownerDocument.defaultView;
+            const style = ownerWindow ? ownerWindow.getComputedStyle(element) : null;
+            return element.disabled === true ||
+                element.getAttribute('aria-disabled') === 'true' ||
+                /disabled|is-disabled/i.test(element.className || '') ||
+                (style && style.pointerEvents === 'none');
+        } catch (e) { return false; }
+    };
+    const findButton = root => {
+        if (!root || seenRoots.has(root)) return null;
+        seenRoots.add(root);
+        let nodes = [];
+        try {
+            nodes = [...root.querySelectorAll('button,[role="button"],a,[tabindex],div,span')];
+        } catch (e) {}
+        for (const node of nodes) {
+            const text = normalize(node.innerText || node.textContent);
+            if (!labels.includes(text) || !visible(node)) continue;
+            const button = (node.querySelector && node.querySelector('button'))
+                || node.closest('button,[role="button"],a,[tabindex]') || node;
+            if (!visible(button) || isDisabled(button)) continue;
+            return {button, text};
+        }
+        for (const node of nodes) {
+            if (node.shadowRoot) {
+                const result = findButton(node.shadowRoot);
+                if (result) return result;
+            }
+        }
+        for (const frame of root.querySelectorAll('iframe,frame')) {
+            try {
+                if (frame.contentDocument) {
+                    const result = findButton(frame.contentDocument);
+                    if (result) return result;
+                }
+            } catch (e) {}
+        }
+        return null;
+    };
+    const result = findButton(document);
+    if (!result) return {found: false, clicked: false, text: ''};
+    result.button.click();
+    return {found: true, clicked: true, text: result.text};
+})()
+''')
+
+    def _handle_publish_confirm(self, timeout: float = 8):
+        """点「发表」后处理确认弹窗——只点真正渲染出来的那一个。
+
+        平台发布页会预渲染约 20 个隐藏弹窗：容器 display:inline-block、
+        visibility:visible，但盒子是 0x0。旧实现只查 display/visibility/opacity、
+        不查尺寸，会把隐藏弹窗里的「确定/确认」当成真弹窗点掉并返回假成功
+        （实测：空白发布页、没有任何弹窗时也会命中一个 0x0 的「确认」）。
+        真实发表确认因此从未被点击，平台侧收不到发表请求。
+
+        现改为轮询等待「有实际尺寸的最上层弹窗」，只点其中文本匹配的按钮；
+        等不到可见弹窗就返回 None，由调用方按未确认处理。
+        """
+        import time as _time
+
+        js = r'''
+return (() => {
+    const normalize = value => (value || '').replace(/\s+/g, ' ').trim();
+    const rendered = element => {
+        try {
+            if (!element || !element.isConnected) return false;
+            const rect = element.getBoundingClientRect();
+            if (rect.width < 2 || rect.height < 2) return false;
+            const ownerWindow = element.ownerDocument && element.ownerDocument.defaultView;
+            if (!ownerWindow) return false;
+            const style = ownerWindow.getComputedStyle(element);
+            if (style.display === 'none' || style.visibility === 'hidden') return false;
+            return Number(style.opacity || 1) > 0;
+        } catch (e) { return false; }
+    };
+    const labels = ['确定', '确认', '发布', '发表'];
+    const collect = root => {
+        if (!root) return [];
+        const out = [];
+        try { out.push(...root.querySelectorAll('.weui-desktop-dialog,[role="dialog"]')); } catch (e) {}
+        try {
+            for (const frame of root.querySelectorAll('iframe,frame')) {
+                try { if (frame.contentDocument) out.push(...collect(frame.contentDocument)); } catch (e) {}
+            }
+        } catch (e) {}
+        return out;
+    };
+    const dialogs = collect(document).filter(rendered);
+    if (!dialogs.length) return null;
+    const dialog = dialogs[dialogs.length - 1];
+    const buttons = [...dialog.querySelectorAll('button,[role="button"]')].filter(rendered);
+    for (const button of buttons) {
+        const text = normalize(button.innerText || button.textContent);
+        if (labels.includes(text) && !button.disabled
+            && button.getAttribute('aria-disabled') !== 'true') {
+            button.click();
+            return text;
+        }
+    }
+    const direct = buttons.find(button => normalize(button.innerText || button.textContent) === '直接发表');
+    if (direct) {
+        direct.click();
+        return '直接发表';
+    }
+    return null;
+})()
+'''
+        deadline = _time.time() + max(0.0, timeout)
+        while _time.time() < deadline:
+            try:
+                result = self.page.run_js(js)
+                if result:
+                    logger.info(f'已确认发表弹窗: {result}')
+                    _time.sleep(1)
+                    return result
+            except Exception as error:
+                logger.debug(f'处理发表确认弹窗失败: {error}')
+            _time.sleep(0.5)
+        logger.warning(f'未找到可见的发表确认弹窗（等待 {timeout}s），按未确认处理')
+        return None
+
+    def _verify_publish_success(self, timeout: float = 20, interval: float = 2):
+        """确认弹窗处理完后，验证发表是否真实成功。
+
+        旧实现把「发表按钮消失/禁用」当作成功信号：定时发表模式下点完发表按钮仍在，
+        于是永远返回 None；而且它同样不看按钮尺寸，隐藏按钮也会被算作可见。
+        现改为只认明确信号：
+          - 出现失败提示 → False
+          - 出现成功提示（发表成功/已提交/审核中…）或页面已离开 /post/create → True
+          - 超时仍无明确信号 → None（不确定，交给已发布列表复核）
+        """
+        import time as _time
+        import re as _re
+
+        success_pattern = _re.compile(r'发表成功|发布成功|发表完成|发布完成|已提交|提交成功|正在审核|审核中|等待审核|已预约|定时发表成功')
+        failure_pattern = _re.compile(r'发表失败|发布失败|操作失败|请重试|网络错误|系统繁忙|稍后再试|发表不成功|发布不成功')
+
+        text_js = r'''
+return (() => {
+    const chunks = [];
+    const collect = root => {
+        try {
+            if (root.body && root.body.innerText) chunks.push(root.body.innerText);
+            for (const frame of root.querySelectorAll('iframe,frame')) {
+                try { if (frame.contentDocument) collect(frame.contentDocument); } catch (e) {}
+            }
+        } catch (e) {}
+    };
+    collect(document);
+    return chunks.join('\n');
+})()
+'''
+        deadline = _time.time() + max(0.0, timeout)
+        while _time.time() < deadline:
+            try:
+                body_text = self.page.run_js(text_js) or ''
+                if failure_pattern.search(body_text):
+                    return False
+                if success_pattern.search(body_text):
+                    return True
+                current_url = (self.page.url or '').lower()
+                if '/post/create' not in current_url and '/platform/post/' in current_url:
+                    return True
+            except Exception as error:
+                logger.debug(f'发表成功验证异常: {error}')
+            _time.sleep(interval)
+        return None
+
+    # 已发布列表匹配参数（review L2）：描述首行是主键（列表卡片展示描述+话题，
+    # 短标题不进列表）；两键都设最小长度门槛，过短串在长列表里天然命中。
+    PUBLISH_DESC_PREFIX_LEN = 24
+    PUBLISH_MIN_DESC_CHARS = 10
+    PUBLISH_MIN_TITLE_CHARS = 6
+
+    _PUBLISHED_LIST_SCROLL_JS = r'''
+return (() => {
+    const sweep = root => {
+        try {
+            for (const el of root.querySelectorAll('*')) {
+                if (el.scrollHeight > el.clientHeight + 20 && el.clientHeight > 200) {
+                    el.scrollTop = el.scrollHeight;
+                }
+            }
+            for (const frame of root.querySelectorAll('iframe,frame')) {
+                try { if (frame.contentDocument) sweep(frame.contentDocument); } catch (e) {}
+            }
+        } catch (e) {}
+    };
+    sweep(document);
+    return true;
+})()
+'''
+
+    @staticmethod
+    def _norm_publish_text(text):
+        """归一化：去空白、去标点（含全角引号），用于列表文本比对。"""
+        import unicodedata
+        return ''.join(
+            ch for ch in (text or '')
+            if not ch.isspace() and not unicodedata.category(ch).startswith('P')
+        )
+
+    @classmethod
+    def _publish_match_keys(cls, title, description=None):
+        """构造已发布列表的匹配键：描述首行前缀（主键）+ 归一化标题（兜底）。
+
+        列表卡片展示「描述全文 + 话题」，短标题字段根本不进列表，故以描述首行
+        为主键；两键各有最小长度门槛，过短则置空（不参与匹配），避免短串在
+        长列表里天然命中（review L2）。
+        """
+        desc_first = cls._norm_publish_text((description or '').split('\n')[0])
+        desc_key = (desc_first[:cls.PUBLISH_DESC_PREFIX_LEN]
+                    if len(desc_first) >= cls.PUBLISH_MIN_DESC_CHARS else '')
+        title_key = cls._norm_publish_text(title)
+        if len(title_key) < cls.PUBLISH_MIN_TITLE_CHARS:
+            title_key = ''
+        return {'desc': desc_key, 'title': title_key}
+
+    @staticmethod
+    def _count_publish_keys(text, keys):
+        """统计各匹配键在归一化列表全文里的出现次数。"""
+        return {k: (text.count(v) if v else 0) for k, v in keys.items()}
+
+    def _read_published_list_stable(self, max_rounds=3, settle=1.5):
+        """滚到列表底部直至文本稳定（懒加载/分页项被读全），返回归一化全文。
+
+        基线与发表后确认都走本方法，保证两次读取深度一致——否则基线少读
+        （旧条目没加载）会把「本来就存在」的卡片当成本次新增。
+        """
+        prev = None
+        text = ''
+        for _ in range(max_rounds):
+            try:
+                self.page.run_js(self._PUBLISHED_LIST_SCROLL_JS)
+            except Exception as error:
+                logger.debug(f'已发布列表滚动失败: {error}')
+            time.sleep(settle)
+            text = self._norm_publish_text(self._read_draft_list_text())
+            if text == prev:
+                break
+            prev = text
+        return text
+
+    def _capture_published_baseline(self, title, publish_url, description=None):
+        """发表前记录已发布列表里匹配键的出现次数（基线），随后返回发布页。
+
+        review L2：只做子串命中会把「另一部剧同标题/同描述首行」当成本次发表
+        成功（假成功方向，比漏发危险）。改为发表后要求同一键计数严格大于
+        发表前基线——只有真的多出一条新作品才算确认。
+
+        基线捕获失败返回 None；调用方不得据此断言成功（见
+        _verify_published_list_has 的无基线分支：一律不确认，转人工复核）。
+        只有定时发表路径才需要本基线，保存草稿路径不必调用。
+        """
+        published_url = 'https://channels.weixin.qq.com/platform/post/list'
+        keys = self._publish_match_keys(title, description)
+        if not keys.get('desc') and not keys.get('title'):
+            logger.warning('已发布基线键为空（标题与描述首行均过短），跳过基线捕获')
+            return None
+        try:
+            self.page.get(published_url)
+            time.sleep(5)
+            text = self._read_published_list_stable()
+            base = self._count_publish_keys(text, keys)
+            logger.info(f'已发布列表基线（描述首行/标题出现次数）: {base}')
+            self.page.get(publish_url)
+            time.sleep(5)
+            return base
+        except Exception as e:
+            logger.warning(f'捕获已发布列表基线失败，发表后将无法确认新增: {e}')
+            return None
+
+    def _verify_published_list_has(self, title, description=None, timeout=60, interval=5,
+                                   baseline=None):
+        """发表后到「已发布/作品列表」确认真实发表——发表内容的正确存放处。
+
+        发表成功的内容不在草稿箱（/platform/post/draftListManager），而在已发布
+        作品列表。本方法到已发布列表确认真实发表。
+
+        匹配修正（L2）：此前「归一化子串一命中就算成功」，跨剧同标题/同描述
+        首行会把未发表误判为已发表（假成功方向）。现在改为计数口径：
+          1. 发表前由 _capture_published_baseline 记录匹配键计数（基线）；
+          2. 发表后要求同一键计数严格大于基线（确实多出一条新作品）；
+          3. 无基线（旧调用或基线捕获失败）一律不确认——调用方据此转
+             人工复核（status=pending_confirm），不假报成功。
+        账号维度天然隔离：浏览器 profile 按账号隔离，列表即本账号的作品列表。
+        返回 True=已确认；False=未确认（不代表一定未发表）。
+        """
+        published_url = 'https://channels.weixin.qq.com/platform/post/list'
+        keys = self._publish_match_keys(title, description)
+        base = baseline if isinstance(baseline, dict) else None
+        started = time.time()
+        last_nav = 0
+        while time.time() - started < timeout:
+            try:
+                current_url = (self.page.url or '').lower()
+                if 'post/list' not in current_url:
+                    if time.time() - last_nav >= 4:
+                        self.page.get(published_url)
+                        last_nav = time.time()
+                        time.sleep(4)
+                text = self._read_published_list_stable()
+                counts = self._count_publish_keys(text, keys)
+                if base is not None:
+                    for key, label in (('desc', '描述首行'), ('title', '标题')):
+                        if not keys.get(key):
+                            continue
+                        try:
+                            before = int(base.get(key) or 0)
+                        except (TypeError, ValueError):
+                            before = 0
+                        if counts.get(key, 0) > before:
+                            logger.info(
+                                f'已发布列表确认本次新增（{label}出现次数 '
+                                f'{before}→{counts.get(key)}）')
+                            return True
+                else:
+                    logger.warning(
+                        '已发布列表缺少基线，无法确认本次新增（不按子串断言成功）: '
+                        f'{title}')
+                    return False
+                time.sleep(interval)
+            except Exception as e:
+                logger.debug(f'检查已发布列表失败: {e}')
+                time.sleep(2)
+        logger.warning(f'已发布列表未确认（timeout={timeout}s）: {title}')
+        return False
+
+    def upload_to_draft(self, video_path, title, tags, description, cover_path=None,
+                        drama_name=None, drama_id=None, publish_time=None,
+                        scheduled=False):
+        """
+        上传视频到草稿箱（scheduled=False）或按计划时间发表（scheduled=True）。
         
         Args:
             video_path: 视频文件路径
-            title: 标题（6-16字，无标点）
+            title: 标题（6-16字，无标点）——填入发布页「短标题」专用输入框
             tags: 话题标签列表
-            description: 描述
+            description: 描述（填入描述编辑器）
             cover_path: 封面图路径（可选）
             drama_name: 剧名（填剧集链接用，可选）
             drama_id: 剧集 ID（event/... 格式；提供则在保存草稿前写入
                       「链接 → 视频号剧集」。查不到/失败自动跳过，不阻断）
+            publish_time: 定时发表时间（YYYY-MM-DD HH:MM）。scheduled=True 时必填；
+                          缺省时用当天+1日 21:00。
+            scheduled: True=按 publish_time 定时发表（选定时→点发表）；
+                       False=保存草稿（默认，平台规则：定时⟂保存草稿，二者不可兼得）。
         
         Returns:
             dict: {'status': 'success'|'failed',
                    'draft_saved': bool,
+                   'published': bool,
                    'cover': {'status': 'not_requested'|'uploading'|'applied'|'failed',
                              'error': str|None, 'cover_path': str|None},
                    'error': str|None}
@@ -2096,7 +2694,15 @@ return (() => {
 
             # 保存前捕获草稿箱基线（该标题当前出现次数）——「本次新增草稿」判定依据。
             # 必须在视频上传前导航，避免离开发布页丢已上传视频。
-            draft_baseline = self._capture_draft_baseline(title, publish_url)
+            draft_baseline = self._capture_draft_baseline(title, publish_url,
+                                                          description=description)
+            # 定时发表另需「已发布列表」基线（review L2）：发表后按计数增量确认
+            # 本次真的新增一条作品，防跨剧同名子串命中被误判为发表成功。
+            # 同样必须在视频上传前导航——发布页一离开，已上传视频就丢了。
+            published_baseline = None
+            if scheduled:
+                published_baseline = self._capture_published_baseline(
+                    title, publish_url, description=description)
 
             # 1. 上传视频
             logger.info("定位文件上传控件...")
@@ -2156,34 +2762,65 @@ return (() => {
             time.sleep(3)
             
             # 2. 填写文案
-            logger.info("填写文案...")
+            # 2.1 短标题 → 发布页专用「短标题」输入框。
+            #     此前误把标题当描述首行打进描述编辑器，导致短标题字段为空
+            #     （用户反馈「短标题没有正确填入」）。发布页表单在 wujie
+            #     iframe 内，短标题输入框 placeholder=「填写短标题有机会获得更多流量」。
+            logger.info(f"填写短标题: {title}")
+            title_input = None
+            for _attempt in range(3):
+                try:
+                    title_input = self.page.ele(
+                        'css:input[placeholder="填写短标题有机会获得更多流量"]', timeout=5)
+                    if title_input:
+                        break
+                except Exception:
+                    time.sleep(1)
+            if title_input:
+                try:
+                    title_input.click()
+                    time.sleep(0.4)
+                    # 直接设值 + input/change/blur 事件（普通 text input，实测生效且持久）
+                    self.page.run_js(
+                        "arguments[0].value=arguments[1];"
+                        "arguments[0].dispatchEvent(new Event('input',{bubbles:true}));"
+                        "arguments[0].dispatchEvent(new Event('change',{bubbles:true}));"
+                        "arguments[0].blur();",
+                        title_input, title)
+                    time.sleep(0.5)
+                    got_title = self.page.run_js(
+                        "const f=document.querySelector('iframe');const d=f.contentDocument;"
+                        "const e=[...d.querySelectorAll('input[placeholder=\"填写短标题有机会获得更多流量\"]')]"
+                        ".find(x=>x.getBoundingClientRect().width>0);return e?e.value:'';")
+                    if got_title != title:
+                        logger.warning(f'短标题回读不一致: {got_title!r} != {title!r}（继续）')
+                except Exception as e:
+                    logger.warning(f'短标题输入失败（继续）: {e}')
+            else:
+                logger.warning('未找到短标题输入框，短标题将为空')
+
+            # 2.2 长描述 + 话题 → 描述编辑器（标题已走专用字段，这里不再放标题首行）
+            logger.info("填写描述...")
             try:
                 editor = self.page.ele('css:div.input-editor', timeout=30)
             except Exception:
                 logger.error("未找到富文本输入框")
                 return self._upload_failure("未找到富文本输入框")
-            
+
             # 聚焦并清空
             editor.click()
             self.page.run_js("arguments[0].innerText = '';", editor)
             time.sleep(1)
             editor.click()
             time.sleep(0.5)
-            
-            # 1. 输入短标题
-            logger.info(f"输入短标题: {title}")
-            self._human_type(editor, title)
-            editor.input(Keys.ENTER)
-            time.sleep(0.5)
-            
-            # 2. 输入长描述
+
             if description:
                 logger.info(f"输入描述: {description[:50]}...")
                 self._human_type(editor, description)
                 editor.input(Keys.ENTER)
                 time.sleep(0.5)
-            
-            # 3. 输入话题（确保tags是list类型）
+
+            # 输入话题（确保tags是list类型）
             if tags and isinstance(tags, list):
                 logger.info(f"输入话题: {tags}")
                 for tag in tags:
@@ -2199,7 +2836,24 @@ return (() => {
             upload_timeout = max(300, min(900, int(file_size_mb * 2) + 120))
             logger.info(f'视频 {file_size_mb:.0f}MB，等待超时 {upload_timeout} 秒')
             logger.info('等待视频上传完成...')
-            upload_state = self._wait_for_video_upload(timeout=upload_timeout)
+            upload_state = self._wait_for_video_upload(
+                timeout=upload_timeout, bail_on_no_ui=not scheduled)
+            if not upload_state and scheduled:
+                # 定时发表没有草稿重试兜底：视频没就绪就点「发表」等于空发表，
+                # 平台不会报错也不会产生作品（实测 4/4 全部如此），必须直接失败。
+                error = ('视频上传未完成（无就绪证据），定时模式不点「发表」；'
+                         '成片未上传，修复后重试')
+                logger.error(error)
+                self._save_debug_state('upload_not_ready')
+                return {
+                    'status': 'failed',
+                    'draft_saved': False,
+                    'published': False,
+                    'cover': {'status': 'not_requested', 'error': None,
+                              'cover_path': None},
+                    'error': error,
+                    'publish_note': None,
+                }
             if not upload_state:
                 logger.warning(
                     '等待视频上传未得到完成信号（可能无进度UI），'
@@ -2233,13 +2887,107 @@ return (() => {
             else:
                 logger.info('未提供剧集 ID，跳过填链接')
 
-            # 6. 保存草稿（重试：视频可能仍在上传，保存被拒则等待重试）
+            publish_note = None
+            # 6. 保存草稿 或 定时发表（平台规则：定时⟂保存草稿，二者不可兼得）
+            if scheduled:
+                # 6a. 定时发表：选「定时」→ 日历选日期 → 时间面板选时分 → 点「发表」
+                # P0/P1：发表必须经 _verify_publish_success 确认真实成功；失败或
+                # 不确定一律回退保存草稿（不假报成功，内容不丢）。
+                logger.info(f'定时发表：设置时间 {publish_time}...')
+                if not publish_time:
+                    publish_time = self._default_publish_time()
+                    logger.info(f'未提供 publish_time，使用默认：{publish_time}')
+                else:
+                    future = self._ensure_future_publish_time(publish_time)
+                    if future != publish_time:
+                        logger.warning(
+                            f'publish_time {publish_time} 已过期，顺延至 {future} '
+                            f'（否则设不上过去时间，回退草稿）')
+                        publish_time = future
+                set_ok = self._set_scheduled_publish(publish_time)
+                if not set_ok:
+                    publish_note = f'定时发表时间设置失败: {publish_time}'
+                    logger.error(publish_note)
+                else:
+                    logger.info('点击「发表」...')
+                    pub = self._click_publish_button()
+                    if pub.get('clicked'):
+                        logger.info(f'已点击发表按钮: {pub.get("text")}')
+                        # 点发表后可能出现确认弹窗（原生 alert 由 auto_handle_alert
+                        # 处理；DOM 模态框需点「确定/确认/发布」）
+                        confirmed = self._handle_publish_confirm()
+                        verified = self._verify_publish_success()
+                        logger.info(f'发表验证：确认弹窗={confirmed}，成功信号={verified}')
+                        if verified is True:
+                            logger.info(f'发表成功（定时 {publish_time}）')
+                            return {
+                                'status': 'success',
+                                'draft_saved': False,
+                                'published': True,
+                                'cover': cover_result,
+                                'error': None,
+                                'publish_note': None,
+                            }
+                        # 验证非明确成功。到已发布列表确认真实发表——防「已发表成功
+                        # 但页面信号不确定」被误判成草稿保存失败（发表内容不在草稿箱，
+                        # 回退查草稿箱必然假失败，任务报 failed 而作品实际已发出）。
+                        # 仅 verified=None（不确定）时查已发布列表；verified=False
+                        # （明确失败提示出现=未发表）不查，直接走保存草稿回退——
+                        # 否则导航到已发布列表会丢失已上传视频，回退保存会失败。
+                        if verified is None:
+                            in_published = self._verify_published_list_has(
+                                title, description, baseline=published_baseline)
+                            if in_published:
+                                logger.info(f'已发布列表确认发表（定时 {publish_time}）')
+                                return {
+                                    'status': 'success',
+                                    'draft_saved': False,
+                                    'published': True,
+                                    'cover': cover_result,
+                                    'error': None,
+                                    'publish_note': None,
+                                }
+                            # 已发布列表也未确认 → 待人工复核（可能已发表，不假报失败）
+                            publish_note = (
+                                f'定时发表未确认（确认弹窗={confirmed}，验证={verified}，'
+                                f'已发布列表未确认），请到已发布列表人工复核')
+                            logger.error(publish_note)
+                            self._save_debug_state('publish_unverified')
+                            return {
+                                'status': 'pending_confirm',
+                                'draft_saved': False,
+                                'published': None,
+                                'cover': cover_result,
+                                'error': None,
+                                'publish_note': publish_note,
+                            }
+                        publish_note = (
+                            f'定时发表未确认成功（确认弹窗={confirmed}，验证={verified}）')
+                        logger.error(publish_note)
+                        self._save_debug_state('publish_unverified')
+                    else:
+                        publish_note = '未找到「发表」按钮'
+                        logger.error(publish_note)
+                        self._save_debug_state('publish_button_not_found')
+                logger.warning(f'{publish_note}，回退保存草稿')
+                # 定时⟂保存草稿：页面仍停「定时」模式时保存草稿按钮不可用，
+                # 回退会失败（内容仍可能丢）——先切回「即时发表」。
+                self._switch_to_immediate_publish()
+
+            # 6b. 保存草稿（重试：视频可能仍在上传，保存被拒则等待重试）
             logger.info('保存草稿...')
             saved = False
             for attempt in range(5):
                 logger.info(f'保存草稿（第{attempt+1}次尝试）...')
-                saved = self._save_draft(title, baseline_count=draft_baseline)
+                saved = self._save_draft(title, baseline_count=draft_baseline,
+                                         description=description)
                 if saved:
+                    break
+                # 连接已死：视频随页面丢失，重试无意义，立即失败（不阻塞 worker）
+                if not self._page_connection_alive():
+                    logger.error(
+                        f'浏览器页面连接已断开，停止草稿重试（第{attempt+1}次，'
+                        f'视频已随页面丢失）')
                     break
                 logger.warning(
                     f'草稿保存未确认（第{attempt+1}次），'
@@ -2264,8 +3012,10 @@ return (() => {
                 return {
                     'status': 'success',
                     'draft_saved': True,
+                    'published': False,
                     'cover': cover_result,
                     'error': None,
+                    'publish_note': publish_note,
                 }
             else:
                 logger.error(f'[{self.account_name}] ❌ 草稿保存失败')
@@ -2276,7 +3026,9 @@ return (() => {
                     'status': 'failed',
                     'draft_saved': False,
                     'cover': cover_result,
-                    'error': '草稿保存失败',
+                    'error': '草稿保存失败' + (
+                        f'（{publish_note}）' if publish_note else ''),
+                    'publish_note': publish_note,
                 }
         finally:
             # 确保浏览器实例被正确清理

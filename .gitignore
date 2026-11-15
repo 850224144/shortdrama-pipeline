@@ -55,3 +55,24 @@ test_upload_probe.mp4
 
 # 候选库 CSV 导入快照（运行时数据）
 data/candidate_imports/
+
+# 定时发表调试残留（probe/调试快照，未提交待清理）
+cal_dump.json
+picker_dump.json
+probe_cal2.py
+probe_cal3.py
+test_sched_e2e.py
+test_sched_check.py
+test_sched_cancel.py
+
+# 自动选剧/定时发表调试残留（根目录 probe/调试脚本，未提交待清理）
+probe_*.py
+probe_*.ps1
+pub_dbg*.json
+test_del_*.py
+test_desc_*.py
+test_draft_*.py
+test_pub_dbg*.py
+test_publish_btn*.py
+test_sched_*.py
+test_schedule.py
