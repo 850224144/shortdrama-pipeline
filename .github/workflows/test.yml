@@ -51,6 +51,32 @@ jobs:
       - name: Run unit tests
         run: python -m pytest tests/unit -q -rf
 
+  hook-unit:
+    name: ai_hook_tool unit tests (Python 3.11, Windows)
+    # 首集钩子工具的单测：纯逻辑 + 临时目录，不需要 whisper 模型、ffmpeg 或素材。
+    # 刻意不装 requirements.txt 里的 faster-whisper（转写路径在无依赖时按 PENDING
+    # 返回，单测只验证「未串用别剧缓存」这类判定，不需要真实推理）。
+    runs-on: windows-latest
+    defaults:
+      run:
+        working-directory: ai_hook_tool
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install test dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install pytest
+
+      - name: Run ai_hook_tool tests
+        run: python -m pytest tests -q -rf
+
   integration-collect:
     name: Integration collect-only (manual)
     # 仅手动触发；不真实运行 integration，只校验收集阶段无 import / 路径报错。
