@@ -1075,6 +1075,25 @@ class UploadManager(BaseQueueManager):
         conn.close()
         return records
     
+    def _upload_side_effect_done(self, task: Dict) -> bool:
+        """本轮是否已对平台产生不可回滚的副作用（决定能否安全重试）。
+
+        draft_saved=草稿已写入草稿箱；published=已发表；pending_confirm=定时发表
+        未确认（作品可能已在已发布列表里）。任一为真时重传=重复上传/重复发表。
+        """
+        return bool(task.get('draft_saved') or task.get('published')
+                    or task.get('pending_confirm'))
+
+    def _retry_block_reason(self, task: Dict, timed_out: bool) -> str:
+        """返回「不可自动重试」的原因；空串表示可以重排队。"""
+        if timed_out:
+            return f'单任务执行超时（>{self.task_timeout}s），副作用未确认，转人工'
+        if self._upload_side_effect_done(task):
+            return '已产生草稿/发表副作用，未自动重试以免重复上传'
+        if not self._should_retry(task):
+            return f'重试已达上限（{self.max_retries} 次）'
+        return ''
+
     def _upload_worker(self):
         """上传工作线程 - 缩小锁范围，避免死锁"""
         # 先预检所有待上传账号的登录态。
@@ -1149,7 +1168,11 @@ class UploadManager(BaseQueueManager):
                 self._log('info', f'开始上传：{task["drama_name"]} V{task["version"]}')
             
                 # 执行上传（不持锁，避免阻塞其他线程）
+                started_at = task.get('started_at')
                 success = self._execute_upload(task)
+                timed_out = bool(started_at) and \
+                    self._elapsed_seconds(started_at) > self.task_timeout
+                requeued = False
             
                 # 更新任务状态（短暂持锁）
                 with self.lock:
@@ -1164,12 +1187,43 @@ class UploadManager(BaseQueueManager):
                         # upload_state 由 archive.aggregate_upload_state 实时聚合（无 upload_state 列）。
                         self._sync_drama_archive(task, 'done')
                     else:
-                        task['status'] = 'failed'
-                        task['completed_at'] = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
-                        self.failed.append(task)
-                        self._log('error', f'上传失败：{task["drama_name"]} V{task["version"]} - {task.get("error_message")}')
-                        self._sync_drama_archive(task, 'failed')
+                        # 有限重试（base_queue 上限 2 次）：只有「确定没有产生平台副作用」
+                        # 才重排队。draft_saved / published / pending_confirm 任一为真，
+                        # 说明草稿或作品可能已经在视频号里了，重传=重复上传，转人工。
+                        blocked_by = self._retry_block_reason(task, timed_out)
+                        if not blocked_by:
+                            self._record_retry(task)
+                            task['status'] = 'pending'
+                            task['last_error'] = task.get('error_message')
+                            task['error_message'] = ''
+                            task['completed_at'] = None
+                            self.queue.append(task)
+                            requeued = True
+                            self._log('warning',
+                                      f'上传失败，重排队第 {task["retry_count"]}/'
+                                      f'{self.max_retries} 次：{task["drama_name"]} '
+                                      f'V{task["version"]} - {task["last_error"]}')
+                        else:
+                            task['status'] = 'failed'
+                            task['completed_at'] = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+                            task['error_message'] = (
+                                f'{task.get("error_message") or "上传失败"}｜{blocked_by}')
+                            self.failed.append(task)
+                            self._log('error', f'上传失败：{task["drama_name"]} '
+                                               f'V{task["version"]} - {task.get("error_message")}')
+                            self._sync_drama_archive(task, 'failed')
             
+                if requeued:
+                    # 重排队：状态回 pending、清 completed_at，错误留痕到 error_message
+                    with _connect_db(self.db_path) as conn:
+                        conn.execute(
+                            "UPDATE upload_records SET status='pending', "
+                            "completed_at=NULL, error_message=? WHERE id=?",
+                            (task.get('last_error'), task['id']))
+                        conn.commit()
+                    time.sleep(2)  # 重试前同样留风控间隔
+                    continue
+
                 # 更新数据库（不持锁）—— 同步实际使用的文案与封面状态，留审计痕迹
                 _topics_db = json.dumps(task.get('topics', []), ensure_ascii=False) if task.get('topics') else None
                 _cover_status = task.get('cover_status', 'not_requested')

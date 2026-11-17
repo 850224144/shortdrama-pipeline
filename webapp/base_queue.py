@@ -7,8 +7,15 @@
 - 切片走 JobStore（jobs.db，job_type='cut'），上传走 upload.db 直连（upload_records
   等表），两套表结构不同构，基类不统一存储；
 - 执行钩子 ``_execute_task(task)`` 由子类实现；
-- 重试上限 / 超时熔断提供判定工具与归位约定，本轮不擅自改变现有自动行为
-  （现有两队列失败即入 failed，无自动重试；接入点留待后续评审）。
+- 重试上限 / 超时熔断提供判定工具与归位约定。
+
+现状（2026-11-17）：
+- 上传队列已接入有限重试与「副作用确认」保护（``UploadManager._upload_worker``
+  调用 ``_should_retry`` / ``_record_retry`` / ``_elapsed_seconds``，
+  ``_retry_block_reason`` 保证草稿/发表副作用已发生时不再重传）。
+- 切片队列仍是失败即入 failed，没有自动重试。
+- ``_execute_task`` 目前没有任何子类覆盖：两套队列的执行流程仍写在各自 worker 里，
+  该钩子只是预留接口。改成统一钩子需要重排两条 worker 的控制流，属单独重构。
 """
 import threading
 from datetime import datetime
