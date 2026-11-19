@@ -2662,6 +2662,13 @@ class PipelineProcessor:
             force=force)
         if not should:
             self.logger.log(drama_name, 'WARN', f'切片跳过：{reason}')
+            # 成品齐全属于“这部剧已完成”，批次队列要同步收尾；否则每次重启
+            # 的批次续跑都会把这部剧重新提交一遍（表现为永远 pending）。
+            if '已有成品' in (reason or ''):
+                try:
+                    _pq_mark_by_drama(drama_name, status='done')
+                except Exception:
+                    pass
             self._update_state('idle', '', 0, f'跳过：{reason}')
             return {
                 'name': drama_name,
