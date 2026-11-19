@@ -81,11 +81,13 @@ def collect(db_path, date=None, days=1):
             return {}
 
     # 1) 按 job_type 汇总窗口内任务
+    kept_rows = []
     for job in rows:
         created = _parse_ts(job.get('created_at'))
         if created and not (window_start <= created.strftime('%Y-%m-%d %H:%M:%S')
                             <= window_end):
             continue
+        kept_rows.append(job)
         jt = job.get('job_type') or 'unknown'
         agg = result['job_types'].setdefault(jt, {
             'total': 0, 'completed': 0, 'failed': 0, 'running': 0,
@@ -119,12 +121,15 @@ def collect(db_path, date=None, days=1):
                 'finished_at': job.get('finished_at'),
             })
         if status in ('failed',) and job.get('error'):
-            result['errors'].append({
-                'job_type': jt,
-                'drama': params_of(job).get('drama_name') or '',
-                'error': job.get('error')[:300],
-                'finished_at': job.get('finished_at'),
-            })
+            err = job.get('error') or ''
+            # 续传器主动放弃的“素材已就绪/取消续传”不是真失败，剔除避免噪音
+            if '取消续传' not in err and '素材已就绪' not in err:
+                result['errors'].append({
+                    'job_type': jt,
+                    'drama': params_of(job).get('drama_name') or '',
+                    'error': err[:300],
+                    'finished_at': job.get('finished_at'),
+                })
 
     for jt, agg in result['job_types'].items():
         agg['duration_avg'] = (round(agg['duration_sum'] / agg['duration_n'], 1)
@@ -144,7 +149,7 @@ def collect(db_path, date=None, days=1):
     result['event_levels'] = ev_by_level
 
     # 3) 最慢任务（窗口内有时长的前 5 名）
-    slow = [(dur, job) for job in rows if (dur := _dur_seconds(job)) is not None]
+    slow = [(dur, job) for job in kept_rows if (dur := _dur_seconds(job)) is not None]
     slow.sort(key=lambda x: x[0], reverse=True)
     for dur, job in slow[:5]:
         p = params_of(job)
