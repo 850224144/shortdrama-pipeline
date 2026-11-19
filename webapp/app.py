@@ -34,6 +34,9 @@ from archive import init_database as _archive_init
 # 配置环境变量覆盖（须在任何组件读 CONFIG 前应用）
 from health import apply_env_overrides
 
+# 单实例守卫（防止重复启动导致同批任务被提交两遍）
+from single_instance import acquire_or_exit
+
 # 启动后台钩子
 from startup_tasks import (
     start_cut_reconcile,
@@ -172,6 +175,9 @@ def handle_disconnect():
 
 
 # ── 启动后台钩子（对账 / 续传 / 日志清理 / 清理补扫）─────
+# 先抢单实例锁：拿不到说明已有进程在跑（重复启动会重复提交同一批任务、抢同一个端口）
+_INSTANCE_LOCK = acquire_or_exit(
+    os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'data', 'webapp.lock'))
 start_cut_reconcile(batch_cut_manager, logger)
 start_download_resume(processor, process_controller, logger, CONFIG)
 start_drama_job_reconcile(processor._download_job_store(), logger)
