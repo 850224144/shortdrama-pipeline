@@ -118,25 +118,23 @@ class TestComputeVersionBudget(unittest.TestCase):
         self.assertGreaterEqual(budget, min_final * 1.05 + p.MIN_SEG_DUR)
 
     def test_jitter_varies_between_calls(self):
-        """两次调用通常产生不同预算；若相同则必须都在 clamp 边界（合法同长）。
+        """抖动值不同 → 预算不同（放开 max_dur 避免被 clamp 吃掉差异）。
 
-        方案A（max_dur=330 收紧）后，高剧情量弧线常在 max_dur 处被夹住，
-        两版同长属正确行为（版本在内容上差异化）；只有既同长又非边界才失败。
+        原测试用默认 max_dur=330：高剧情量弧线两版都被夹到 346.5，随机值
+        相邻时会产出 346.3/346.5，既非“同长”又非“边界”，偶发失败。
         """
         p, _ = _mk()
         eps = _eps_hl()
-        b1 = p._compute_version_budget(self._plan(), 0, eps)
-        b2 = p._compute_version_budget(self._plan(), 0, eps)
-        # clamp 边界预算：min=180→204（min_dur*1.05+MIN_SEG_DUR），
-        # max=330→346.5（max_dur*1.05）
-        rc = p._resolve_cut_config(None)
-        min_bound = rc['min_dur'] * 1.05 + p.MIN_SEG_DUR
-        max_bound = rc['max_dur'] * 1.05
-        same_at_boundary = (abs(b1 - b2) <= 0.5 and
-                            (abs(b1 - min_bound) < 0.01 or
-                             abs(b1 - max_bound) < 0.01))
-        self.assertTrue(abs(b1 - b2) > 0.5 or same_at_boundary,
-                        f'抖动应产生差异，或同长但都在 clamp 边界：{b1} vs {b2}')
+        with mock.patch.object(random, 'uniform', side_effect=[20.0, 55.0]):
+            b1 = p._compute_version_budget(
+                self._plan(), 0, eps,
+                config={'min_dur': 180, 'max_dur': 600})
+            b2 = p._compute_version_budget(
+                self._plan(), 0, eps,
+                config={'min_dur': 180, 'max_dur': 600})
+        # 抖动相差 35s → 预算差 35×1.05 = 36.75s
+        self.assertGreater(abs(b1 - b2), 30.0,
+                           f'抖动应显著改变预算：{b1} vs {b2}')
 
     def test_angle_bonus_none_key_no_crash(self):
         """vplan.angle 为 None（dict.get(None) 合法）→ 不崩，角度加成 0。"""

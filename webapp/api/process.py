@@ -66,11 +66,25 @@ def create_process_bp(deps):
         """处理消息"""
         data = request.get_json()
         message = data.get('message', '')
+        # 可选水印选择：''/None=自动交替；"小桃追剧中"/"福桃说剧"=固定账号；
+        # 其它非空文本=自定义水印文字（账号仍自动交替）。只做类型/长度门控，
+        # 值语义在 processor 侧解析。
+        watermark = data.get('watermark')
+        if watermark is not None:
+            if not isinstance(watermark, str):
+                return jsonify({'status': 'failed',
+                                'error': 'watermark 必须为字符串'}), 400
+            watermark = watermark.strip()
+            if len(watermark) > 30:
+                return jsonify({'status': 'failed',
+                                'error': 'watermark 超长（≤30字符）'}), 400
+            if not watermark:
+                watermark = None
 
         if not message:
             return jsonify({'status': 'failed', 'error': '消息为空'}), 400
 
-        body, status_code = process_controller.start(message)
+        body, status_code = process_controller.start(message, watermark=watermark)
         return jsonify(body), status_code
 
     @bp.route('/api/cleanup-logs', methods=['POST'])

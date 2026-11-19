@@ -30,6 +30,7 @@ class AutomaticSelection:
         self.run_id = None
         self.cancel_event = None
         self._pipeline_held = False
+        self._target_account = None  # 用户/调用方指定的目标账号（单账号运行）
 
     def status(self):
         run = library.get_auto_run(self.run_id) if self.run_id else library.get_auto_run()
@@ -71,11 +72,23 @@ class AutomaticSelection:
             run = library.get_auto_run(run['id']) or run
         return run
 
-    def start(self, count=2):
+    def start(self, count=2, account=None):
         try:
             count = max(1, min(int(count or 2), 2))
         except (TypeError, ValueError):
             count = 2
+        # 校验目标账号（reviewer 逻辑错误）：外部可传 int/dict/list 导致后续
+        # 字符串拼接 TypeError 崩溃管线，或未知账号流入选择/日志。非字符串或
+        # 不在 ACCOUNTS 一律回退默认账号并记录警告，不阻断选剧。
+        if account is not None:
+            if not isinstance(account, str) or not account.strip():
+                self.logger.log('default', 'WARNING',
+                                f'自动选剧：目标账号类型无效（{type(account).__name__}），回退默认账号')
+                account = None
+            elif account not in ACCOUNTS:
+                self.logger.log('default', 'WARNING',
+                                f'自动选剧：目标账号 "{account}" 不在 ACCOUNTS，回退默认账号')
+                account = None
         if not self._start_lock.acquire(blocking=False):
             return {'status': 'failed', 'error': '自动选剧任务正在启动'}, 409
         execution_gate_acquired = False
@@ -93,6 +106,7 @@ class AutomaticSelection:
                         return {'status': 'failed', 'error': '处理资源正被其他任务占用'}, 409
                     execution_gate_acquired = True
                     self._starting = True
+                    self._target_account = account or None
                     ok, reason = self._check_pipeline_resources()
                     if not ok:
                         return {'status': 'failed', 'error': reason}, 409
@@ -452,9 +466,15 @@ class AutomaticSelection:
         cut_started = False
         attempted_title_keys = set()
         try:
+            # 单账号运行（分离方案，用户确认 2026-11-10）：下载/切片不需要微信
+            # 登录，只有上传前才查登录。目标账号 = 调用方指定，否则默认第一个
+            # 账号，仅作为成品归属标记（上传时按账号隔离，登哪个传哪个）。
+            account = self._target_account or ACCOUNTS[0]
+            self.logger.log(account, 'INFO',
+                            '自动选剧：单账号运行，目标账号=' + account)
+
             # The orchestrator keeps the shared gate through download and cut handoff.
             for slot in range(count):
-                account = ACCOUNTS[slot]
                 chosen = None
                 item_id = None
                 failure_count = 0

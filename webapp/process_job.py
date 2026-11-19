@@ -24,7 +24,7 @@ class ProcessJobController:
             'start_time': None,
         }
 
-    def start(self, message):
+    def start(self, message, watermark=None):
         """提交主处理任务。返回 (payload, http_status)。"""
         with self.lock:
             if self.state['processing']:
@@ -45,7 +45,7 @@ class ProcessJobController:
             })
             self.thread = threading.Thread(
                 target=self._run,
-                args=(message, context),
+                args=(message, context, watermark),
                 name=f'process-job-{context.job_id[:8]}',
                 daemon=True,
             )
@@ -79,10 +79,10 @@ class ProcessJobController:
         with self.lock:
             return dict(self.state)
 
-    def _run(self, message, context):
+    def _run(self, message, context, watermark=None):
         try:
             result = self.processor.process_message(
-                message, cancel_event=context.cancel_event)
+                message, cancel_event=context.cancel_event, watermark=watermark)
         except JobCancelled:
             result = {'status': 'cancelled', 'error': '用户已停止任务'}
         except Exception as exc:

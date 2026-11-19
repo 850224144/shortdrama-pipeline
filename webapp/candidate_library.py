@@ -599,6 +599,32 @@ def candidate_by_title(title):
         conn.close()
 
 
+def titles_by_source(url):
+    """按分享链接返回候选库里的剧名（去重、按标题排序）。
+
+    供下载重复转存时定位网盘目录：候选库标题是「链接→剧名」的权威来源。
+    """
+    url = str(url or '').strip()
+    if not url:
+        return []
+    base = url.split('?')[0]
+    init_database()
+    conn = _connect()
+    try:
+        rows = conn.execute(
+            'SELECT title FROM candidates WHERE source_url=? OR source_url LIKE ? '
+            'ORDER BY title', (url, base + '%')).fetchall()
+    finally:
+        conn.close()
+    seen, out = set(), []
+    for row in rows:
+        title = str(row['title'] or '').strip()
+        if title and title not in seen:
+            seen.add(title)
+            out.append(title)
+    return out
+
+
 def add_auto_run(run_id, requested_count=2):
     init_database()
     conn = _connect()

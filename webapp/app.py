@@ -38,8 +38,11 @@ from health import apply_env_overrides
 from startup_tasks import (
     start_cut_reconcile,
     start_download_resume,
+    start_pending_batch_resume,
+    start_drama_job_reconcile,
     start_logs_cleanup,
     start_cleanup_sweep,
+    start_disk_watermark_watch,
 )
 
 # 各业务域蓝图工厂
@@ -53,6 +56,8 @@ from api.upload import create_upload_bp
 from api.cut import create_cut_bp
 from api.dramaid import create_dramaid_bp
 from api.candidates import create_candidates_bp
+from api.hooks import create_hooks_bp
+from api.ops import create_ops_bp
 from candidate_library import init_database as _candidate_library_init
 from automatic_selection import AutomaticSelection
 
@@ -149,6 +154,8 @@ app.register_blueprint(create_upload_bp(deps))
 app.register_blueprint(create_cut_bp(deps))
 app.register_blueprint(create_dramaid_bp(deps))
 app.register_blueprint(create_candidates_bp(deps))
+app.register_blueprint(create_hooks_bp(deps))
+app.register_blueprint(create_ops_bp(deps))
 
 
 # ── WebSocket 事件 ──────────────────────────────────────
@@ -167,8 +174,11 @@ def handle_disconnect():
 # ── 启动后台钩子（对账 / 续传 / 日志清理 / 清理补扫）─────
 start_cut_reconcile(batch_cut_manager, logger)
 start_download_resume(processor, process_controller, logger, CONFIG)
+start_drama_job_reconcile(processor._download_job_store(), logger)
+start_pending_batch_resume(processor, process_controller, logger, CONFIG)
 start_logs_cleanup(logger)
 start_cleanup_sweep(artifact_cleanup, logger)
+start_disk_watermark_watch(artifact_cleanup, logger, CONFIG)
 
 
 if __name__ == '__main__':

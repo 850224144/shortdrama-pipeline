@@ -23,6 +23,7 @@ __pycache__/
 *.pyc
 *.pyo
 .pytest_cache/
+.pytest_tmp/
 .hermes-tmp.*
 nul
 .venv/
@@ -76,3 +77,8 @@ test_pub_dbg*.py
 test_publish_btn*.py
 test_sched_*.py
 test_schedule.py
+
+# 本次会话临时目录
+.pytest_tmp2/
+_rerun/
+data/backup/

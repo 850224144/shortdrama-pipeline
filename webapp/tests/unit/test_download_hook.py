@@ -34,18 +34,34 @@ class TestDownloadHook(unittest.TestCase):
     def _li(self, drama='测试剧'):
         return {'link': 'https://pan.baidu.com/s/abc123?pwd=9999', 'link_id': drama, 'pwd': '9999'}
 
+    def _fake_eps(self, d, n=2):
+        os.makedirs(d, exist_ok=True)
+        for i in range(1, n + 1):
+            with open(os.path.join(d, f'第{i}集.mp4'), 'wb') as fh:
+                fh.write(b'x' * 100)
+
     def test_skip_local_existing(self):
-        """本地目录已存在 → 防重跳过（不下载）。"""
+        """本地目录已存在且真有素材 → 防重跳过（不下载）。"""
         p = self._mk()
-        os.makedirs(os.path.join(self.tmp, '测试剧'), exist_ok=True)
+        self._fake_eps(os.path.join(self.tmp, '测试剧'))
         r = p._download_once(self._li())
         self.assertTrue(r['success'])
         self.assertTrue((r.get('error') or '').startswith('防重'))
         self.assertEqual(r['drama_name'], '测试剧')
 
-    def test_skip_history_done(self):
-        """历史 download_state=done → 防重跳过。"""
+    def test_download_when_local_dir_only_residue(self):
+        """本地目录只剩 .incoming 半截文件 → 不能当已完成跳过。"""
         p = self._mk()
+        os.makedirs(os.path.join(self.tmp, '测试剧', '.incoming'), exist_ok=True)
+        ok, reason = archive.should_download('测试剧',
+                                             os.path.join(self.tmp, '测试剧'))
+        self.assertTrue(ok)
+        self.assertIn('残留', reason)
+
+    def test_skip_history_done(self):
+        """历史 download_state=done 且素材仍在 → 防重跳过。"""
+        p = self._mk()
+        self._fake_eps(os.path.join(self.tmp, '测试剧'))
         archive.upsert_archive('测试剧', download_state='done')
         r = p._download_once(self._li())
         self.assertTrue(r['success'])

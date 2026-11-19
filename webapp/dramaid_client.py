@@ -59,15 +59,14 @@ class DramaidClient:
         """按剧名取最佳匹配（精确剧名优先，否则首个已上架）。
 
         返回上游 item dict（含 drama_id/drama_name/is_published...）或 None。
-        仅用于发布前自动填链接；任何失败返回 None，调用方跳过填链接不阻断。
+        None **仅表示上游确实无匹配**；网络失败/非 200/解析失败**抛异常**，
+        由 resolve 记为 'error' 并重试——避免把瞬时网络故障误判成「查不到」
+        而跳过填链接（能查到的剧集 ID 必须填进去）。
         """
-        try:
-            resp = self.search(drama_name, drama_type=drama_type, page=1, page_size=20)
-            if resp.status_code != 200:
-                return None
-            data = resp.json()
-        except Exception:
-            return None
+        resp = self.search(drama_name, drama_type=drama_type, page=1, page_size=20)
+        if resp.status_code != 200:
+            raise RuntimeError(f'共享资料库返回 HTTP {resp.status_code}')
+        data = resp.json()  # 解析失败抛异常，同样记为 error
         items = (data or {}).get('data') or []
         if not items:
             return None
@@ -139,17 +138,23 @@ class DramaidClient:
         """发布前解析剧集 ID（A3 混合语义）。
 
         已有绑定 → 用绑定；无绑定 → 自动查上游首条（本次用，不落库）。
+        series 无匹配时回退 mini_drama（A3 补充）：部分剧在库里只有
+        mini_drama 条目（如「她断十二载交情」），只查 series 会误判
+        「查不到」而跳过填链接。ai_drama 需登录态，不做自动回退。
         返回 (drama_id, source, matched_name, error)：
           drama_id 可为 None（未找到）；source ∈ bound|autolookup|none|error。
         """
         bound = self.get_bound(drama_name)
         if bound and bound.get('drama_id'):
             return (bound['drama_id'], 'bound', bound.get('drama_name') or drama_name, None)
-        try:
-            item = self.lookup_best(drama_name, drama_type=drama_type)
+        # series 无匹配时回退 mini_drama；显式指定其它类型则不回退。
+        types = ('series', 'mini_drama') if drama_type == 'series' else (drama_type,)
+        for dt in types:
+            try:
+                item = self.lookup_best(drama_name, drama_type=dt)
+            except Exception as exc:  # 网络失败/非200/解析失败：记为 error 重试，不回退
+                return (None, 'error', None, f'共享资料库查询失败：{exc}')
             if item and item.get('drama_id'):
                 return (item['drama_id'], 'autolookup',
                         item.get('drama_name') or drama_name, None)
-            return (None, 'none', None, '未找到匹配剧集')
-        except Exception as exc:  # 网络失败等
-            return (None, 'error', None, f'共享资料库查询失败：{exc}')
+        return (None, 'none', None, '未找到匹配剧集')

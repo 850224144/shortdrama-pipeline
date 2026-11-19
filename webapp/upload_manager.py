@@ -359,6 +359,27 @@ class UploadManager(BaseQueueManager):
         conn.close()
 
         
+    def _duplicate_by_path(self, video_path, account):
+        """P2-10 幂等：同账号同一成片文件是否已入队/已上传。
+
+        (剧,版本,账号) 查重挡不住“同一文件换了版本号/剧名再入队”，
+        这里以文件路径为幂等键兜底，防止重复发布被判重或同稿二次发布。
+        """
+        if not video_path:
+            return None
+        try:
+            with _connect_db(self.db_path) as conn:
+                cur = conn.cursor()
+                cur.execute('''
+                    SELECT id, drama_name, version, status FROM upload_records
+                    WHERE account=? AND video_path=?
+                      AND status IN ('pending','uploading','completed')
+                    ORDER BY id DESC LIMIT 1
+                ''', (account, video_path))
+                return cur.fetchone()
+        except Exception:
+            return None
+
     def _check_content_duplicate(self, video_path, account):
         """上传前内容查重：跨账号的已上传/已入队成片相似时返回冲突 dict。
 
@@ -538,6 +559,14 @@ class UploadManager(BaseQueueManager):
                                      f'（记录 #{existing[0]}），拒绝重复上传'}
                 return {'status': 'failed', 'error': f'[{_account}] V{version}已在队列中'}
 
+            # P2-10 幂等：同一成片文件（即使换了版本号）不再重复入队
+            dup_by_path = self._duplicate_by_path(video_path, _account)
+            if dup_by_path:
+                return {'status': 'failed',
+                        'error': (f'[{_account}] 该成片已入队/已上传（记录 '
+                                  f'#{dup_by_path[0]} {dup_by_path[1]} '
+                                  f'V{dup_by_path[2]} {dup_by_path[3]}），跳过重复入队')}
+
             # R9 内容级查重：同账号已传/已入队内容相似成片 → 拒绝（防平台判重）
             cdup = self._check_content_duplicate(video_path, _account)
             if cdup:
@@ -655,6 +684,17 @@ class UploadManager(BaseQueueManager):
                             duplicates.append({'index': idx, 'drama_name': drama,
                                                'version': version, 'account': account})
                         continue
+
+                # P2-10 幂等：同一成片文件重复入队（换版本号/改名）直接拦下
+                _dup_path = self._duplicate_by_path(video_path, account)
+                if _dup_path:
+                    duplicates.append({'index': idx, 'drama_name': drama,
+                                       'version': version, 'account': account,
+                                       'reason': 'duplicate_path',
+                                       'conflict': (f'该成片已入队/已上传（记录 #{_dup_path[0]} '
+                                                    f'{_dup_path[1]} V{_dup_path[2]} '
+                                                    f'{_dup_path[3]}）')})
+                    continue
 
                 # R9 内容级查重：同账号已传/已入队内容相似 → 拒收（宁可少传不可封号）
                 cdup = self._check_content_duplicate(video_path, account)
@@ -1609,13 +1649,18 @@ class UploadManager(BaseQueueManager):
                 detail = f'：{resolved["error"]}' if resolved.get('error') else ''
                 self._log('warn',
                           f'V{task["version"]} 未取得剧集 ID（{drama_src}）{detail}，'
-                          f'跳过填链接，照常保存草稿')
+                          f'跳过填链接，改为保存草稿（不发表/不定时）')
 
             # 执行上传（传递位置参数）
             # upload_to_draft 现在返回结构化 dict，不再返回 bool：
             #   {'status': 'success'|'failed', 'draft_saved': bool,
             #    'cover': {'status': ..., 'error': ..., 'cover_path': ...},
             #    'error': str|None}
+            # 查不到剧集 ID 时不发表/不定时，直接保存草稿（用户要求）：无法填
+            # 「链接 → 视频号剧集」就不发布，避免发出后挂不上剧集链接。
+            scheduled = bool(getattr(self, '_scheduled_publish', False))
+            if not drama_id:
+                scheduled = False
             outcome = uploader.upload_to_draft(
                 video_path=task['video_path'],
                 title=title or '短剧精彩片段',
@@ -1625,7 +1670,7 @@ class UploadManager(BaseQueueManager):
                 drama_name=task['drama_name'],
                 drama_id=drama_id,
                 publish_time=task.get('publish_time'),
-                scheduled=bool(getattr(self, '_scheduled_publish', False)),
+                scheduled=scheduled,
             )
 
             if isinstance(outcome, dict):

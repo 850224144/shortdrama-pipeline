@@ -19,7 +19,7 @@ class BlockingProcess:
         self.started = threading.Event()
         self.event = None
 
-    def process_message(self, message, cancel_event=None):
+    def process_message(self, message, cancel_event=None, watermark=None):
         self.event = cancel_event
         self.started.set()
         cancel_event.wait(3)

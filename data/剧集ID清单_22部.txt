@@ -1,0 +1,71 @@
+剧集ID 清单（15/22 部有，7 部无）
+=================================
+
+【有剧集ID —— 15 部】
+1. 她断十二载交情
+   mini_drama: wx4d6326e9ebe0dcdb_566721_3959201168        （仅 mini_drama，绑定须用 mini_drama 类型）
+
+2. 重生后我不当后妈
+   series:      event/UzFfAgtgekIEAQAAAAAAjy8uOkESuQAAAAstQy6ubaLX4KHWvLEZgBPE16ZkUSl5e-KNzNPgMCmPJ2JlwJZfSTxeabx4SyskxeI
+   mini_drama:  wx9ae5f8a645b7cfeb_173806_3959201168
+
+3. 秘书的坏账我来算
+   series:      event/UzFfAgtgekIEAQAAAAAApZMvK19-8QAAAAstQy6ubaLX4KHWvLEZgBPEtaAsNjZMELyTzNPgMCmPJ59c1kntvrm1gaJEK0zvcNg
+   mini_drama:  wxbe52b30ba15f9ed2_399258_3959201168
+
+4. 婆婆撑腰我翻身
+   series:      event/UzFfAgtgekIEAQAAAAAAfzwmmoDJIgAAAAstQy6ubaLX4KHWvLEZgBPEq6cAZms3FryTzNPgMCmPJ5bJVkKkE5Kvz7hlwqUqTDM
+   mini_drama:  wx57d7e2df9a38d916_236958_3959201168
+
+5. 瘸腿妈妈的光
+   series:      event/UzFfAgtgekIEAQAAAAAADFYpsF_LZQAAAAstQy6ubaLX4KHWvLEZgBPEhatMUXMyF7yTzNPgMCmPJ2ED7abn4XpDE4aNVjQ1OeA
+   mini_drama:  wxbe52b30ba15f9ed2_393159_3959201168
+
+6. 我生娃被明码标价
+   series:      event/UzFfAgtgekIEAQAAAAAAplAoObMaFgAAAAstQy6ubaLX4KHWvLEZgBPEoaAIfTciXLKTzNPgMCmPJ7coCkxrkS-mCN7h6CWOgjc
+   mini_drama:  wxfce06c49458971ab_669343_3959201168
+
+7. 婚礼为难我，我直接换新郎
+   series:      event/UzFfAgtgekIEAQAAAAAAMXs56FZYogAAAAstQy6ubaLX4KHWvLEZgBPEpqpQIXEaY7GTzNPgMCmPJ8i9AP3nYewGRkmY6FEzzho
+   mini_drama:  wxfce06c49458971ab_658499_3959201168
+
+8. 八年付出换来背叛
+   series:      event/UzFfAgtgekIEAQAAAAAAXvANDgJe0AAAAAstQy6ubaLX4KHWvLEZgBPE16YcQHFjIrSTzNPgMCmPJ98LSQPIdV-JZVopCE1YMDA
+   （无 mini_drama）
+
+9. 婆婆寿宴替我撑腰
+   series:      event/UzFfAgtgekIEAQAAAAAAz4QGeBdvxAAAAAstQy6ubaLX4KHWvLEZgBPEqaZkb2hIFrWTzNPgMCmPJ5zZPl5Y8SiWSJH4zHlyq6w
+   mini_drama:  wx4d6326e9ebe0dcdb_430772_3959201168
+
+10. 广场舞赴余生
+    series:      event/UzFfAgtgekIEAQAAAAAADuAg8nkSyQAAAAstQy6ubaLX4KHWvLEZgBPE6aU4ND9ab66TzNPgMCmPJ4hUCTjlfi2lqcnziWaJ4dw
+    （无 mini_drama）
+
+11. 我的家产我做主
+    series:      event/UzFfAgtgekIEAQAAAAAAcloYoD2czQAAAAstQy6ubaLX4KHWvLEZgBPE36dgMywpQ6-TzNPgMCmPJ3_yX5RnI0QxDm5KpWWQ01M
+    （无 mini_drama）
+
+12. 三年婚姻谁在撒谎
+    series:      event/UzFfAgtgekIEAQAAAAAAJAQ282lXyAAAAAstQy6ubaLX4KHWvLEZgBPE-qUQUGR2N62TzNPgMCmPJ0gJB_qN-0nsdG4ove8BLiQ
+    （无 mini_drama）
+
+13. 一声求救一场局
+    series:      event/UzFfAgtgekIEAQAAAAAA5vIqBvr2OgAAAAstQy6ubaLX4KHWvLEZgBPEkaAUQGwqJ6GTzNPgMCmPJyxioBBCmRGFk-bqN9PrAb4
+    （无 mini_drama）
+
+14. 失忆婆婆未忘家
+    series:      event/UzFfAgtgekIEAQAAAAAAzlUaH6j9oQAAAAstQy6ubaLX4KHWvLEZgBPEtKE8Zz42I9OTzNPgMCmPJ8JpQZUfQZ_tvCBWe9_xF30
+    （无 mini_drama）
+
+15. 真假千金认亲
+    series:      event/UzFfAgtgekIEAQAAAAAAHnAUtCoAkAAAAAstQy6ubaLX4KHWvLEZgBPEmaFwEzkmcNGTzNPgMCmPJ838Xx5P9lpZ1XZhhnY599I
+    （无 mini_drama）
+
+【无剧集ID —— 7 部，排除】
+- 扶人反被讹诈
+- 撕契时爱已迟
+- 悔赶持家婆
+- 红酒覆纱仇
+- 亲情止损
+- 卤味夫妻甜日子
+- 错嫁后我怀了三宝

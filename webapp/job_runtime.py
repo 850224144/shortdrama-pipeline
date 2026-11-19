@@ -51,12 +51,17 @@ class JobContext:
 
 
 class ExecutionGate:
-    """进程内资源闸门。"""
+    """进程内资源闸门。
 
-    def __init__(self):
+    render_slots > 1 时允许并行渲染（P1-6）：渲染槽位是计数信号量，
+    容量与 CONFIG['cut']['render_workers'] 一致，保证“并行路数 ≤ 配置路数”，
+    下载/ASR/上传等其他入口仍被 pipeline 锁串行保护。
+    """
+
+    def __init__(self, render_slots=1):
         self._pipeline_lock = threading.Lock()
         self._asr_lock = threading.Lock()
-        self._render_lock = threading.Lock()
+        self._render_slots = threading.Semaphore(max(1, int(render_slots or 1)))
 
     def try_acquire_pipeline(self):
         return self._pipeline_lock.acquire(blocking=False)
@@ -75,8 +80,11 @@ class ExecutionGate:
 
     @contextmanager
     def render_slot(self, cancel_event=None):
-        with self._wait_slot(self._render_lock, '渲染', cancel_event):
+        self._wait_semaphore(self._render_slots, '渲染', cancel_event)
+        try:
             yield
+        finally:
+            self._render_slots.release()
 
     @contextmanager
     def _wait_slot(self, lock, label, cancel_event):
@@ -88,5 +96,19 @@ class ExecutionGate:
         finally:
             lock.release()
 
+    def _wait_semaphore(self, sem, label, cancel_event):
+        while not sem.acquire(timeout=0.25):
+            if cancel_event is not None and cancel_event.is_set():
+                raise JobCancelled('用户已停止任务')
 
-execution_gate = ExecutionGate()
+
+def _render_slot_count():
+    """从配置读并行渲染路数（配置不可用时退回 1 = 原串行行为）。"""
+    try:
+        from config import CONFIG
+        return max(1, int(((CONFIG.get('cut') or {}).get('render_workers')) or 1))
+    except Exception:
+        return 1
+
+
+execution_gate = ExecutionGate(render_slots=_render_slot_count())

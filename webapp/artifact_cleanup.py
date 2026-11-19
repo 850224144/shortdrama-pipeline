@@ -31,13 +31,47 @@ import logging
 from datetime import datetime
 from typing import List, Dict, Optional
 
+from log_utils import context_from_task, get_logger, make_entry
+
 try:
     from config import CONFIG
 except Exception:
     # 独立运行（单元测试）时允许注入配置
     CONFIG = None
 
-logger = logging.getLogger('ArtifactCleanup')
+logger = get_logger('ArtifactCleanup')
+
+
+def _log_cleanup(level, message, *, stage, job=None, error=None,
+                 batch_id=None, account=None, drama_name=None, target_path=None):
+    """复用统一日志字段；仅记录现有上下文，不查库、不改变清理结果。
+
+    尚未持久化的计划没有任务 ID，以任务类型/版本/目标路径辅助定位。
+    上下文同时放入 LogRecord 和可读文本，默认控制台 formatter 也可检索。
+    """
+    job = job or {}
+    context = context_from_task(job)
+    for key, value in (('batch_id', batch_id), ('account', account),
+                       ('drama_name', drama_name)):
+        if value is not None:
+            context[key] = value
+    context['stage'] = stage
+    entry = make_entry(level, message, **context)
+    extra = {key: value for key, value in entry.items() if key != 'message'}
+    extra.update(
+        cleanup_entry=entry,
+        job_type=job.get('job_type', ''),
+        version=job.get('version'),
+        target_path=target_path if target_path is not None else job.get('target_path', ''),
+        error=str(error) if error is not None else '',
+    )
+    fields = ('batch_id', 'task_id', 'account', 'drama_name', 'stage',
+              'job_type', 'version', 'target_path', 'error')
+    details = ' '.join(f'{key}={extra[key]!r}' for key in fields
+                       if extra[key] is not None and extra[key] != '')
+    severity = logging.WARNING if entry['level'] == 'WARN' else getattr(logging, entry['level'])
+    logger.log(severity, '%s | %s', message, details, extra=extra)
+
 
 # 清理策略
 STRATEGY_NONE = 'none'
@@ -83,7 +117,9 @@ class ArtifactCleanup:
             if _r and (_r == self.recycle_root
                        or self.recycle_root.startswith(_r + os.sep)
                        or _r.startswith(self.recycle_root + os.sep)):
-                print(f'WARN: 回收站根 {self.recycle_root} 与 {_r} 重叠，重置为默认')
+                _log_cleanup(
+                    'WARN', f'回收站根 {self.recycle_root} 与 {_r} 重叠，重置为默认',
+                    stage='cleanup.init', target_path=self.recycle_root)
                 self.recycle_root = os.path.normpath(r'D:\短剧工坊\回收站')
                 break
         self.db_path = os.path.join(self.data_dir or r'D:\短剧工坊\data', 'upload.db')
@@ -98,8 +134,14 @@ class ArtifactCleanup:
                 conn.execute(
                     "CREATE UNIQUE INDEX IF NOT EXISTS ux_cleanup_jobs "
                     "ON artifact_cleanup_jobs(batch_id, job_type, target_path)")
-        except Exception:
-            pass
+        except Exception as e:
+            # 首次启动可能尚未由 UploadManager 建表；其他初始化失败仍需可见。
+            missing_table = (isinstance(e, sqlite3.OperationalError)
+                             and str(e) == 'no such table: artifact_cleanup_jobs')
+            _log_cleanup(
+                'DEBUG' if missing_table else 'WARN',
+                '清理任务唯一索引初始化未完成', stage='cleanup.init',
+                target_path=self.db_path, error=e)
 
     # ── 路径安全 ──────────────────────────────────────────────
     @staticmethod
@@ -161,8 +203,10 @@ class ArtifactCleanup:
                 if os.path.islink(cur) or \
                         (getattr(st, 'st_file_attributes', 0) & FILE_ATTRIBUTE_REPARSE_POINT):
                     return False, f'路径组件是符号链接/联接点，拒绝删除: {comp}'
-            except OSError:
-                pass
+            except OSError as e:
+                # 保留原有 realpath 兜底，不把元数据读取失败静默忽略。
+                _log_cleanup('WARN', '路径组件元数据读取失败，继续 realpath 校验',
+                             stage='cleanup.validate', target_path=cur, error=e)
         # realpath 解析（覆盖 Windows 联接点/重解析点）：解析后必须仍在根内
         try:
             real_p = os.path.realpath(p_abs)
@@ -216,8 +260,10 @@ class ArtifactCleanup:
         try:
             conn.execute("PRAGMA journal_mode=WAL")
             conn.execute("PRAGMA busy_timeout=5000")
-        except Exception:
-            pass  # WAL 失败不致命，回落默认 rollback journal
+        except Exception as e:
+            # WAL 失败不致命，仍返回连接并沿用 SQLite 默认日志模式。
+            _log_cleanup('DEBUG', 'SQLite 连接优化未启用，沿用默认设置',
+                         stage='cleanup.connect', target_path=self.db_path, error=e)
         return conn
 
     def _get_batch_records(self, batch_id):
@@ -293,7 +339,10 @@ class ArtifactCleanup:
             return set()
         try:
             return {int(v) for v in _json.loads(row['expected_versions'])}
-        except Exception:
+        except Exception as e:
+            _log_cleanup('WARN', '应上传版本清单解析失败，返回未知版本集',
+                         stage='cleanup.plan', batch_id=batch_id, account=account,
+                         drama_name=drama_name, target_path=output_dir, error=e)
             return set()
 
     def _drama_target_versions(self, out_dir, batch_id, account, drama_name, src_dir):
@@ -312,7 +361,9 @@ class ArtifactCleanup:
                 entries = os.listdir(out_dir)
             except OSError as e:
                 # P2-12: 目录不可读（权限/占用/脱机）→ 保守返回空集，调用方禁止目录级清理
-                print(f'WARN: 读取成品目录失败 {out_dir}: {e}')
+                _log_cleanup('WARN', '读取成品目录失败，禁止目录级清理',
+                             stage='cleanup.plan', batch_id=batch_id, account=account,
+                             drama_name=drama_name, target_path=out_dir, error=e)
                 return set()
             for fn in entries:
                 m = re.match(r'^edl_config_v(\d+)\.json$', fn, re.I)
@@ -537,7 +588,8 @@ class ArtifactCleanup:
                      job.get('version'), job.get('target_path')))
                 conn.commit()
         except Exception as e:
-            print(f'WARN: 回写清理任务状态失败: {e}')
+            _log_cleanup('WARN', '回写清理任务状态失败',
+                         stage='cleanup.mark_done', job=job, error=e)
 
     def _recover_pending_jobs(self, batch_id):
         """崩溃恢复：执行本批次 artifact_cleanup_jobs 里仍 pending 的遗留任务。
@@ -553,7 +605,8 @@ class ArtifactCleanup:
                     "WHERE status='pending' AND batch_id=?",
                     (batch_id,)).fetchall()
         except Exception as e:
-            print(f'WARN: 读取遗留清理任务失败: {e}')
+            _log_cleanup('WARN', '读取遗留清理任务失败',
+                         stage='cleanup.recover', batch_id=batch_id, error=e)
             return [], []
         jobs, results = [], []
         for r in rows:
@@ -694,7 +747,8 @@ class ArtifactCleanup:
             jobs.extend(rec_jobs)
             results.extend(rec_results)
         except Exception as e:
-            print(f'WARN: 恢复遗留清理任务失败: {e}')
+            _log_cleanup('WARN', '恢复遗留清理任务失败，继续现有计划流程',
+                         stage='cleanup.recover', batch_id=batch_id, error=e)
 
         plan = self.plan_cleanup(batch_id, strategy=strategy, dry_run=False)
         if plan['status'] != 'success':
@@ -770,7 +824,8 @@ class ArtifactCleanup:
                     "failed_count=?, cleanup_status=? WHERE batch_id=?",
                     (cnt[0] or 0, cnt[1] or 0, cnt[2] or 0, overall, batch_id))
         except Exception as e:
-            logger.warning(f'清理状态写回失败: {e}')
+            _log_cleanup('WARN', '清理状态写回失败',
+                         stage='cleanup.write_back', batch_id=batch_id, error=e)
 
     def _execute_job(self, job: Dict) -> Dict:
         """执行单个清理任务：写 manifest → 移动 → 更新 DB。"""
@@ -785,10 +840,14 @@ class ArtifactCleanup:
             ok, err = False, f'未知任务类型: {job["job_type"]}'
         if not ok:
             self._mark_job(job, 'failed', err)
+            _log_cleanup('WARN', '清理目标校验失败',
+                         stage='cleanup.validate', job=job, error=err)
             return {'status': 'failed', 'target': target, 'error': err}
 
         if not os.path.exists(target):
             self._mark_job(job, 'skipped', '目标不存在，跳过')
+            _log_cleanup('DEBUG', '清理目标不存在，跳过',
+                         stage='cleanup.execute', job=job)
             return {'status': 'skipped', 'target': target}
 
         recycle_path = self._unique_dir(job['recycle_path'])
@@ -797,12 +856,13 @@ class ArtifactCleanup:
             os.makedirs(os.path.dirname(recycle_path), exist_ok=True)
             shutil.move(target, recycle_path)
             self._mark_job(job, 'moved', None, recycle_path, manifest_path)
-            logger.info(f'已移动 {target} → {recycle_path}')
+            _log_cleanup('INFO', f'已移动 {target} → {recycle_path}',
+                         stage='cleanup.move', job=job)
             return {'status': 'moved', 'target': target,
                     'recycle_path': recycle_path, 'manifest': manifest_path}
         except Exception as e:
             self._mark_job(job, 'failed', str(e), recycle_path, manifest_path)
-            logger.warning(f'移动失败 {target}: {e}')
+            _log_cleanup('WARN', '移动失败', stage='cleanup.move', job=job, error=e)
             return {'status': 'failed', 'target': target, 'error': str(e)}
 
     def _mark_job(self, job, status, error=None, recycle_path=None, manifest_path=None):
@@ -818,7 +878,8 @@ class ArtifactCleanup:
                     (status, error, recycle_path, manifest_path, completed,
                      job['batch_id'], job['job_type'], job['target_path']))
         except Exception as e:
-            logger.debug(f'更新清理任务状态失败: {e}')
+            _log_cleanup('WARN', '更新清理任务状态失败',
+                         stage='cleanup.mark_job', job=job, error=e)
 
     # ── 一键删除已上传 ──────────────────────────────────────
     def _scan_drama_versions(self, drama_dir):
@@ -978,6 +1039,57 @@ class ArtifactCleanup:
                 'skipped': skipped, 'failed': failed, 'results': results}
 
     # ── 查询 ──────────────────────────────────────────────────
+    # ── P2-12 磁盘水位 ─────────────────────────────────────
+    @staticmethod
+    def disk_usage_pct(path: str):
+        """返回磁盘使用率百分比（0-100）；路径不可用返回 None。"""
+        try:
+            usage = shutil.disk_usage(path or '.')
+            if not usage.total:
+                return None
+            return round(usage.used / usage.total * 100, 1)
+        except Exception:
+            return None
+
+    def watermark_sweep(self, threshold_pct=None, max_batches: int = 3) -> Dict:
+        """磁盘水位超阈值时清理已上传批次（从旧到新，最多 max_batches 个）。
+
+        每批 12 部 × 8 版约 40–50G，跑满盘才清理一次就会卡住流水线；这里把
+        “等前端点清理”改成“空间告急自动回收已交付素材”。仍然走 recycle
+        （移动到回收站，不永久删除），失败不影响后续批次。
+        """
+        try:
+            threshold = float(threshold_pct if threshold_pct is not None
+                              else (CONFIG or {}).get('cleanup', {}).get(
+                                  'disk_watermark_pct', 85))
+        except (TypeError, ValueError):
+            threshold = 85.0
+        roots = []
+        try:
+            roots.append((CONFIG or {})['output_dir'])
+            roots.append((CONFIG or {})['download_base_dir'])
+        except Exception:
+            pass
+        usage = {r: self.disk_usage_pct(r) for r in roots if r}
+        over = {r: p for r, p in usage.items() if p is not None and p >= threshold}
+        result = {'threshold': threshold, 'usage': usage, 'over': list(over),
+                  'cleaned': [], 'failed': []}
+        if not over:
+            return result
+        batches = self.list_startup_cleanup_batches()[:max_batches]
+        for batch_id in batches:
+            try:
+                rep = self.execute_cleanup(batch_id, strategy=STRATEGY_RECYCLE)
+                result['cleaned'].append({'batch_id': batch_id,
+                                          'result': rep.get('status', 'ok')})
+                _log_cleanup('INFO', f'水位清理：批次 {batch_id} 已回收',
+                             stage='watermark')
+            except Exception as e:
+                result['failed'].append({'batch_id': batch_id, 'error': str(e)})
+                _log_cleanup('ERROR', f'水位清理失败：{batch_id} - {e}',
+                             stage='watermark', error=e)
+        return result
+
     def list_startup_cleanup_batches(self) -> List[str]:
         """返回启动补扫应处理的批次。
 

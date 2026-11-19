@@ -153,5 +153,142 @@ class TestExecuteUploadWith4TupleResolve(unittest.TestCase):
         self.assertEqual(task['drama_id_source'], 'autolookup')
 
 
+class TestResolveNetworkRetry(unittest.TestCase):
+    """网络/上游瞬时失败应重试（能查到的剧集 ID 必须填进去），真查不到不重试。
+
+    背景（BUG）：lookup_best 把网络失败静默吞成 None，resolve 记为 'none'，
+    与「真查不到」无法区分 → 能查到的 ID 被当查不到跳过填链接（2026-11-11
+    深夜批次全部 drama_id=None 即此因）。修复后网络失败记为 'error' 并重试。
+    """
+
+    def _make_manager(self):
+        from upload_manager import UploadManager
+        tmp = tempfile.mkdtemp(prefix='upload_retry_')
+        return UploadManager(data_dir=tmp)
+
+    def test_network_error_then_success_retries(self):
+        """第一次网络失败、第二次成功 → 重试后拿到 ID（能查到就填进去）。"""
+        mgr = self._make_manager()
+        calls = {'n': 0}
+
+        class _Flaky:
+            def resolve(self, name, drama_type='series'):
+                calls['n'] += 1
+                if calls['n'] == 1:
+                    raise RuntimeError('网络失败')
+                return ('12345', 'autolookup', '匹配剧名', None)
+
+        mgr.set_dramaid_client(_Flaky())
+        with mock.patch('upload_manager.time.sleep'):
+            res = mgr._resolve_task_drama_id({'drama_id': None, 'drama_name': '测试剧'})
+        self.assertEqual(res['drama_id'], '12345')
+        self.assertEqual(res['source'], 'autolookup')
+        self.assertGreaterEqual(calls['n'], 2, '网络失败后必须重试')
+
+    def test_all_errors_exhaust_returns_error(self):
+        """重试耗尽仍失败 → 返回 error（而非静默 none）。"""
+        mgr = self._make_manager()
+        c = _FakeDramaidClient(None, raise_exc=RuntimeError('网络失败'))
+        mgr.set_dramaid_client(c)
+        with mock.patch('upload_manager.time.sleep'):
+            res = mgr._resolve_task_drama_id({'drama_id': None, 'drama_name': '测试剧'})
+        self.assertTrue(res['source'].startswith('error:'), res)
+        self.assertIsNone(res['drama_id'])
+
+    def test_none_does_not_retry(self):
+        """真查不到（source='none'）不重试——重试无意义，快速放行。"""
+        mgr = self._make_manager()
+        calls = {'n': 0}
+
+        class _Never:
+            def resolve(self, name, drama_type='series'):
+                calls['n'] += 1
+                return (None, 'none', None, '未找到匹配剧集')
+
+        mgr.set_dramaid_client(_Never())
+        res = mgr._resolve_task_drama_id({'drama_id': None, 'drama_name': '测试剧'})
+        self.assertEqual(res['source'], 'none')
+        self.assertEqual(calls['n'], 1, '真查不到不得重试')
+
+    def test_error_branch_returns_dict_no_crash(self):
+        """error 分支仍返回 dict 四键，不抛异常（上传照常继续）。"""
+        mgr = self._make_manager()
+        c = _FakeDramaidClient(None, raise_exc=RuntimeError('网络失败'))
+        mgr.set_dramaid_client(c)
+        with mock.patch('upload_manager.time.sleep'):
+            res = mgr._resolve_task_drama_id({'drama_id': None, 'drama_name': '测试剧'})
+        self.assertIsInstance(res, dict)
+        for k in ('drama_id', 'source', 'matched_name', 'error'):
+            self.assertIn(k, res)
+
+
+class TestExecuteUploadNoDramaIdForcesDraft(unittest.TestCase):
+    """查不到剧集 ID → 强制保存草稿（不发表/不定时）回归。
+
+    需求（用户，2026-11-19）：上传后查不到剧集 ID 就不要发表、不要选择
+    定时发布，直接保存到草稿箱——无法填「链接 → 视频号剧集」就不发布，
+    避免发出后挂不上剧集链接。scheduled=True 是定时发表，False 是保存草稿。
+    """
+
+    def _task(self, tmp):
+        video = os.path.join(tmp, 'test_v1.mp4')
+        open(video, 'w', encoding='utf-8').close()
+        return {
+            'id': 1, 'drama_name': '测试剧', 'version': 1, 'video_path': video,
+            'account': '测试账号', 'title': None, 'description': None,
+            'topics': [], 'cover_path': None, 'status': 'uploading',
+            'batch_id': None, 'source_dir': tmp, 'output_dir': tmp,
+        }
+
+    def _run(self, resolve_result, scheduled_mode):
+        from upload_manager import UploadManager
+        tmp = tempfile.mkdtemp(prefix='upload_draft_')
+        mgr = UploadManager(data_dir=tmp)
+        mgr.set_dramaid_client(_FakeDramaidClient(resolve_result))
+        mgr._scheduled_publish = scheduled_mode
+        task = self._task(tmp)
+        calls = {}
+
+        class _FakeUploader:
+            def set_log_hook(self, hook):
+                self.hook = hook
+
+            def check_login(self):
+                return True
+
+            def upload_to_draft(self, **kw):
+                calls.update(kw)
+                return {'status': 'success', 'draft_saved': True,
+                        'cover': {'status': 'not_requested', 'cover_path': None},
+                        'error': None}
+
+        with mock.patch('upload_manager.WeChatChannelsUploader', return_value=_FakeUploader()):
+            ok = mgr._execute_upload(task)
+        self.assertTrue(ok)
+        return calls
+
+    def test_no_drama_id_forces_draft_even_when_scheduled(self):
+        """定时发表模式下，查不到剧集 ID → 强制 scheduled=False（存草稿）。"""
+        calls = self._run((None, 'none', None, '未找到匹配剧集'), scheduled_mode=True)
+        self.assertFalse(calls['scheduled'], '查不到剧集 ID 不得定时发表')
+        self.assertEqual(calls['drama_id'], None)
+
+    def test_no_drama_id_forces_draft_when_not_scheduled(self):
+        """非定时模式，查不到剧集 ID → 仍存草稿。"""
+        calls = self._run((None, 'none', None, '未找到匹配剧集'), scheduled_mode=False)
+        self.assertFalse(calls['scheduled'])
+
+    def test_error_resolve_also_forces_draft(self):
+        """网络失败（error 分支，drama_id=None）→ 也强制存草稿，不发表。"""
+        calls = self._run((None, 'error', None, '共享资料库查询失败'), scheduled_mode=True)
+        self.assertFalse(calls['scheduled'], 'resolve error 也不得发表')
+
+    def test_has_drama_id_keeps_scheduled(self):
+        """有剧集 ID → 保持原定时发表设置（行为不变）。"""
+        calls = self._run(('12345', 'autolookup', '匹配剧名', None), scheduled_mode=True)
+        self.assertTrue(calls['scheduled'], '有剧集 ID 应照常定时发表')
+        self.assertEqual(calls['drama_id'], '12345')
+
+
 if __name__ == '__main__':
     unittest.main()

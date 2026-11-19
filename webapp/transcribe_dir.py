@@ -41,19 +41,42 @@ def find_eps(drama_dir):
     return files
 
 def transcribe_ep(model, video_path):
+    """转写单集：segment 级 + 词级时间戳。
+
+    词级时间戳（word_timestamps=True）是切点吸附词边界的前提：段级 ±0.3s
+    的误差会让切点落在词中间（QC 的“词中切断”），词级边界能把切点精确
+    对齐到词首，减少半句切。旧缓存没有 words 字段，读取侧需兼容。
+    """
     segments, info = model.transcribe(
         str(video_path),
         language="zh",
         beam_size=5,
         vad_filter=True,
+        word_timestamps=True,
     )
     result = []
     for seg in segments:
-        result.append({
+        words = []
+        for w in (getattr(seg, 'words', None) or []):
+            try:
+                text = (w.word or '').strip()
+                if not text:
+                    continue
+                words.append({
+                    "start": round(float(w.start), 2),
+                    "end": round(float(w.end), 2),
+                    "word": text,
+                })
+            except (TypeError, ValueError):
+                continue
+        item = {
             "start": round(seg.start, 2),
             "end": round(seg.end, 2),
             "text": seg.text.strip(),
-        })
+        }
+        if words:
+            item["words"] = words
+        result.append(item)
     return result
 
 def main():

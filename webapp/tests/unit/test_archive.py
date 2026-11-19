@@ -37,19 +37,46 @@ class TestArchive(unittest.TestCase):
         # 下载状态更新后应保留 source_url（未传的列不动）
         self.assertEqual(d['source_url'], 'u')
 
-    def test_should_download_local_dir_exists(self):
-        """本地目录已存在 → 不下载（防重①）。"""
+    @staticmethod
+    def _fake_material(n=3):
+        """建一个含 n 个 mp4 的素材目录（模拟真实落盘素材）。"""
         d = tempfile.mkdtemp()
+        for i in range(1, n + 1):
+            with open(os.path.join(d, f'第{i}集.mp4'), 'wb') as f:
+                f.write(b'x')
+        return d
+
+    def test_should_download_local_dir_exists(self):
+        """本地目录已存在且真有素材 → 不下载（防重①）。"""
+        d = self._fake_material()
         ok, reason = archive.should_download('某剧', d)
         self.assertFalse(ok)
         self.assertIn('已存在', reason)
 
+    def test_should_download_empty_local_dir_allowed(self):
+        """目录存在但没有素材（只剩 .incoming 残留）→ 允许重新下载。"""
+        d = tempfile.mkdtemp()
+        os.makedirs(os.path.join(d, '.incoming'))
+        ok, reason = archive.should_download('某剧', d)
+        self.assertTrue(ok)
+        self.assertIn('残留', reason)
+
     def test_should_download_done_history(self):
-        """历史 download_state=done → 不下载（防重②）。"""
-        archive.upsert_archive('已下载剧', download_state='done')
-        ok, reason = archive.should_download('已下载剧', os.path.join(tempfile.mkdtemp(), 'nope'))
+        """历史 download_state=done 且素材仍在 → 不下载（防重②）。"""
+        d = self._fake_material()
+        archive.upsert_archive('已下载剧', download_state='done', local_dir=d)
+        ok, reason = archive.should_download('已下载剧', d)
         self.assertFalse(ok)
         self.assertIn('已下载成功', reason)
+
+    def test_should_download_done_history_material_missing_allowed(self):
+        """记录已完成但素材被清理 → 必须允许重新下载（防“假完成”）。"""
+        archive.upsert_archive('素材已清理剧', download_state='done',
+                               local_dir=os.path.join(tempfile.mkdtemp(), 'gone'))
+        ok, reason = archive.should_download(
+            '素材已清理剧', os.path.join(tempfile.mkdtemp(), 'nope'))
+        self.assertTrue(ok)
+        self.assertIn('素材缺失', reason)
 
     def test_should_download_downloading_history_allowed(self):
         """历史 downloading（未完成）不阻断重下（可重试）。"""
@@ -79,13 +106,25 @@ class TestArchive(unittest.TestCase):
         self.assertIn('失败', reason)
 
     def test_should_download_same_source_done_blocks(self):
-        archive.upsert_archive('来源剧', download_state='done',
+        d = self._fake_material()
+        archive.upsert_archive('来源剧', download_state='done', local_dir=d,
                                source_url='https://pan.baidu.com/s/abc')
         ok, reason = archive.should_download(
             '另一名字', os.path.join(tempfile.mkdtemp(), 'nope'),
             source_url='https://pan.baidu.com/s/abc')
         self.assertFalse(ok)
         self.assertIn('同一来源', reason)
+
+    def test_should_download_same_source_material_missing_allowed(self):
+        """同一来源记录完成但素材已不在 → 允许重下（否则该剧永远切不出来）。"""
+        archive.upsert_archive('来源剧2', download_state='done',
+                               local_dir=os.path.join(tempfile.mkdtemp(), 'gone'),
+                               source_url='https://pan.baidu.com/s/xyz')
+        ok, reason = archive.should_download(
+            '另一名字', os.path.join(tempfile.mkdtemp(), 'nope'),
+            source_url='https://pan.baidu.com/s/xyz')
+        self.assertTrue(ok)
+        self.assertIn('素材已缺失', reason)
 
     def test_aggregate_upload_none(self):
         """upload_records 表未建 → none。"""
@@ -118,6 +157,23 @@ class TestArchive(unittest.TestCase):
                 "INSERT INTO upload_records (drama_name, account, version, status) "
                 "VALUES ('重传剧', 'A', 1, 'completed')")
         self.assertEqual(archive.aggregate_upload_state('重传剧'),
+                         ('done', 1, 0))
+
+    def test_aggregate_upload_completed_not_overridden_by_later_failed(self):
+        # 2026-11-10 人鱼赴归潮 V5：id339 completed 后 id345（重复上传尝试）标 failed。
+        # 旧逻辑取 MAX(id) 最新行 → failed，误判；新逻辑 completed 优先 → done。
+        with sqlite3.connect(self.db) as conn:
+            conn.execute(
+                'CREATE TABLE upload_records '
+                '(id INTEGER PRIMARY KEY, drama_name TEXT, account TEXT, '
+                'version INTEGER, status TEXT)')
+            conn.execute(
+                "INSERT INTO upload_records (drama_name, account, version, status) "
+                "VALUES ('人鱼', 'A', 5, 'completed')")
+            conn.execute(
+                "INSERT INTO upload_records (drama_name, account, version, status) "
+                "VALUES ('人鱼', 'A', 5, 'failed')")
+        self.assertEqual(archive.aggregate_upload_state('人鱼'),
                          ('done', 1, 0))
 
     def test_search_and_filter(self):

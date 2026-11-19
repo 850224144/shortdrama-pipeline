@@ -1253,6 +1253,17 @@
             <div class="card">
                 <h2>📤 提交消息</h2>
                 <textarea class="message-input" id="messageInput" placeholder="粘贴包含百度网盘链接的消息...&#10;&#10;示例：&#10;🥰总裁爹地宠女狂魔&#10;@url:`https://pan.baidu.com/s/xxx?pwd=yyy`&#10;预计上架剧场：凌光剧场、樱花茶会"></textarea>
+                <div class="input-actions" style="align-items:center;flex-wrap:wrap;">
+                    <label for="msgWatermark" style="font-size:13px;color:var(--text-secondary);white-space:nowrap;">水印/账号：</label>
+                    <select id="msgWatermark" onchange="toggleMsgWatermarkCustom()">
+                        <option value="">自动交替（小桃追剧中 ↔ 福桃说剧）</option>
+                        <option value="小桃追剧中">小桃追剧中</option>
+                        <option value="福桃说剧">福桃说剧</option>
+                        <option value="__custom__">自定义文本…</option>
+                    </select>
+                    <input type="text" id="msgWatermarkCustom" placeholder="输入自定义水印文本" style="display:none;flex:1;min-width:160px;" maxlength="30">
+                    <span class="cfg-hint" id="msgWatermarkHint" style="width:100%;margin-top:4px;">选「自动交替」= 沿用现有轮询；选固定账号 = 本批全部剧归该账号；自定义 = 只改水印文字，账号仍自动交替。</span>
+                </div>
                 <div class="input-actions">
                     <button class="btn btn-primary" id="submitBtn" onclick="submitMessage()">🚀 开始处理</button>
                     <button class="btn btn-secondary" onclick="clearInput()">清空</button>
@@ -1694,6 +1705,24 @@
             statusText.textContent = text;
         }
 
+        // 提交消息的水印选择：自定义选项显示/隐藏文本框
+        function toggleMsgWatermarkCustom() {
+            const sel = document.getElementById('msgWatermark');
+            const custom = document.getElementById('msgWatermarkCustom');
+            const isCustom = (sel.value === '__custom__');
+            custom.style.display = isCustom ? '' : 'none';
+            if (!isCustom) custom.value = '';
+        }
+
+        // 读取提交消息的水印选择 → 返回字符串（'' = 自动交替）
+        function readMsgWatermark() {
+            const sel = document.getElementById('msgWatermark').value;
+            if (sel === '__custom__') {
+                return document.getElementById('msgWatermarkCustom').value.trim();
+            }
+            return sel;
+        }
+
         // 提交消息
         async function submitMessage() {
             const input = document.getElementById('messageInput');
@@ -1704,15 +1733,23 @@
                 return;
             }
 
+            const watermark = readMsgWatermark();
+            if (document.getElementById('msgWatermark').value === '__custom__' && !watermark) {
+                showNotification('请输入自定义水印文本', 'error');
+                return;
+            }
+
             const btn = document.getElementById('submitBtn');
             btn.disabled = true;
             btn.textContent = '处理中...';
 
             try {
+                const payload = { message: message };
+                if (watermark) payload.watermark = watermark;
                 const response = await fetch('/api/process', {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ message: message })
+                    body: JSON.stringify(payload)
                 });
 
                 const result = await response.json();

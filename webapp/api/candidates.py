@@ -175,7 +175,7 @@ def create_candidates_bp(deps):
     @bp.route('/api/candidates/auto-select', methods=['POST'])
     def auto_select():
         body = request.get_json(silent=True) or {}
-        result, code = automatic.start(body.get('count', 2))
+        result, code = automatic.start(body.get('count', 2), account=body.get('account'))
         return Response(__import__('json').dumps(result, ensure_ascii=False),
                         mimetype='application/json', status=code)
 

@@ -12,6 +12,7 @@
 - 幂等建表并直接落在上传库 upload.db，确保 upload_records 聚合可用。
 """
 import os
+import re
 import sqlite3
 
 PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -25,8 +26,30 @@ ARCHIVE_COLUMNS = (
     'category', 'account', 'download_state', 'download_size', 'download_files',
     'episode_count', 'download_error', 'downloaded_at', 'slice_state',
     'slice_version_count', 'slice_error', 'sliced_at', 'notes', 'created_at',
-    'updated_at',
+    'updated_at', 'source_key',
 )
+
+_LINK_ID_RE = re.compile(r'/s/([0-9A-Za-z_\-]+)')
+
+
+def extract_link_id(source_url):
+    """从网盘分享链接取分享码；取不到返回 None。"""
+    m = _LINK_ID_RE.search(str(source_url or ''))
+    return m.group(1) if m else None
+
+
+def source_key_for(source_url=None, drama_name=None):
+    """档案行的来源唯一键：link:<分享码> / manual:<剧名>。
+
+    为什么要唯一键：只按 drama_name 做主键时，下载失败路径用分享码派生名
+    会写出一条重复档案行（2026-11-19 事故：1txjKms… 这类分享码行），真实
+    剧名行的 slice_state 永远停在 none，连带完整性闸门与防重全部误判。
+    """
+    link_id = extract_link_id(source_url)
+    if link_id:
+        return f'link:{link_id}'
+    name = str(drama_name or '').strip()
+    return f'manual:{name}' if name else None
 
 
 def _connect_db(path):
@@ -46,6 +69,67 @@ def _connect_db(path):
 
 def _conn():
     return _connect_db(DB_PATH)
+
+
+def _looks_like_link_id_name(name):
+    """分享码形态（纯字母数字/下划线/短横线、长度 ≥20）→ 不是剧名。"""
+    return bool(re.fullmatch(r'[0-9A-Za-z_\-]{20,}', str(name or '')))
+
+
+_SLICE_RANK = {'done': 3, 'cutting': 2, 'failed': 1, 'none': 0}
+_DL_RANK = {'done': 2, 'downloading': 1, 'failed': 1, 'none': 0}
+_MERGE_COLS = ('local_dir', 'rating', 'category', 'account', 'download_size',
+               'download_files', 'episode_count', 'downloaded_at', 'sliced_at',
+               'slice_version_count', 'notes', 'source_passwd', 'download_error',
+               'slice_error')
+
+
+def _migrate_source_key(conn):
+    """加 source_key 列 → 回填 → 合并同来源重复行 → 建唯一索引（幂等）。
+
+    合并规则：同 source_key 多行时保留“切片状态最完整”的一行（done 优先），
+    其余行的非空字段补进保留行后删除，避免历史分享码行继续污染统计与防重。
+    """
+    try:
+        conn.execute('ALTER TABLE drama_archive ADD COLUMN source_key TEXT')
+    except sqlite3.OperationalError:
+        pass  # 列已存在
+    for row in conn.execute(
+            'SELECT id, drama_name, source_url FROM drama_archive '
+            'WHERE source_key IS NULL').fetchall():
+        key = source_key_for(row['source_url'], row['drama_name'])
+        if key:
+            conn.execute('UPDATE drama_archive SET source_key=? WHERE id=?',
+                         (key, row['id']))
+    groups = conn.execute(
+        'SELECT source_key FROM drama_archive WHERE source_key IS NOT NULL '
+        'GROUP BY source_key HAVING COUNT(*) > 1').fetchall()
+    for grp in groups:
+        key = grp[0]
+        rows = [dict(r) for r in conn.execute(
+            'SELECT * FROM drama_archive WHERE source_key=?', (key,)).fetchall()]
+        keep = max(rows, key=lambda r: (
+            _SLICE_RANK.get(r.get('slice_state') or 'none', 0),
+            _DL_RANK.get(r.get('download_state') or 'none', 0),
+            1 if r.get('source_url') else 0,
+            r['id']))
+        for r in rows:
+            if r['id'] == keep['id']:
+                continue
+            fields = {c: r[c] for c in _MERGE_COLS
+                      if keep.get(c) in (None, '') and r.get(c) not in (None, '')}
+            if fields:
+                sets = ', '.join(f'{c}=?' for c in fields)
+                conn.execute(
+                    f'UPDATE drama_archive SET {sets}, '
+                    f'updated_at=CURRENT_TIMESTAMP WHERE id=?',
+                    list(fields.values()) + [keep['id']])
+            conn.execute('DELETE FROM drama_archive WHERE id=?', (r['id'],))
+    try:
+        conn.execute('CREATE UNIQUE INDEX IF NOT EXISTS uq_archive_source_key '
+                     'ON drama_archive(source_key) WHERE source_key IS NOT NULL')
+    except sqlite3.OperationalError as e:
+        print(f'WARN: source_key 唯一索引创建失败（回退非唯一）：{e}')
 
 
 def migrate_legacy_archive(target_path=None, legacy_path=None):
@@ -121,6 +205,7 @@ def init_database():
         conn.execute('CREATE INDEX IF NOT EXISTS idx_archive_drama ON drama_archive(drama_name)')
         conn.execute('CREATE INDEX IF NOT EXISTS idx_archive_dl ON drama_archive(download_state)')
         conn.execute('CREATE INDEX IF NOT EXISTS idx_archive_slice ON drama_archive(slice_state)')
+        _migrate_source_key(conn)
         conn.commit()
     finally:
         conn.close()
@@ -137,13 +222,22 @@ def _cols(conn):
 
 
 def upsert_archive(drama_name, **fields):
-    """按 drama_name 唯一键插入或更新。fields 为列名→值。"""
+    """按 drama_name 唯一键插入或更新。fields 为列名→值。
+
+    新行自动补 source_key（链接唯一键）；已存在的行不改写 source_key，
+    避免两条来源不同的行互相抢占唯一索引。
+    """
     if not fields:
         return
+    if 'source_key' not in fields:
+        key = source_key_for(fields.get('source_url'), drama_name)
+        if key:
+            fields['source_key'] = key
     conn = _conn()
     try:
         cols = list(fields.keys())
-        sets = ', '.join(f'{c}=excluded.{c}' for c in cols)
+        sets = ', '.join(f'{c}=excluded.{c}' for c in cols
+                         if c != 'source_key')
         placeholders = ', '.join('?' for _ in cols)
         conn.execute(
             f'''INSERT INTO drama_archive (drama_name, {', '.join(cols)})
@@ -154,6 +248,30 @@ def upsert_archive(drama_name, **fields):
         conn.commit()
     finally:
         conn.close()
+
+
+def resolve_archive_name(source_url=None, preferred_name=None):
+    """按来源唯一键找规范剧名，避免同一条链接写出第二条档案行。
+
+    优先返回“非分享码形态”的行（真实剧名），其次任意已有行，最后才用
+    调用方给的派生名。
+    """
+    key = source_key_for(source_url, preferred_name)
+    if not key:
+        return preferred_name
+    conn = _conn()
+    try:
+        names = [r[0] for r in conn.execute(
+            'SELECT drama_name FROM drama_archive WHERE source_key=?',
+            (key,)).fetchall() if r and r[0]]
+    finally:
+        conn.close()
+    real = [n for n in names if not _looks_like_link_id_name(n)]
+    if real:
+        return real[0]
+    if names:
+        return names[0]
+    return preferred_name
 
 
 def get_archive(drama_name):
@@ -190,6 +308,45 @@ def get_archive_by_source(source_url):
     if not row:
         return None
     return dict(zip(('drama_name', 'local_dir', 'download_state', 'downloaded_at'), row))
+
+
+def get_archive_name_by_source(source_url):
+    """按来源链接返回任一状态档案行的 drama_name（最新一条）。
+
+    供下载失败回填找回「规范行」：失败路径默认用 link_id/link 派生名 upsert，
+    会新建一条 link_id 键的重复行，而更新不到按真实剧名/source_url 的规范行。
+    无记录返回 None。
+    """
+    if not source_url:
+        return None
+    conn = _conn()
+    try:
+        row = conn.execute(
+            "SELECT drama_name FROM drama_archive WHERE source_url=? "
+            "ORDER BY id DESC LIMIT 1", (source_url,)).fetchone()
+    finally:
+        conn.close()
+    return row[0] if row else None
+
+
+def get_archive_rows_by_source(source_url):
+    """按来源链接返回全部档案行（最新在前）。
+
+    供重复转存/失败回填时判断该链接对应的真实剧名，调用方需自行过滤
+    被历史写入污染的完成行。
+    """
+    source_url = str(source_url or '').strip()
+    if not source_url:
+        return []
+    conn = _conn()
+    try:
+        cols = _cols(conn)
+        rows = conn.execute(
+            "SELECT * FROM drama_archive WHERE source_url=? ORDER BY id DESC",
+            (source_url,)).fetchall()
+    finally:
+        conn.close()
+    return [dict(zip(cols, row)) for row in rows]
 
 
 def merge_auto_download_archive(old_name, new_name, source_url, local_dir=None):
@@ -292,34 +449,79 @@ def rename_download_archive(old_name, new_name, source_url=None):
         conn.close()
 
 
-def should_download(drama_name, local_dir, source_url=None):
+# 素材目录内不算“可切片素材”的文件标记（成片/封面/半截下载）。
+_MATERIAL_EXCLUDE_MARKERS = ('_去重版', '_REJECTED', '封面', '.tmp',
+                             '.BaiduPCS-Go-downloading')
+
+
+def count_material_mp4(dir_path):
+    """统计目录内可用于切片的 mp4 集数（递归，排除成片/封面/半截文件）。
+
+    防重的唯一权威是「磁盘上真的有素材」：archive 状态和目录存在性都可能
+    是历史残留（清理过素材但记录仍是 done、目录里只剩 .incoming 半截文件）。
+    """
+    if not dir_path or not os.path.isdir(dir_path):
+        return 0
+    count = 0
+    try:
+        for root, _dirs, files in os.walk(dir_path):
+            for fn in files:
+                if not fn.lower().endswith('.mp4'):
+                    continue
+                if any(m in fn for m in _MATERIAL_EXCLUDE_MARKERS):
+                    continue
+                count += 1
+    except OSError:
+        return 0
+    return count
+
+
+def should_download(drama_name, local_dir, source_url=None, min_files=2):
     """防重下载检查。返回 (是否可下载, 原因)。
 
-    同一来源或历史 download_state=done → 不下载；上次失败 → 允许重试。
-    本地目录已存在 → 不下载（失败状态优先，允许续传/重试）。
-    集数完整性不校验（用户确认）。
+    同一来源或历史 download_state=done → 只在**素材实体仍存在**时拦截；
+    记录说完成但目录已空/只剩半截文件 → 允许重新下载（否则“假完成”会
+    让后续切片报“没有素材文件”）。
+    上次失败/未完成 → 允许重试/续传（优先于完成态）。
+    min_files：判定“素材存在”的最少集数。
     """
     row = get_archive(drama_name)
+    material_dir = local_dir
+    if row and row.get('local_dir'):
+        material_dir = row['local_dir']
+    same_source = None
     if source_url:
         conn = _conn()
         try:
             same_source = conn.execute(
-                "SELECT download_state, downloaded_at FROM drama_archive "
+                "SELECT downloaded_at, local_dir FROM drama_archive "
                 "WHERE source_url=? AND download_state='done' LIMIT 1",
                 (source_url,),
             ).fetchone()
         finally:
             conn.close()
-        if same_source:
-            return False, f'同一来源已下载成功（{same_source[1] or ""}）'
+        if same_source and same_source['local_dir']:
+            material_dir = same_source['local_dir']
+    have = count_material_mp4(material_dir)
+    if same_source:
+        if have >= min_files:
+            return False, f'同一来源已下载成功（{same_source["downloaded_at"] or ""}）'
+        return True, (f'同一来源有完成记录但素材已缺失'
+                      f'（{have}集<{min_files}集），重新下载')
     if row and row['download_state'] in ('failed', 'downloading'):
         return True, ('上次下载失败，可重试'
                       if row['download_state'] == 'failed'
                       else '上次下载未完成，可续传')
     if row and row['download_state'] == 'done':
-        return False, f'历史记录已下载成功（{row.get("downloaded_at") or ""}）'
-    if os.path.isdir(local_dir):
-        return False, f'本地目录已存在: {local_dir}'
+        if have >= min_files:
+            return False, f'历史记录已下载成功（{row.get("downloaded_at") or ""}）'
+        return True, (f'历史记录为已完成但本地素材缺失'
+                      f'（{have}集<{min_files}集），重新下载')
+    if os.path.isdir(material_dir):
+        if have >= min_files:
+            return False, f'本地目录已存在: {material_dir}'
+        return True, (f'本地目录仅有残留（{have}集<{min_files}集，'
+                      f'可能是 .incoming 半截文件），重新下载')
     return True, '可下载'
 
 
@@ -327,30 +529,35 @@ def aggregate_upload_state(drama_name):
     """查询时从 upload_records 聚合上传状态。返回 (state, success_count, failed_count)。
 
     none（无记录）/ done（全成功）/ partial（部分成功）/ failed（全失败）。
+
+    按 (account, version) 分组取代表状态：组内任一 completed → 该版本算成功；
+    否则有 pending/uploading → 进行中；全部 failed → 失败。
+    不依赖 MAX(id)——否则"失败后重传成功"被旧 failed 压成 partial、
+    或"成功后被人工标 failed（如重复上传阻止）"会覆盖 completed 真相
+    （2026-11-10 人鱼赴归潮 V5：id339 completed + id345 重复上传标 failed，
+    若取最新行会误判为 failed 而非 done）。
     """
     conn = _conn()
     try:
-        # 同账号同版本可能因失败/人工重传出现多行，以最新一行为准；
-        # 否则旧 failed 会永久把已经重传成功的剧压成 partial。
+        # upload_records 表尚未建（upload_manager 未初始化）——视为无记录
         row = conn.execute(
-            '''WITH latest AS (
-                   SELECT r.status
-                   FROM upload_records r
-                   WHERE r.drama_name=?
-                     AND r.id=(
-                         SELECT MAX(r2.id) FROM upload_records r2
-                         WHERE r2.drama_name=r.drama_name
-                           AND r2.account=r.account
-                           AND r2.version=r.version
-                     )
+            '''WITH grp AS (
+                   SELECT account, version,
+                          CASE WHEN SUM(CASE WHEN status='completed' THEN 1 ELSE 0 END) > 0
+                               THEN 'completed'
+                               WHEN SUM(CASE WHEN status IN ('pending','uploading') THEN 1 ELSE 0 END) > 0
+                               THEN 'active'
+                               ELSE 'failed' END AS rep
+                   FROM upload_records
+                   WHERE drama_name=?
+                   GROUP BY account, version
                )
                SELECT COUNT(*) AS total,
-                      SUM(CASE WHEN status='completed' THEN 1 ELSE 0 END) AS ok,
-                      SUM(CASE WHEN status='failed' THEN 1 ELSE 0 END) AS bad,
-                      SUM(CASE WHEN status IN ('pending','uploading') THEN 1 ELSE 0 END) AS active
-               FROM latest''', (drama_name,)).fetchone()
+                      SUM(CASE WHEN rep='completed' THEN 1 ELSE 0 END) AS ok,
+                      SUM(CASE WHEN rep='failed' THEN 1 ELSE 0 END) AS bad,
+                      SUM(CASE WHEN rep='active' THEN 1 ELSE 0 END) AS active
+               FROM grp''', (drama_name,)).fetchone()
     except sqlite3.OperationalError:
-        # upload_records 表尚未建（upload_manager 未初始化）——视为无记录
         return 'none', 0, 0
     finally:
         conn.close()

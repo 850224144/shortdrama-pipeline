@@ -66,6 +66,14 @@ DEFAULT_CONFIG = {
         'resume_on_startup': True,  # P3: 启动时恢复崩溃遗留的下载任务
     },
 
+    # ASR 超时预算：65 集实测 8m41s，固定 600s 会让长剧必然超时（超时后转写
+    # 为空 → 后续只能回落随机选段）。base + per_episode × 集数，且不低于 min。
+    'asr': {
+        'base_timeout': 180,
+        'per_episode_timeout': 12,
+        'min_timeout': 600,
+    },
+
     'edl': {
         'min_duration': 180,
         'max_duration': 300,
@@ -137,7 +145,33 @@ DEFAULT_CONFIG = {
         # 上限放宽到 1260s（20min×1.05 余量）：剧情驱动时长允许长片，
         # 严格 20min 上限由 _select_best_videos 按 duration.max_final 执行。
         'max_duration': 1260,
-        'min_size_mb': 10
+        'min_size_mb': 10,
+        # P0-3 词中切断门禁：超过该处数的版本禁止自动上传（成片仍保留可人工审）。
+        # <=0 关闭门禁（仅报告不拦）。
+        'max_mid_word_cuts': 2,
+    },
+
+    # 词级时间戳吸附（P0-3）：切点向前吸附到最近词首，避免半句切。
+    'word_snap': {
+        'enabled': True,
+        'tol': 0.6,   # 距词首 > tol 不吸附
+    },
+
+    # 渲染并发（P1-6）：1=逐版串行（保留连续失败即停）；2=两版同时渲染
+    # （NVENC 支持多会话，RTX 4060 8G 实测可行）。设为 2 后 8 版总耗时约减半。
+    'cut': {
+        'render_workers': 2,
+    },
+
+    # EDL 审批闭环（P2-9）：auto_approve=True 时生成即批准（保持现有自动化）；
+    # False 时未批准的版本不渲染，需调 /api/cut/edl/<剧>/<版>/approve。
+    'edl_approval': {
+        'auto_approve': True,
+    },
+
+    # 磁盘水位（P2-12）：output/素材盘使用率超过该百分比时触发清理。
+    'cleanup': {
+        'disk_watermark_pct': 85,
     },
 
     'resource': {

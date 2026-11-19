@@ -127,7 +127,10 @@ class TestComputeVersionBudgetConfig(unittest.TestCase):
 # ============================================================
 class TestCapacityVersionCountConfig(unittest.TestCase):
     def _patch_env(self, p, total_cands=30):
-        """30 候选 / 每版 10 段 → 零复用上限 3 版。"""
+        """36 集剧按真实规划约 17 段/版 → 30 候选只够 1 版。
+
+        （旧口径按 target_dur 200/20=10 段/版算，会把容量高估近一倍。）
+        """
         cfg_edl = {'target_dur': 200.0, 'segment_dur': 20.0,
                    'allow_controlled_reuse': False}
         hl = [{"episode": i + 1,
@@ -138,15 +141,15 @@ class TestCapacityVersionCountConfig(unittest.TestCase):
                               return_value=hl)
 
     def test_reuse_forbidden_clamps_to_capacity(self):
-        """reuse_material=False：设 8 版但零复用只够 3 → clamp 到 3，绝不超容复用。"""
+        """reuse_material=False：设 8 版但零复用只够 2 → clamp 到 2，绝不超容复用。"""
         p, _ = _mk()
         edl_eps = [{"episode": i + 1} for i in range(36)]  # auto=8
-        cfg_patch, hl_patch = self._patch_env(p)
+        cfg_patch, hl_patch = self._patch_env(p, total_cands=36)
         with cfg_patch, hl_patch:
             count = p._capacity_version_count(
                 edl_eps, '测试剧', config={'version_count': 8,
                                            'reuse_material': False})
-        self.assertEqual(count, 3)
+        self.assertEqual(count, 2)
 
     def test_reuse_allowed_keeps_explicit(self):
         """reuse_material=True：允许跨版本复用 → 按设定 8 版（≤8）。"""
@@ -160,10 +163,10 @@ class TestCapacityVersionCountConfig(unittest.TestCase):
         self.assertEqual(count, 8)
 
     def test_explicit_below_capacity_respected(self):
-        """显式设 2 版（< 零复用容量 3）→ 尊重设定 2。"""
+        """显式设 2 版（= 零复用容量 2）→ 尊重设定 2。"""
         p, _ = _mk()
         edl_eps = [{"episode": i + 1} for i in range(36)]
-        cfg_patch, hl_patch = self._patch_env(p)
+        cfg_patch, hl_patch = self._patch_env(p, total_cands=36)
         with cfg_patch, hl_patch:
             count = p._capacity_version_count(
                 edl_eps, '测试剧', config={'version_count': 2,
@@ -393,6 +396,91 @@ class TestPrecheckSourcePattern(unittest.TestCase):
         finally:
             import shutil
             shutil.rmtree(src, ignore_errors=True)
+
+
+# ============================================================
+# F. apply_watermark_override（提交消息水印选择解析）
+# ============================================================
+class TestApplyWatermarkOverride(unittest.TestCase):
+    """2026-11-18：提交消息模块新增「选择水印」——覆盖逻辑不改交替轮询。
+
+    规则：
+    - 无选择（watermark_override 缺省）→ 走原自动交替 assign_account，cut_cfg 不动。
+    - 固定账号名（小桃追剧中/福桃说剧）→ 账号覆盖（账号/水印/输出目录统一），
+      不写 cut_cfg['watermark']（水印文字=输出目录账号名）。
+    - 其它非空文本 → 只写 cut_cfg['watermark']（水印文字），账号仍自动交替。
+    - 清洗 drawtext 危险字符（' : % \\）；清洗后为空则不覆盖。
+    """
+
+    def _mk_cut_cfg(self):
+        return dict(DEFAULT_CUT_CONFIG)  # watermark=None
+
+    def test_no_override_uses_auto_alternation(self):
+        p, _ = _mk()
+        cut_cfg = self._mk_cut_cfg()
+        with mock.patch.object(p, 'assign_account', return_value='小桃追剧中'):
+            acct = p.apply_watermark_override({'link_id': '剧A'}, cut_cfg, '剧A')
+        self.assertEqual(acct, '小桃追剧中')
+        self.assertIsNone(cut_cfg['watermark'], '无选择不改水印文本')
+
+    def test_fixed_account_overrides_account_not_text(self):
+        p, _ = _mk()
+        cut_cfg = self._mk_cut_cfg()
+        dr = {'watermark_override': '福桃说剧'}
+        acct = p.apply_watermark_override(dr, cut_cfg, '剧A')
+        self.assertEqual(acct, '福桃说剧', '固定账号名 → 账号覆盖')
+        self.assertIsNone(cut_cfg['watermark'],
+                          '固定账号不写水印文本（水印=输出目录账号名）')
+        # 回写 download_result：内容去重指纹键 / add_completed 拿到同一账号，
+        # 与发布账号一致，否则 upload_manager 防重发查重会漏检。
+        self.assertEqual(dr.get('account'), '福桃说剧',
+                         '固定账号须回写 download_result.account')
+        self.assertTrue(dr.get('auto_selected'))
+
+    def test_custom_text_overrides_watermark_not_account(self):
+        p, _ = _mk()
+        cut_cfg = self._mk_cut_cfg()
+        with mock.patch.object(p, 'assign_account', return_value='小桃追剧中'):
+            acct = p.apply_watermark_override(
+                {'watermark_override': '某某工作室'}, cut_cfg, '剧A')
+        self.assertEqual(acct, '小桃追剧中', '自定义文本不改账号，仍自动交替')
+        self.assertEqual(cut_cfg['watermark'], '某某工作室')
+
+    def test_custom_text_sanitizes_drawtext_dangerous_chars(self):
+        p, _ = _mk()
+        cut_cfg = self._mk_cut_cfg()
+        with mock.patch.object(p, 'assign_account', return_value='福桃说剧'):
+            p.apply_watermark_override(
+                {'watermark_override': "A:B'C%D\\E"}, cut_cfg, '剧A')
+        self.assertEqual(cut_cfg['watermark'], 'ABCDE',
+                         "' : % \\ 须被清洗，防 drawtext filter 语法破坏")
+
+    def test_custom_text_blank_after_sanitize_is_noop(self):
+        p, _ = _mk()
+        cut_cfg = self._mk_cut_cfg()
+        with mock.patch.object(p, 'assign_account', return_value='小桃追剧中'):
+            p.apply_watermark_override(
+                {'watermark_override': ":'%"}, cut_cfg, '剧A')
+        self.assertIsNone(cut_cfg['watermark'], '清洗后为空 → 不覆盖')
+
+    def test_auto_selected_account_still_respected(self):
+        """既有自动选剧指定账号（auto_selected）不受影响。"""
+        p, _ = _mk()
+        cut_cfg = self._mk_cut_cfg()
+        acct = p.apply_watermark_override(
+            {'account': '小桃追剧中', 'auto_selected': True}, cut_cfg, '剧A')
+        self.assertEqual(acct, '小桃追剧中')
+
+    def test_custom_text_equal_to_fixed_name_is_fixed(self):
+        """自定义文本恰为固定账号名 → 按固定账号处理（与选择一致，无歧义）。"""
+        p, _ = _mk()
+        cut_cfg = self._mk_cut_cfg()
+        dr = {'watermark_override': '小桃追剧中'}
+        acct = p.apply_watermark_override(dr, cut_cfg, '剧A')
+        self.assertEqual(acct, '小桃追剧中')
+        self.assertIsNone(cut_cfg['watermark'])
+        self.assertEqual(dr.get('account'), '小桃追剧中',
+                         '等值固定名同样回写账号（走固定分支）')
 
 
 if __name__ == '__main__':

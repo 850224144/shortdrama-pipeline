@@ -270,14 +270,19 @@ class FingerprintStore:
                 conn.close()
 
     def mark_uploaded(self, video_path, account=None):
-        """上传成功后登记 uploaded=1。"""
+        """上传成功后登记 uploaded=1。
+
+        路径按 REPLACE 归一化反斜杠→正斜杠匹配——上传记录的 video_path 与
+        指纹表 video_path 常因分隔符不一致（`dir/文件` vs `dir\\文件`）导致
+        精确匹配 0 行、uploaded 长期为 0（2026-11-10 实测 V1-V4 全为 0）。
+        """
         with self._lock:
             conn = self._connect()
             try:
                 conn.execute('''
                     UPDATE content_fingerprints
                     SET uploaded=1, uploaded_at=?
-                    WHERE video_path=?
+                    WHERE REPLACE(video_path, '\\', '/') = REPLACE(?, '\\', '/')
                 ''', (datetime.now().isoformat(), video_path))
                 conn.commit()
             finally:

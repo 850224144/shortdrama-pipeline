@@ -222,13 +222,24 @@ def check_zero_start(segs):
 
 
 # ===== 滤镜构建 =====
+def ff_filter_path(path):
+    """把 Windows 路径转成 ffmpeg 滤镜参数可用的写法。
+
+    滤镜参数以 ':' 分隔选项，'C:/Windows/...' 里的冒号不转义会被截断成 'C'，
+    drawtext 找不到字体时不报错、退回无中文字形的默认字体 → 水印全是方框。
+    """
+    return str(path).replace("\\", "/").replace(":", "\\:")
+
+
 def build_vf(ad):
     wm_text = ad.get("watermark_text", "福桃说剧")
     wm_alpha = ad.get("watermark_alpha", 0.3)
     wm_size = ad.get("watermark_fontsize", 36)
     wm_font = ad.get("watermark_font", r"C:\Windows\Fonts\msyh.ttc")
 
-    wm_base = f"drawtext=fontfile='{wm_font}':text='{wm_text}':fontsize={wm_size}:fontcolor=white@{wm_alpha}"
+    if not os.path.exists(wm_font):
+        raise RuntimeError(f"水印字体不存在: {wm_font}")
+    wm_base = f"drawtext=fontfile='{ff_filter_path(wm_font)}':text='{wm_text}':fontsize={wm_size}:fontcolor=white@{wm_alpha}"
 
     wm_filters = [
         f"{wm_base}:x=30:y=30:enable='lt(mod(t\\,12)\\,3)'",
@@ -345,6 +356,9 @@ def apply_anti_dup(raw, output, ad, crf, preset):
     r = subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=900)
     if r.returncode != 0:
         raise RuntimeError(f"抗查重失败: {r.stderr.strip()[-300:]}")
+    if "Fontconfig error" in (r.stderr or ""):
+        # 字体加载失败时 ffmpeg 仍返回 0，但水印会渲染成方框，不能当成功交付
+        raise RuntimeError(f"水印字体加载失败（水印会是方框）: {r.stderr.strip()[-300:]}")
 
 
 def verify_output(filepath):
