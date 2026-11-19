@@ -36,7 +36,23 @@ function Stop-Service {
     $procId = Get-ServicePid
     if (-not $procId) { "已停止（端口 $Port 无监听）"; return }
     "停止中  pid=$procId"
+    # Windows venv 的 python.exe 是 redirector：实际跑 app.py 的是它的子进程，
+    # 只杀端口占用者会留下父进程（下次再启动就变成两份）。这里连父一起收。
+    $parent = $null
+    try {
+        $cim = Get-CimInstance Win32_Process -Filter "ProcessId=$procId"
+        $parent = $cim.ParentProcessId
+    } catch { }
     Stop-Process -Id $procId -Force -ErrorAction SilentlyContinue
+    if ($parent) {
+        try {
+            $pp = Get-CimInstance Win32_Process -Filter "ProcessId=$parent"
+            if ($pp -and $pp.CommandLine -like '*app.py*') {
+                Stop-Process -Id $parent -Force -ErrorAction SilentlyContinue
+                "已同时停止父进程 pid=$parent"
+            }
+        } catch { }
+    }
     for ($i = 0; $i -lt 20; $i++) {
         Start-Sleep -Milliseconds 500
         if (-not (Get-ServicePid)) { "已停止"; return }
