@@ -26,11 +26,11 @@ def _video_scale_filter(index: int, res: dict) -> str:
 def _subtitle_filter(index: int, subtitle: str, settings: dict) -> tuple[str, str | None]:
     """Render a timed Chinese subtitle as an overlay, or return empty label."""
     if not subtitle:
-        return f"[v{index}]", None
+        return f"v{index}", None
     sub_cfg = settings.get("subtitle", {})
     font = sub_cfg.get("font", r"C:\Windows\Fonts\msyh.ttc")
     if not os.path.exists(font):
-        return f"[v{index}]", None
+        return f"v{index}", None
     fd, text_file = tempfile.mkstemp(suffix=".txt", prefix="hook_subtitle_")
     with os.fdopen(fd, "w", encoding="utf-8") as handle:
         handle.write(subtitle.replace("\n", " "))

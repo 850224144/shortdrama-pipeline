@@ -18,6 +18,8 @@ preflight → script → （网页版人工：Seedream 锁脸图 → Seedance Mi
 cd D:\短剧工坊\ai_hook_tool
 python -m hooktool.cli preflight --src "E:\短剧素材\娇妻婆婆为我挡风雨"
 python -m hooktool.cli script    --src "E:\短剧素材\娇妻婆婆为我挡风雨"
+# 可选文本规划（需在 D:\短剧工坊\.env 配好 ZHIPU_API_KEY 或 SENSENOVA_API_KEY）
+python -m hooktool.cli script --src "E:\短剧素材\娇妻婆婆为我挡风雨" --planner llm
 python -m hooktool.cli collect
 python -m hooktool.cli assemble
 python -m hooktool.cli gate --src "E:\短剧素材\娇妻婆婆为我挡风雨" --similarity 0.6
@@ -37,6 +39,35 @@ python -m hooktool.cli gate --src "E:\短剧素材\娇妻婆婆为我挡风雨" 
 - 硬阻断：片段缺失、时长 <30s、纯动物钩子未接正剧、相同度 <0.5/跨题材。
 - 软告警：脸不一致、角标压失败——不中断、照常产出，记 WARN 不算通过。
 - PENDING：缺定妆参照、题材未命中、相同度/脸一致性待人工复核、音字幕未实测。
+
+## P0–P4 完整流程（新入口，不影响旧链路）
+
+`hooktool.cli` 的 `preflight → script → collect → assemble → gate` 保持原契约不变；
+完整流程走独立入口 `hooktool.flow_cli`，状态存于新项目目录
+`workdir/projects/<uuid>/project.sqlite`，不读取也不改写旧工作区。
+
+```powershell
+python -m hooktool.flow_cli project --src "E:\短剧素材\剧A" --episode "第1集.mp4" --confirm-first-episode --transcript "第1集.srt" --confirm-transcript
+python -m hooktool.flow_cli analyze  --project "<project_dir>"
+python -m hooktool.flow_cli propose  --project "<project_dir>"
+python -m hooktool.flow_cli proposals --project "<project_dir>"
+python -m hooktool.flow_cli plan-review --project "<project_dir>" --plan plan_xxx --decision approved --reviewer 人工A --facts-reviewed
+python -m hooktool.flow_cli generation --project "<project_dir>" --plan plan_xxx
+python -m hooktool.flow_cli import-root --project "<project_dir>" --dir "E:\AI生成片段"
+python -m hooktool.flow_cli import --project "<project_dir>" --task task_xxx --file "E:\AI生成片段\shot1.mp4"
+python -m hooktool.flow_cli assemble --project "<project_dir>" --plan plan_xxx
+python -m hooktool.flow_cli render  --project "<project_dir>" --timeline tl_xxx
+python -m hooktool.flow_cli qc      --project "<project_dir>" --timeline tl_xxx
+python -m hooktool.flow_cli final-review --project "<project_dir>" --timeline tl_xxx --decision approved --reviewer 人工A
+python -m hooktool.flow_cli export  --project "<project_dir>" --timeline tl_xxx
+```
+
+- 首集必须显式确认，第 2 集不会被静默当成 E01；字幕与源片哈希绑定。
+- 方案审批绑定 `plan_revision_id + semantic_hash + facts_reviewed`；剧情相关编辑生成新版本并让旧审批失效。
+- 预演只作内部粗剪；正式交付必须通过来源/叙事/生成/交付四层质检与最终人工验收。
+- 本流程不调用付费生成接口、不外传素材、不发布；生成任务只输出任务包与提示词。
+
+Web 侧由 `webapp/api/hooks.py` 提供 `/api/hooks` 蓝图（长任务 202 + `job_id`，冲突 409，内容不满足 422）。
 
 ## 依赖
 

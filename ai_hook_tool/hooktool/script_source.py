@@ -29,17 +29,19 @@ def parse_script_txt(path: str) -> list[dict]:
     # txt 仍不作为剧情事实来源；仅用于匹配首集 ASR 台词、补回角色归属。
     # 没有对应口播的剧本句不进入生成候选。
     pending_actions: list[str] = []
+    current_scene = ""
     for raw in lines:
         s = raw.strip()
         if not s:
+            continue
+        if re.match(r"^\d+-\d+", s):
+            current_scene = s
+            pending_actions = []
             continue
         if s.startswith("△"):
             pending_actions.append(s.lstrip("△ ").strip())
             continue
         if s.startswith(("人物", "场景")):
-            continue
-        # 场景编号行，如 "1-1日内..."
-        if re.match(r"^\d+-\d+", s):
             continue
         m = _LINE.match(s)
         if not m:
@@ -53,6 +55,7 @@ def parse_script_txt(path: str) -> list[dict]:
             "line": line,
             "vo": bool(m.group("vo")),
             "source": "txt",
+            "scene": current_scene,
             "action_context": pending_actions,
         })
         pending_actions = []
@@ -71,11 +74,11 @@ _TIMED_LINE = re.compile(r"^\[([\d.]+)-([\d.]+)\]\s*(.*)$")
 
 def _timed_events(transcript_lines: list[str]) -> list[dict]:
     events = []
-    for index, raw in enumerate(transcript_lines):
+    for raw_index, raw in enumerate(transcript_lines):
         match = _TIMED_LINE.match(raw.strip())
         if not match:
             continue
-        events.append({"index": index, "start": float(match.group(1)),
+        events.append({"index": raw_index, "start": float(match.group(1)),
                        "end": float(match.group(2)), "text": match.group(3).strip()})
     return events
 
@@ -116,7 +119,14 @@ def align_dialogues(transcript_lines: list[str], entries: list[dict]) -> list[di
         if best is None or best[0] < 0.40:
             continue
         similarity, first, last = best
+        matched_text = "".join(events[i]["text"] for i in range(first, last + 1))
+        normalized_observed = _normalize_for_match(matched_text)
+        coverage = min(1.0, len(normalized_observed) / len(target))
+        if coverage < 0.75 or target not in normalized_observed:
+            continue
         matches.append({"entry_index": entry_index, "asr_match": round(similarity, 3),
+                        "asr_coverage": round(coverage, 3),
+                        "asr_text": matched_text,
                         "asr_start": events[first]["start"],
                         "asr_end": events[last]["end"],
                         "asr_event_indices": [e["index"] for e in events[first:last + 1]]})

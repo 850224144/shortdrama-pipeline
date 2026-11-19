@@ -31,6 +31,20 @@ def keywords() -> dict:
     return _load("keywords.json")
 
 
+def keywords_for_genre(genre: str) -> dict:
+    base = keywords()
+    merged = dict(base)
+    genre_terms = base.get("genre_keywords", {}).get(genre, {})
+    for key in ("conflict_words", "suspense_words", "high_intensity_phrases",
+                "low_signal_phrases"):
+        merged[key] = list(dict.fromkeys(base.get(key, []) + genre_terms.get(key, [])))
+    hook = dict(base.get("hook", {}))
+    hook["cliffhanger_phrases"] = list(dict.fromkeys(
+        hook.get("cliffhanger_phrases", []) + genre_terms.get("cliffhanger_phrases", [])))
+    merged["hook"] = hook
+    return merged
+
+
 def get_setting(key: str, default=None):
     return settings().get(key, default)
 

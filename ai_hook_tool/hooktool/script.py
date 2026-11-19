@@ -5,6 +5,7 @@ from __future__ import annotations
 import re
 
 from . import config as cfg, manifest as mf
+from .hook_planner import candidate_id
 
 
 def _plain(text: str, punct: list[str]) -> str:
@@ -20,7 +21,8 @@ def _subtitle(text: str, punct: list[str], maximum: int) -> str:
 
 
 def _event_index(text: str, events: list[dict], used: set[int]) -> list[int]:
-    for index, event in enumerate(events):
+    for event in events:
+        index = event["source_index"]
         if index in used:
             continue
         if event["text"] == text or text in event["text"] or event["text"] in text:
@@ -51,7 +53,7 @@ def _opening_group(events: list[dict], quotes: list[dict], hook: dict) -> list[d
 def _make_quote_pool(long_titles: list[str], txt_entries: list[dict],
                      quote_records: list[dict] | None, conflict: list[str],
                      suspense: list[str], high_phrases: list[str], low_phrases: list[str],
-                     min_match: float) -> list[dict]:
+                     min_match: float, source_role_bonus: float = 6.0) -> list[dict]:
     pool: list[dict] = []
     by_text = {item["text"]: dict(item) for item in (quote_records or [])}
     for index, text in enumerate(long_titles):
@@ -65,34 +67,32 @@ def _make_quote_pool(long_titles: list[str], txt_entries: list[dict],
         pool.append(record)
 
     for entry in txt_entries:
-        text = entry.get("line", "").strip()
-        if not text or entry.get("asr_start") is None:
-            continue
+        script_line = entry.get("line", "").strip()
+        spoken_text = entry.get("asr_text", "").strip()
+        start, end = entry.get("asr_start"), entry.get("asr_end")
         match_ratio = float(entry.get("asr_match", 0))
-        if match_ratio < min_match:
+        if not script_line or not spoken_text or start is None or end is None or match_ratio < min_match:
             continue
-        # Carry timing from the exact ASR utterance while using the script only to
-        # restore its character label and original action directions.
-        start, end = entry["asr_start"], entry["asr_end"]
         overlaps = [q for q in pool if q.get("start") is not None
                     and q["start"] < end and q["end"] > start]
         if not overlaps:
             continue
         base_score = max(q.get("score", 0) for q in overlaps)
-        high_hits = [phrase for phrase in high_phrases if phrase in text]
-        conflict_hits = [word for word in conflict if word in text]
-        suspense_hits = [word for word in suspense if word in text]
-        low_hits = [phrase for phrase in low_phrases if phrase in text]
-        # An exact, named, original-script delivery outranks unlabelled ASR shards.
-        score = (base_score + 6.0 + min(4.0, len(high_hits) * 2.0)
+        high_hits = [phrase for phrase in high_phrases if phrase in spoken_text]
+        conflict_hits = [word for word in conflict if word in spoken_text]
+        suspense_hits = [word for word in suspense if word in spoken_text]
+        low_hits = [phrase for phrase in low_phrases if phrase in spoken_text]
+        score = (base_score + source_role_bonus + min(4.0, len(high_hits) * 2.0)
                  + min(3.0, len(conflict_hits) * 0.7)
                  + min(2.0, len(suspense_hits) * 0.5) - len(low_hits) * 2.0)
-        pool.append({"text": text, "start": start, "end": end, "score": round(score, 3),
+        pool.append({"text": spoken_text, "start": start, "end": end, "score": round(score, 3),
                      "source": "asr+script_alignment", "source_index": min(
                          q.get("source_index", 0) for q in overlaps),
                      "role": entry.get("role", ""), "dialogue_source": "asr",
+                     "script_text": script_line,
                      "vo": entry.get("vo", False), "action_context": entry.get(
-                         "action_context", []), "asr_match": match_ratio,
+                         "action_context", []), "scene": entry.get("scene", ""),
+                     "asr_match": match_ratio,
                      "asr_event_indices": entry.get("asr_event_indices", []),
                      "high_hits": high_hits, "conflict_hits": conflict_hits,
                      "suspense_hits": suspense_hits, "low_signal_hits": low_hits})
@@ -106,15 +106,16 @@ def _make_quote_pool(long_titles: list[str], txt_entries: list[dict],
             strongest[key] = item
     result = list(strongest.values())
     aligned = [item for item in result if item.get("source") == "asr+script_alignment"]
+    punctuations = cfg.keywords()["punctuations"]
     result = [item for item in result
               if item.get("source") == "asr+script_alignment"
               or not any(item.get("start") is not None
                          and item["start"] < label["end"]
                          and item["end"] > label["start"]
-                         and (_plain(item["text"], kw["punctuations"])
-                              in _plain(label["text"], kw["punctuations"])
-                              or _plain(label["text"], kw["punctuations"])
-                              in _plain(item["text"], kw["punctuations"]))
+                         and (_plain(item["text"], punctuations)
+                              in _plain(label["text"], punctuations)
+                              or _plain(label["text"], punctuations)
+                              in _plain(item["text"], punctuations))
                          for label in aligned)]
     result.sort(key=lambda item: (-item["score"],
                                   item["start"] if item["start"] is not None else float("inf"),
@@ -131,47 +132,38 @@ def _score_marker(item: dict, maximum: float) -> tuple[str, int]:
 
 
 def _action_for(item: dict, shot_no: int, segment: str) -> dict:
-    """Tie generated motion to the original script's explicit actions."""
-    text = item["text"]
-    actions = "；".join(item.get("action_context", []))
-    if "第一巴掌" in actions or "扬手" in actions or "一巴掌扇" in actions:
-        motion = "白玉瑶扬手一巴掌扇在陆时衍脸上；正反打，先给挥手动作，再切陆时衍脸部反应。"
-        framing = "中景交代两人站位，切面部近景"
-    elif "又抬手" in actions or "第二巴掌" in actions:
-        motion = "白玉瑶再次抬手，陆时衍下意识偏头避开；用动作起落和反应完成剪辑。"
-        framing = "双人中景转反应特写"
-    elif "门推开" in actions or "推开门" in actions:
-        motion = "手术室门突然推开，秦露举着手机带学生进入；镜头跟随门和手机推进病床。"
-        framing = "门口全景切手机近景再切病床"
-    elif "冲进来" in actions:
-        motion = "陆时衍冲进病房，在直播手机、学生与产床间急停；镜头跟随入场再反打。"
-        framing = "动态全景转越肩对峙"
-    elif "凑到床边" in actions or "伸头" in actions:
-        motion = "学生凑到床边围观，温知宁攥紧被子并把手臂护在身前；镜头从围观群像压到反应。"
-        framing = "床边群像和俯视反应镜头"
-    elif "撑着坐起来" in actions or "胳膊一软" in actions:
-        motion = "温知宁挣扎撑起身体又因疼痛脱力，小林扶住她；秦露的手机继续逼近。"
-        framing = "中景动作接痛苦近景"
-    elif "指甲掐进" in actions or "弓起来" in actions:
-        motion = "温知宁剧痛弓身、手指掐进床单，秦露把手机逼近；镜头跟随动作快速推近。"
-        framing = "手部细节切面部特写"
-    elif "脸上" in actions or "抬手" in actions:
-        motion = "角色抬手并完成剧本中的巴掌动作，紧接对方躲闪或震惊反应，不增加肢体冲突。"
-        framing = "双人中景接冲击反应特写"
-    elif "拽" in actions or "拉住" in actions:
-        motion = "角色拉住对方衣袖，对方转身躲开；使用移动镜头清楚交代双方位置。"
-        framing = "双人中景转手部细节"
+    actions = item.get("action_context", [])
+    action_text = "；".join(actions)
+    framing = "人物关系中景接反应近景"
+    if any(term in action_text for term in ("扬手一巴掌", "一巴掌扇", "打了一巴掌")):
+        motion, framing = action_text, "双人中景接反应特写"
+    elif any(term in action_text for term in ("门推开", "推开门")):
+        motion, framing = action_text, "场景中景接人物近景"
+    elif any(term in action_text for term in ("冲进来", "闯入")):
+        motion, framing = action_text, "动态全景接越肩镜头"
+    elif action_text:
+        motion = action_text
     else:
-        motion = "按原剧动作完成一次明确的入场、阻挡、转身或逼近；若当前对白没有动作描述，保持克制移动，绝不编新动作。"
-        framing = "先交代人物关系的中景，接带明确表情变化的反应近景"
+        motion = "不增加动作；用原场景中的站位、视线和反应呈现冲突。"
 
-    beats = ["动作起势", "动作落点", "对方反应", "悬念停顿"]
-    beat = beats[(shot_no - 1) % len(beats)]
-    if segment == mf.SEG_HOOK and shot_no == 2:
-        beat = "最炸反应后立即掐断，保留未解悬念"
+    if item.get("planning_hint", {}).get("role_in_hook") == "cliffhanger" or item.get("is_cliffhanger"):
+        beat = "在未解信息处掐断"
+    else:
+        beat = ("冲突起势", "对抗升级", "人物反应")[(shot_no - 1) % 3]
     return {"motion": motion, "framing": framing, "beat": beat,
-            "source_actions": item.get("action_context", []),
-            "continuity_note": "严格沿用首集已出现的人物、关系、场景和动作；不添新事件。"}
+            "source_actions": actions,
+            "continuity_note": "只呈现来源动作；不新增人物、动作或剧情事件。"}
+
+
+def _append_camera_suggestion(prompt: str, suggestion: dict) -> str:
+    labels = {
+        "framing": "补充景别", "camera_movement": "运镜建议",
+        "composition": "构图建议", "expression": "表情建议",
+        "lighting": "光线建议", "sound_and_pacing": "声音节奏建议",
+    }
+    additions = [f"{label}：{suggestion[field]}。"
+                 for field, label in labels.items() if suggestion.get(field)]
+    return prompt + "".join(additions)
 
 
 def _shot(shot_no: int, segment: str, role: str, ref_image: str,
@@ -180,6 +172,8 @@ def _shot(shot_no: int, segment: str, role: str, ref_image: str,
     text = item["text"] if item else ""
     if item and item.get("asr_event_indices"):
         event_indices = list(item["asr_event_indices"])
+    elif item and item.get("source_index") is not None:
+        event_indices = [item["source_index"]]
     else:
         event_indices = _event_index(text, events, used_events) if text else []
     for index in event_indices:
@@ -190,15 +184,21 @@ def _shot(shot_no: int, segment: str, role: str, ref_image: str,
     cue = text or "无台词"
     score = item.get("score", 0.0) if item else 0.0
     range_label = f"{start:.2f}-{end:.2f}s" if start is not None else "时间待确认"
+    scene = item.get("scene", "") if item else ""
+    camera = item.get("camera_suggestion", {}) if item else {}
+    camera_text = "".join(
+        f"{label}：{camera[field]}。" for field, label in (
+            ("framing", "补充景别"), ("camera_movement", "运镜建议"),
+            ("composition", "构图建议"), ("expression", "表情建议"),
+            ("lighting", "光线建议"), ("sound_and_pacing", "声音节奏建议"))
+        if camera.get(field))
     prompt = (
-        f"9:16竖屏，基于首集原片的{scene_hint}，严格使用参考图中{role or '原剧人物'}的身份、脸、" 
-        f"发型和服装。镜头段落：{segment}，源片时间 {range_label}。"
-        f"本镜必须在首帧呈现冲突动作/手机直播/病床危机；原句：{cue}。"
+        f"9:16竖屏，基于原剧场景{scene or scene_hint}，严格使用参考图中{role or '原剧人物'}的身份、脸、"
+        f"发型和服装。镜头段落：{segment}，源片时间 {range_label}。原句：{cue}。"
         f"表演动作：{action['motion']} 景别和机位：{action['framing']}。"
-        f"节奏节点：{action['beat']}。使用动作起势、落点、反应的清楚剪辑；人物有明显位移和目光变化，"
-        "不用静态皱眉摆拍，不用空镜，不增删原剧情事件。准确口播原句，普通话自然，口型同步；"
-        "屏幕叠加简体中文字幕，不生成额外屏幕文字、字幕水印或生成工具标识。"
-        "画面有前中后景，写实医疗剧灯光和稳定运动镜头。"
+        f"节奏节点：{action['beat']}。使用有明确视线和反应的剪辑，不增删原剧情事件。{camera_text}"
+        "准确口播原句，普通话自然，口型同步；字幕采用简体中文并留出安全区域，"
+        "不生成额外屏幕文字、字幕水印或生成工具标识。灯光服从原场景，不臆造空间布置。"
     )
     return {
         "shot": shot_no, "segment": segment, "role": role, "ref_image": ref_image,
@@ -211,10 +211,13 @@ def _shot(shot_no: int, segment: str, role: str, ref_image: str,
         "source_time": {"start": start, "end": end, "asr_events": event_indices},
         "conflict_score": score, "conflict_percentile": _score_marker(
             item, max_score)[1] if item else 0,
-        "emotion": "愤怒/受辱/对峙" if score >= 7 else "疼痛/恐惧/反抗",
+        "emotion": item.get("emotion", "冲突") if item else "待确认",
+        "scene": item.get("scene", "") if item else "",
+        "candidate_id": candidate_id(item) if item else "",
+        "planning_hint": item.get("planning_hint", {}) if item else {},
         "action": action,
         "opening_hook": bool(segment == mf.SEG_PRE and shot_no == 1),
-        "is_cliffhanger": bool(segment == mf.SEG_HOOK and shot_no == 2),
+        "is_cliffhanger": bool(segment == mf.SEG_HOOK and item and item.get("is_cliffhanger")),
     }
 
 
@@ -222,7 +225,10 @@ def build_script(material: dict, short_titles: list[str], long_titles: list[str]
                  genre: str, source_episode: str,
                  txt_entries: list[dict] | None = None,
                  quote_records: list[dict] | None = None,
-                 transcript_lines: list[str] | None = None) -> dict:
+                 transcript_lines: list[str] | None = None,
+                 planning_hints: dict[str, dict] | None = None,
+                 planning_status: dict | None = None,
+                 include_planner_candidates: bool = False) -> dict:
     kw = cfg.keywords()
     hook_cfg = kw.get("hook", {})
     subtitle_cfg = kw.get("subtitle", {})
@@ -230,22 +236,46 @@ def build_script(material: dict, short_titles: list[str], long_titles: list[str]
     roles = list(faces)
     transcript_lines = transcript_lines or []
     txt_entries = txt_entries or []
+    planning_hints = planning_hints or {}
+    planning_status = planning_status or {}
     events = []
     ts_re = re.compile(r"^\[([\d.]+)-([\d.]+)\]\s*(.*)$")
     for source_index, raw in enumerate(transcript_lines):
         match = ts_re.match(raw.strip())
         if match:
             events.append({"start": float(match.group(1)), "end": float(match.group(2)),
-                           "text": match.group(3).strip(), "source_index": source_index})
+                           "text": match.group(3).strip(), "source_index": source_index,
+                           "event_index": len(events)})
 
+    genre_kw = cfg.keywords_for_genre(genre)
     pool = _make_quote_pool(long_titles, txt_entries, quote_records,
-                            kw["conflict_words"], kw["suspense_words"],
-                            kw.get("high_intensity_phrases", []),
-                            kw.get("low_signal_phrases", []),
-                            hook_cfg.get("min_source_match", 0.5))
+                            genre_kw["conflict_words"], genre_kw["suspense_words"],
+                            genre_kw.get("high_intensity_phrases", []),
+                            genre_kw.get("low_signal_phrases", []),
+                            hook_cfg.get("min_source_match", 0.5),
+                            hook_cfg.get("source_script_role_bonus", 6.0))
+    known_indices = {item.get("source_index") for item in pool}
+    for candidate in (quote_records or []):
+        if not include_planner_candidates:
+            break
+        hint = planning_hints.get(candidate_id(candidate), {})
+        if (candidate.get("source_index") in known_indices
+                or candidate.get("start") is None or candidate.get("end") is None
+                or hint.get("role_in_hook") not in {"opening", "escalation", "cliffhanger"}):
+            continue
+        item = dict(candidate)
+        item.update(role="", dialogue_source="asr", vo=False, action_context=[],
+                    scene="", candidate_id=candidate_id(candidate), planning_hint=hint)
+        pool.append(item)
+        known_indices.add(item.get("source_index"))
     opening = _opening_group(events, quote_records or [], hook_cfg)
     opening_indices = {event["source_index"] for event in opening}
     opening_times = {round(event["start"], 2) for event in opening}
+    for item in pool:
+        item["candidate_id"] = candidate_id(item)
+        item["planning_hint"] = planning_hints.get(item["candidate_id"], {})
+        if item["planning_hint"].get("role_in_hook") == "exclude":
+            item["score"] = -1.0
     opening_by_indices = [item for item in pool
                           if item.get("source_index") in opening_indices
                           or (item.get("start") is not None
@@ -254,22 +284,48 @@ def build_script(material: dict, short_titles: list[str], long_titles: list[str]
 
     # Restore verified speaker labels by exact transcript interval, while the script
     # remains a speaker/action annotation only. Every spoken word maps back to ASR.
+    if planning_hints:
+        opening_by_indices = [item for item in opening_by_indices
+                              if item.get("planning_hint", {}).get("role_in_hook") == "opening"
+                              or (item.get("score", 0) > 0
+                                  and item.get("planning_hint", {}).get("role_in_hook") != "exclude")]
+
     opening_candidates = sorted(opening_by_indices,
-                                key=lambda item: (-item.get("score", 0),
+                                key=lambda item: (item.get("planning_hint", {}).get("role_in_hook") != "opening",
+                                                  -item.get("score", 0),
                                                   item.get("start", float("inf"))))
     first_hook = opening_candidates[0] if opening_candidates else None
     selected: list[dict] = [first_hook] if first_hook else []
+    planned_openings = [item for item in pool
+                        if item.get("planning_hint", {}).get("role_in_hook") == "opening"
+                        and item not in selected and item.get("start") is not None
+                        and item.get("end") is not None
+                        and item["start"] < hook_cfg.get("opening_max_sec", 3.0)]
+    if planned_openings:
+        first_hook = min(planned_openings,
+                         key=lambda item: item.get("start", float("inf")))
+        selected = [first_hook]
     # Add the strongest distinct story beats from the same opening conflict,
     # followed by the source's crisis setup, keeping source order for continuity.
     pre_pool = [item for item in pool if item.get("start") is not None
-                and item.get("start", 0) < 30 and item is not first_hook]
-    pre_pool.sort(key=lambda item: (-item.get("score", 0),
-                                   item.get("start", float("inf"))))
+                and item.get("start", 0) < 30 and item is not first_hook
+                and item.get("planning_hint", {}).get("role_in_hook") != "exclude"
+                and (not planning_hints or item.get("score", 0) > 0
+                     or item.get("planning_hint", {}).get("role_in_hook") == "escalation")]
+    pre_pool.sort(key=lambda item: (item.get("planning_hint", {}).get("role_in_hook") != "escalation",
+                                    -item.get("score", 0),
+                                    item.get("start", float("inf"))))
+    planned_escalations = [item for item in pool
+                           if item.get("planning_hint", {}).get("role_in_hook") == "escalation"
+                           and item not in selected and item.get("start") is not None
+                           and item["start"] < 30]
+    pre_pool = planned_escalations + pre_pool
     for item in pre_pool:
         if any(item["start"] < prior["end"] and item["end"] > prior["start"]
                for prior in selected if prior.get("start") is not None):
             continue
-        selected.append(item)
+        if item not in selected:
+            selected.append(item)
         if len(selected) >= hook_cfg.get("min_pre_shots", 3):
             break
     selected.sort(key=lambda item: item.get("start", float("inf")))
@@ -277,27 +333,48 @@ def build_script(material: dict, short_titles: list[str], long_titles: list[str]
     opening_end = max((item.get("end") or 0 for item in selected), default=0)
     post_opening = [item for item in pool if item.get("start") is not None
                     and item["start"] >= max(30.0, opening_end) and item not in selected]
-    cliff_phrases = hook_cfg.get("cliffhanger_phrases", [])
+    cliff_phrases = genre_kw.get("hook", {}).get("cliffhanger_phrases", [])
     cliff_pool = [item for item in post_opening
-                  if any(phrase in item["text"] for phrase in cliff_phrases)]
+                  if item.get("planning_hint", {}).get("role_in_hook") == "cliffhanger"
+                  or any(phrase in item["text"] for phrase in cliff_phrases)]
     cliff = max(cliff_pool, key=lambda item: (item.get("end", 0), item.get("score", 0)),
                 default=None)
     hook_candidates: list[dict] = []
+    if cliff is None:
+        planned_cliffs = [item for item in pool
+                          if item.get("planning_hint", {}).get("role_in_hook") == "cliffhanger"
+                          and item not in selected and item.get("start") is not None
+                          and item.get("start", 0) >= 30]
+        cliff = max(planned_cliffs, key=lambda item: item.get("end", 0), default=None)
     if cliff is not None:
         lead_window = hook_cfg.get("cliffhanger_lead_window_sec", 15.0)
         lead_pool = [item for item in post_opening if item is not cliff
-                     and 0 < cliff["start"] - item["end"] <= lead_window]
+                     and 0 <= cliff["start"] - item["end"] <= lead_window]
         lead = max(lead_pool, key=lambda item: (item.get("score", 0), item.get("end", 0)),
                    default=None)
         if lead:
             hook_candidates.append(lead)
+        cliff["is_cliffhanger"] = True
         hook_candidates.append(cliff)
+    elif post_opening:
+        hook_candidates = sorted(post_opening,
+                                 key=lambda item: (item.get("score", 0),
+                                                   item.get("end", 0)), reverse=True)[:2]
+        hook_candidates.sort(key=lambda item: item.get("start", float("inf")))
 
     warns: list[str] = []
     if not roles:
         warns.append("无定妆/剧照参照，角色锁脸待补（PENDING）")
     if any(item.get("dialogue_source") == "txt" for item in selected + hook_candidates):
         warns.append("有台词无法由首集 ASR 对齐，禁止用于成片并已排除")
+    chosen = selected + hook_candidates
+    if any(not item.get("role") or item["role"] not in faces for item in chosen):
+        warns.append("部分说话角色无对应参照图，相关镜头身份/造型待人工确认（PENDING）")
+    if any("闪回" in "；".join(item.get("action_context", [])) for item in chosen):
+        warns.append("钩子包含剧本闪回动作，前后场景承接需人工复核（PENDING）")
+    scene_order = [item.get("scene") for item in chosen if item.get("scene")]
+    if any(left != right for left, right in zip(scene_order, scene_order[1:])):
+        warns.append("钩子包含跨场景镜头，时空/剪辑承接需人工复核（PENDING）")
 
     manifest = mf.empty_manifest(material["drama_name"], genre,
                                  cfg.get_setting("episode_label", "E01"), source_episode)
@@ -306,23 +383,20 @@ def build_script(material: dict, short_titles: list[str], long_titles: list[str]
     used_events: set[int] = set()
     maximum = max([item.get("score", 0) for item in pool] or [1.0])
 
-    def role_for(item: dict, index: int) -> tuple[str, str]:
+    def role_for(item: dict) -> tuple[str, str]:
         role = item.get("role", "")
         if role and role in faces:
             return role, faces[role]
-        if roles:
-            fallback = roles[index % len(roles)]
-            return fallback, faces[fallback]
-        return "", ""
+        return role, ""
 
     for index, item in enumerate(selected, start=1):
-        role, ref = role_for(item, index - 1)
+        role, ref = role_for(item)
         pre["shots"].append(_shot(index, mf.SEG_PRE, role, ref, item, events,
-                                  used_events, subtitle_cfg, "产房冲突开场", maximum))
+                                  used_events, subtitle_cfg, "原剧冲突", maximum))
     for index, item in enumerate(hook_candidates, start=1):
-        role, ref = role_for(item, index - 1)
+        role, ref = role_for(item)
         hook["shots"].append(_shot(index, mf.SEG_HOOK, role, ref, item, events,
-                                   used_events, subtitle_cfg, "原剧未解冲突", maximum))
+                                   used_events, subtitle_cfg, "原剧悬念", maximum))
 
     minimum_pre = hook_cfg.get("min_pre_shots", 3)
     minimum_hook = hook_cfg.get("min_hook_shots", 2)
@@ -348,6 +422,25 @@ def build_script(material: dict, short_titles: list[str], long_titles: list[str]
     manifest["transcript"] = {"event_count": len(events),
                                "ranked_candidate_count": len(pool),
                                "top_candidates": pool[:12]}
+    manifest["planning"] = {
+        "method": "rules_only",
+        "llm_status": "disabled",
+        "visual_analysis": "not_performed",
+        "evidence_status": "verified" if events else "pending",
+        "provider": None,
+        "logical_calls": 0,
+        "fallbacks": 0,
+        "synopsis_only_candidates": [],
+    }
+    for shot in pre["shots"] + hook["shots"]:
+        shot["evidence"] = {
+            "dialogue": "asr_aligned" if shot["dialogue_source"] == "asr" else "pending",
+            "action": "script_action_aligned" if shot["action"]["source_actions"] else "not_available",
+            "scene": "script_scene" if shot.get("scene") else "not_available",
+            "character": "script_role_mapping" if shot["role"] else "pending",
+        }
+        shot["camera_suggestion"] = {}
+    manifest["planning"].update(planning_status)
     manifest["hook_qc"] = {
         "opening_max_sec": max_open,
         "opening_first_shot_start": pre["shots"][0]["source_time"]["start"]

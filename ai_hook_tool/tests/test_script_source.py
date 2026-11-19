@@ -31,6 +31,22 @@ def test_parse_script_txt_missing_file():
     assert script_source.parse_script_txt("不存在.txt") == []
 
 
+def test_align_dialogues_keeps_original_transcript_line_indices():
+    entries = [{"role": "甲", "line": "凭什么你敢欺负我老婆！"}]
+    lines = ["场次 1-1", "[1.0-1.3] 凭什么你敢", "[1.4-2.0] 欺负我老婆！"]
+    match = script_source.align_dialogues(lines, entries)[0]
+    assert match["asr_event_indices"] == [1, 2]
+    assert match["asr_start"] == 1.0
+
+
+def test_aligned_event_indices_map_to_original_transcript_lines():
+    entries = [{"role": "甲", "line": "凭什么你敢欺负我老婆！"}]
+    lines = ["说明文本", "[1.0-1.3] 凭什么你敢", "无时间文本",
+             "[1.4-2.0] 欺负我老婆！"]
+    match = script_source.align_dialogues(lines, entries)[0]
+    assert match["asr_event_indices"] == [1, 3]
+
+
 def test_pick_txt_candidates_conflict_first():
     entries = [
         {"role": "甲", "line": "普通叙述一句。", "vo": False, "source": "txt"},

@@ -1,16 +1,188 @@
 {
-  "conflict_words": ["打脸", "傻", "死", "滚", "敢", "谁", "凭什么", "不可能", "疯了", "假", "真", "骗", "恨", "杀", "血", "泪", "巴掌", "逼", "骂", "欺负", "委屈", "怒", "对峙", "直播", "取乐", "刁难"],
-  "suspense_words": ["发现", "秘密", "真相", "原来", "竟然", "居然", "突然", "没想到", "终于", "为什么", "到底", "藏着", "谁教", "认亲", "身份", "没想到"],
-  "punctuations": ["，", "。", "？", "！", "、", "：", "；", "“", "”", "（", "）", " ", "\t"],
-  "high_intensity_phrases": ["这一巴掌", "打你老婆", "怀双胞胎难产", "双胞胎大出血", "换医生", "她在直播", "躲不掉了", "今天躲不掉", "出去", "衣服脱了", "上台"],
-  "low_signal_phrases": ["娇软傻白甜", "不会打车", "不会取快递", "吃虾让老公剥", "家里跳闸", "同学们还没占好位"],
+  "conflict_words": [
+    "冲突",
+    "不可能",
+    "拒绝",
+    "离开",
+    "相信",
+    "害怕",
+    "威胁",
+    "骗",
+    "秘密",
+    "为什么",
+    "谁",
+    "真相"
+  ],
+  "suspense_words": [
+    "发现",
+    "秘密",
+    "真相",
+    "原来",
+    "竟然",
+    "居然",
+    "突然",
+    "没想到",
+    "终于",
+    "为什么",
+    "到底",
+    "藏着",
+    "谁教",
+    "身份"
+  ],
+  "punctuations": [
+    "，",
+    "。",
+    "？",
+    "！",
+    "、",
+    "：",
+    "；",
+    "“",
+    "”",
+    "（",
+    "）",
+    " ",
+    "\t"
+  ],
+  "high_intensity_phrases": [
+    "不可能",
+    "我拒绝",
+    "你是谁",
+    "我不同意"
+  ],
+  "low_signal_phrases": [],
+  "genre_keywords": {
+    "婆媳": {
+      "conflict_words": [
+        "婆婆",
+        "儿媳",
+        "边界",
+        "偏心",
+        "家务",
+        "养老",
+        "巴掌",
+        "欺负",
+        "直播",
+        "取乐",
+        "刁难",
+        "委屈"
+      ],
+      "suspense_words": [
+        "到底是谁",
+        "认错",
+        "隐瞒"
+      ],
+      "high_intensity_phrases": [
+        "换医生",
+        "她在直播"
+      ],
+      "low_signal_phrases": [],
+      "cliffhanger_phrases": [
+        "换医生",
+        "衣服脱了",
+        "上台",
+        "躲不掉了",
+        "开开眼",
+        "身份"
+      ]
+    },
+    "萌宝": {
+      "conflict_words": [
+        "抚养权",
+        "认错",
+        "走丢",
+        "分开",
+        "不许"
+      ],
+      "suspense_words": [
+        "亲生",
+        "认亲",
+        "亲子",
+        "身世"
+      ],
+      "high_intensity_phrases": [],
+      "low_signal_phrases": [],
+      "cliffhanger_phrases": [
+        "亲生",
+        "身世",
+        "认亲"
+      ]
+    },
+    "甜宠": {
+      "conflict_words": [
+        "分手",
+        "误会",
+        "拒绝",
+        "离婚",
+        "选择"
+      ],
+      "suspense_words": [
+        "告白",
+        "心动",
+        "承诺",
+        "误会"
+      ],
+      "high_intensity_phrases": [],
+      "low_signal_phrases": [],
+      "cliffhanger_phrases": [
+        "我答应",
+        "分手",
+        "结婚"
+      ]
+    },
+    "悬疑": {
+      "conflict_words": [
+        "证据",
+        "目击",
+        "追",
+        "逃",
+        "威胁",
+        "消失"
+      ],
+      "suspense_words": [
+        "凶手",
+        "线索",
+        "不在场",
+        "真相",
+        "是谁"
+      ],
+      "high_intensity_phrases": [],
+      "low_signal_phrases": [],
+      "cliffhanger_phrases": [
+        "凶手",
+        "证据",
+        "是谁",
+        "真相"
+      ]
+    },
+    "动物": {
+      "conflict_words": [
+        "救",
+        "走失",
+        "受伤",
+        "寻找",
+        "保护"
+      ],
+      "suspense_words": [
+        "主人",
+        "找到",
+        "回家"
+      ],
+      "high_intensity_phrases": [],
+      "low_signal_phrases": [],
+      "cliffhanger_phrases": [
+        "找到了",
+        "是谁的"
+      ]
+    }
+  },
   "hook": {
     "opening_max_sec": 3.0,
     "min_candidates": 3,
-    "min_pre_shots": 3,
-    "min_hook_shots": 2,
+    "min_pre_shots": 1,
+    "min_hook_shots": 1,
     "min_source_match": 0.5,
-    "cliffhanger_phrases": ["衣服脱了", "上台", "躲不掉了", "换医生", "开开眼"],
+    "cliffhanger_phrases": [],
     "cliffhanger_lead_window_sec": 15.0,
     "source_script_role_bonus": 6.0
   },

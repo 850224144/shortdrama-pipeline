@@ -146,6 +146,21 @@ def transcribe_first_episode(episode_path: str, drama_name: str | None = None,
     if cached is not None:
         return cached, None
 
+    lines, reason = transcribe_uncached(episode_path)
+    if reason:
+        return [], reason
+    try:
+        os.makedirs(paths.DIR_SCRIPT, exist_ok=True)
+        with open(cache, "w", encoding="utf-8") as f:
+            f.write(_header_line(drama, ep_num, episode_path, fp) + "\n")
+            f.write("\n".join(lines))
+    except OSError as exc:
+        return [], f"首集转写缓存写入失败：{exc}"
+    return lines, None
+
+
+def transcribe_uncached(episode_path: str) -> tuple[list[str], str | None]:
+    """Local ASR only; callers own cache, project scope and explicit permission."""
     try:
         from faster_whisper import WhisperModel  # type: ignore
     except Exception as exc:  # 模型/依赖缺失 → PENDING
@@ -170,10 +185,6 @@ def transcribe_first_episode(episode_path: str, drama_name: str | None = None,
         if model is None:
             raise last_exc  # type: ignore[misc]
         lines = [f"[{seg.start:.2f}-{seg.end:.2f}] {seg.text.strip()}" for seg in segments]
-        os.makedirs(paths.DIR_SCRIPT, exist_ok=True)
-        with open(cache, "w", encoding="utf-8") as f:
-            f.write(_header_line(drama, ep_num, episode_path, fp) + "\n")
-            f.write("\n".join(lines))
         return lines, None
     except Exception as exc:
         return [], f"首集转写失败：{exc}"

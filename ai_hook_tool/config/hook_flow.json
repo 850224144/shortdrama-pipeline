@@ -1,0 +1,123 @@
+{
+  "flow_version": "1",
+  "policy": {
+    "target_duration_sec": 35,
+    "delivery_duration_range_sec": [30, 40],
+    "proposal_limit": 3,
+    "aspect_ratio": "9:16",
+    "production_mode": "manual_generation",
+    "analysis_mode": "assisted",
+    "external_media_transfer": "disabled",
+    "publication": "disabled",
+    "audio_mode": "original_audio",
+    "audio_permission": "unconfirmed",
+    "allow_shorter_than_min": false,
+    "min_shot_sec": 1.2,
+    "max_shot_sec": 8.0,
+    "max_shots": 8,
+    "min_candidates": 6,
+    "min_candidate_score": 22,
+    "chunk_events": 40,
+    "chunk_overlap": 2,
+    "max_events_per_plan": 7,
+    "subtitle": {
+      "max_chars_per_line": 18,
+      "max_duration_ms": 5000,
+      "font": "C:\\Windows\\Fonts\\msyh.ttc",
+      "fontsize": 60,
+      "margin": 240,
+      "outline": 4
+    },
+    "qc": {
+      "min_lufs": -24.0,
+      "max_lufs": -8.0,
+      "min_duration_sec": 30,
+      "resolution": {"width": 1080, "height": 1920},
+      "require_ai_label": true,
+      "black_frame_tolerance_sec": 0.8
+    },
+    "scoring_weights": {
+      "opening": 20,
+      "clarity": 20,
+      "escalation": 20,
+      "turn": 15,
+      "ending": 15,
+      "feasibility": 10
+    }
+  },
+  "mechanisms": [
+    {
+      "id": "crisis_escalation",
+      "name": "危机升级",
+      "signals": ["逼", "赶", "打", "跪", "威胁", "报警", "救", "砸", "抢", "危险", "滚", "离婚"],
+      "opening_role": "冲突爆发",
+      "preferred_roles": ["obstacle", "escalation"]
+    },
+    {
+      "id": "relationship_betrayal",
+      "name": "关系背叛",
+      "signals": ["背叛", "出轨", "算计", "利用", "骗", "小三", "假", "陷害", "出卖", "翻脸"],
+      "opening_role": "信任崩塌",
+      "preferred_roles": ["turn", "obstacle"]
+    },
+    {
+      "id": "character_contrast",
+      "name": "人物反差",
+      "signals": ["其实", "竟然", "没想到", "原来", "居然", "反转", "真实身份", "隐藏", "装的"],
+      "opening_role": "反差亮相",
+      "preferred_roles": ["turn", "reveal"]
+    },
+    {
+      "id": "power_reversal",
+      "name": "权力逆转",
+      "signals": ["跪下", "道歉", "求饶", "打脸", "翻身", "继承", "董事长", "总裁", "开除", "扫地出门"],
+      "opening_role": "被压制",
+      "preferred_roles": ["turn", "ending"]
+    },
+    {
+      "id": "identity_question",
+      "name": "身份疑问",
+      "signals": ["到底", "究竟", "谁", "秘密", "身份", "亲生", "血型", "失忆", "冒充", "认错"],
+      "opening_role": "身份疑点",
+      "preferred_roles": ["turn", "ending"]
+    },
+    {
+      "id": "goal_blocked",
+      "name": "目标受阻",
+      "signals": ["我要", "想要", "必须", "求", "帮", "拒绝", "不行", "不能", "不同意", "没门"],
+      "opening_role": "请求被拒",
+      "preferred_roles": ["opening", "obstacle"]
+    },
+    {
+      "id": "misunderstanding_reveal",
+      "name": "误解与揭示",
+      "signals": ["误会", "错怪", "不是你想", "听我解释", "真相", "证据", "录音", "监控", "澄清"],
+      "opening_role": "误解现场",
+      "preferred_roles": ["turn", "ending"]
+    },
+    {
+      "id": "emotional_choice",
+      "name": "情感选择",
+      "signals": ["爱", "离开", "留下", "选择", "等你", "分手", "结婚", "离婚", "孩子", "家"],
+      "opening_role": "关系抉择",
+      "preferred_roles": ["escalation", "ending"]
+    },
+    {
+      "id": "comic_twist",
+      "name": "喜剧反转",
+      "signals": ["笑话", "搞笑", "乌龙", "故意", "假装", "表演", "逗", "误会大了", "翻车"],
+      "opening_role": "笑点开场",
+      "preferred_roles": ["turn", "ending"]
+    }
+  ],
+  "new_information_markers": ["其实", "原来", "竟然", "没想到", "已经", "怀孕", "离婚", "死", "真相", "身份", "背叛", "出轨", "合同", "证据", "遗嘱", "亲生", "欠", "骗"],
+  "obstacle_markers": ["不行", "不能", "拒绝", "不答应", "别", "滚", "不要", "没门", "不让", "休想"],
+  "goal_markers": ["我要", "我想", "必须", "帮我", "求你", "想要", "需要", "让我"],
+  "stakes_markers": ["孩子", "公司", "钱", "房", "婚", "命", "工作", "家", "股份", "名誉"],
+  "causal_markers": ["因为", "所以", "于是", "结果", "要不是", "都怪", "因此", "导致"],
+  "turn_markers": ["但是", "可是", "却", "竟", "反而", "没想到", "原来", "突然"],
+  "flashback_markers": ["回忆", "三年前", "五年前", "当年", "那一年", "小时候", "重生", "梦", "梦里"],
+  "reaction_markers": ["哭", "笑", "怒", "惊", "抖", "颤", "愣", "呆", "吼", "尖叫"],
+  "resolution_markers": ["真相大白", "从此", "大结局", "圆满", "和解", "幸福生活"],
+  "emotion_words": ["怕", "恨", "爱", "委屈", "痛", "气", "急", "慌", "不甘"]
+}

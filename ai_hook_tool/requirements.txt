@@ -1,5 +1,7 @@
 # 主链路仅依赖标准库 + ffmpeg/ffprobe（外部二进制）
 # 可选：首集转写（已有转写文本时不需要）
 faster-whisper>=1.0.0
+# 可选：启用 script --planner llm 时复用 Webapp 的智谱/商汤请求客户端
+requests>=2.31.0
 # 测试
 pytest>=8.0.0

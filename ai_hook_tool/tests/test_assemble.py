@@ -15,7 +15,8 @@ pytestmark = pytest.mark.skipif(
 def _make_sample(out_path: str, color: str):
     cmd = [FFMPEG, "-y", "-f", "lavfi", "-i",
            f"color=c={color}:s=1080x1920:d=3:r=30",
-           "-c:v", "libx264", "-pix_fmt", "yuv420p", out_path]
+           "-f", "lavfi", "-i", "anullsrc=channel_layout=stereo:sample_rate=44100",
+           "-shortest", "-c:v", "libx264", "-c:a", "aac", "-pix_fmt", "yuv420p", out_path]
     subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8", errors="replace")
 
 
@@ -25,7 +26,8 @@ def test_assemble_concats_two_clips_to_portrait(tmp_path):
     _make_sample(a, "red")
     _make_sample(b, "blue")
 
-    clips = [{"path": a, "has_audio": False}, {"path": b, "has_audio": False}]
+    clips = [{"path": a, "has_audio": True, "subtitle": "第一段字幕"},
+             {"path": b, "has_audio": True, "subtitle": "第二段字幕"}]
     out = str(tmp_path / "final.mp4")
     res = assemble.run_assemble(clips, out)
 
