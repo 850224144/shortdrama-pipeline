@@ -1,0 +1,1155 @@
+{
+ "__init__": {
+  "start": 287,
+  "end": 297,
+  "size": 11,
+  "globals": [
+   "CONFIG",
+   "os",
+   "threading"
+  ]
+ },
+ "set_cut_progress_callback": {
+  "start": 299,
+  "end": 301,
+  "size": 3,
+  "globals": []
+ },
+ "_emit_cut_progress": {
+  "start": 303,
+  "end": 312,
+  "size": 10,
+  "globals": []
+ },
+ "check_resources": {
+  "start": 314,
+  "end": 334,
+  "size": 21,
+  "globals": [
+   "CONFIG",
+   "shutil"
+  ]
+ },
+ "normalize_name": {
+  "start": 336,
+  "end": 338,
+  "size": 3,
+  "globals": [
+   "re"
+  ]
+ },
+ "is_fuzzy_duplicate": {
+  "start": 340,
+  "end": 350,
+  "size": 11,
+  "globals": []
+ },
+ "should_process": {
+  "start": 352,
+  "end": 391,
+  "size": 40,
+  "globals": [
+   "os"
+  ]
+ },
+ "assign_account": {
+  "start": 393,
+  "end": 426,
+  "size": 34,
+  "globals": []
+ },
+ "get_submit_order": {
+  "start": 428,
+  "end": 433,
+  "size": 6,
+  "globals": []
+ },
+ "get_watermark_name": {
+  "start": 435,
+  "end": 442,
+  "size": 8,
+  "globals": []
+ },
+ "get_output_subdir": {
+  "start": 444,
+  "end": 451,
+  "size": 8,
+  "globals": [
+   "CONFIG"
+  ]
+ },
+ "apply_watermark_override": {
+  "start": 456,
+  "end": 488,
+  "size": 33,
+  "globals": [
+   "re"
+  ]
+ },
+ "check_drama_id": {
+  "start": 490,
+  "end": 509,
+  "size": 20,
+  "globals": [
+   "CONFIG",
+   "json",
+   "os"
+  ]
+ },
+ "_resolve_cut_config": {
+  "start": 512,
+  "end": 549,
+  "size": 38,
+  "globals": [
+   "CUT_CONFIG_ABS",
+   "DEFAULT_CUT_CONFIG"
+  ]
+ },
+ "determine_version_count": {
+  "start": 551,
+  "end": 555,
+  "size": 5,
+  "globals": []
+ },
+ "process_message": {
+  "start": 557,
+  "end": 729,
+  "size": 173,
+  "globals": [
+   "CONFIG",
+   "CutCancelled",
+   "LinkExtractor",
+   "_pq_clear",
+   "_pq_create",
+   "_pq_load",
+   "_pq_mark",
+   "_pq_mark_by_drama"
+  ]
+ },
+ "manual_cut": {
+  "start": 731,
+  "end": 863,
+  "size": 133,
+  "globals": [
+   "CONFIG",
+   "os"
+  ]
+ },
+ "manual_cut_for_account": {
+  "start": 865,
+  "end": 881,
+  "size": 17,
+  "globals": [
+   "CONFIG",
+   "os"
+  ]
+ },
+ "download_batch": {
+  "start": 883,
+  "end": 922,
+  "size": 40,
+  "globals": [
+   "CONFIG",
+   "CutCancelled",
+   "ThreadPoolExecutor",
+   "as_completed"
+  ]
+ },
+ "_download_with_retry": {
+  "start": 924,
+  "end": 1077,
+  "size": 154,
+  "globals": [
+   "CONFIG",
+   "CutCancelled",
+   "os",
+   "time"
+  ]
+ },
+ "_download_once": {
+  "start": 1079,
+  "end": 1618,
+  "size": 540,
+  "globals": [
+   "CONFIG",
+   "CutCancelled",
+   "DownloadStalled",
+   "os",
+   "re",
+   "subprocess",
+   "threading",
+   "time"
+  ]
+ },
+ "_download_job_store": {
+  "start": 1621,
+  "end": 1625,
+  "size": 5,
+  "globals": [
+   "CONFIG",
+   "JobStore",
+   "os"
+  ]
+ },
+ "_persist_download_job": {
+  "start": 1627,
+  "end": 1654,
+  "size": 28,
+  "globals": [
+   "datetime",
+   "uuid"
+  ]
+ },
+ "_finalize_download_job": {
+  "start": 1656,
+  "end": 1666,
+  "size": 11,
+  "globals": [
+   "datetime"
+  ]
+ },
+ "find_orphaned_download_jobs": {
+  "start": 1677,
+  "end": 1713,
+  "size": 37,
+  "globals": [
+   "datetime"
+  ]
+ },
+ "bump_download_auto_resume": {
+  "start": 1715,
+  "end": 1726,
+  "size": 12,
+  "globals": []
+ },
+ "resolve_orphan_download_job": {
+  "start": 1728,
+  "end": 1748,
+  "size": 21,
+  "globals": [
+   "datetime"
+  ]
+ },
+ "_list_cloud_files": {
+  "start": 1751,
+  "end": 1769,
+  "size": 19,
+  "globals": [
+   "CONFIG",
+   "os",
+   "re",
+   "subprocess"
+  ]
+ },
+ "_clean_partial_downloads": {
+  "start": 1772,
+  "end": 1811,
+  "size": 40,
+  "globals": [
+   "os"
+  ]
+ },
+ "_find_dir_in_cloud": {
+  "start": 1813,
+  "end": 1851,
+  "size": 39,
+  "globals": [
+   "CONFIG",
+   "os",
+   "re",
+   "subprocess"
+  ]
+ },
+ "_translate_transfer_error": {
+  "start": 1861,
+  "end": 1868,
+  "size": 8,
+  "globals": [
+   "re"
+  ]
+ },
+ "_is_permanent_download_error": {
+  "start": 1870,
+  "end": 1875,
+  "size": 6,
+  "globals": []
+ },
+ "_cloud_dir_where": {
+  "start": 1877,
+  "end": 1886,
+  "size": 10,
+  "globals": []
+ },
+ "_delete_cloud_dir": {
+  "start": 1888,
+  "end": 1917,
+  "size": 30,
+  "globals": [
+   "CONFIG",
+   "os",
+   "subprocess",
+   "time"
+  ]
+ },
+ "_resolve_cloud_dir_for_link": {
+  "start": 1919,
+  "end": 1946,
+  "size": 28,
+  "globals": []
+ },
+ "_monitor_download_progress": {
+  "start": 1948,
+  "end": 2016,
+  "size": 69,
+  "globals": [
+   "os",
+   "time"
+  ]
+ },
+ "_flatten_local_dir": {
+  "start": 2018,
+  "end": 2059,
+  "size": 42,
+  "globals": [
+   "os",
+   "shutil"
+  ]
+ },
+ "_download_marker_suffix": {
+  "start": 2062,
+  "end": 2068,
+  "size": 7,
+  "globals": []
+ },
+ "_is_partial_download_file": {
+  "start": 2070,
+  "end": 2083,
+  "size": 14,
+  "globals": [
+   "os"
+  ]
+ },
+ "_quarantine_download_duplicate": {
+  "start": 2085,
+  "end": 2093,
+  "size": 9,
+  "globals": [
+   "os",
+   "shutil"
+  ]
+ },
+ "_normalize_download_tree": {
+  "start": 2095,
+  "end": 2171,
+  "size": 77,
+  "globals": [
+   "CONFIG",
+   "datetime",
+   "os",
+   "re",
+   "shutil",
+   "uuid"
+  ]
+ },
+ "_promote_staged_on_failure": {
+  "start": 2173,
+  "end": 2186,
+  "size": 14,
+  "globals": [
+   "os"
+  ]
+ },
+ "_validate_download_layout": {
+  "start": 2188,
+  "end": 2209,
+  "size": 22,
+  "globals": [
+   "os"
+  ]
+ },
+ "_scan_files_recursive": {
+  "start": 2211,
+  "end": 2228,
+  "size": 18,
+  "globals": [
+   "os"
+  ]
+ },
+ "_dedupe_episodes_by_number": {
+  "start": 2230,
+  "end": 2254,
+  "size": 25,
+  "globals": [
+   "os"
+  ]
+ },
+ "_check_episode_continuity": {
+  "start": 2256,
+  "end": 2296,
+  "size": 41,
+  "globals": [
+   "os"
+  ]
+ },
+ "_valid_delivered_filenames": {
+  "start": 2298,
+  "end": 2316,
+  "size": 19,
+  "globals": [
+   "os"
+  ]
+ },
+ "_clean_partial_outputs": {
+  "start": 2318,
+  "end": 2355,
+  "size": 38,
+  "globals": [
+   "os"
+  ]
+ },
+ "_count_delivered_versions": {
+  "start": 2357,
+  "end": 2365,
+  "size": 9,
+  "globals": [
+   "os"
+  ]
+ },
+ "_looks_like_link_id": {
+  "start": 2368,
+  "end": 2372,
+  "size": 5,
+  "globals": [
+   "re"
+  ]
+ },
+ "_resolve_download_drama_name": {
+  "start": 2374,
+  "end": 2390,
+  "size": 17,
+  "globals": [
+   "CONFIG",
+   "os"
+  ]
+ },
+ "_write_archive_slice_state": {
+  "start": 2392,
+  "end": 2423,
+  "size": 32,
+  "globals": [
+   "datetime",
+   "time"
+  ]
+ },
+ "_begin_drama_job": {
+  "start": 2426,
+  "end": 2440,
+  "size": 15,
+  "globals": []
+ },
+ "_end_drama_job": {
+  "start": 2442,
+  "end": 2464,
+  "size": 23,
+  "globals": []
+ },
+ "cut_batch": {
+  "start": 2466,
+  "end": 2603,
+  "size": 138,
+  "globals": []
+ },
+ "_cut_once": {
+  "start": 2605,
+  "end": 2983,
+  "size": 379,
+  "globals": [
+   "CONFIG",
+   "CutCancelled",
+   "_pq_mark_by_drama",
+   "datetime",
+   "os",
+   "re"
+  ]
+ },
+ "_raise_if_cancelled": {
+  "start": 2986,
+  "end": 2988,
+  "size": 3,
+  "globals": [
+   "CutCancelled"
+  ]
+ },
+ "_terminate_process_tree": {
+  "start": 2991,
+  "end": 3020,
+  "size": 30,
+  "globals": [
+   "os",
+   "subprocess"
+  ]
+ },
+ "_run_command_cancellable": {
+  "start": 3022,
+  "end": 3080,
+  "size": 59,
+  "globals": [
+   "CutCancelled",
+   "DownloadStalled",
+   "subprocess",
+   "time"
+  ]
+ },
+ "_child_process_env": {
+  "start": 3083,
+  "end": 3088,
+  "size": 6,
+  "globals": [
+   "os"
+  ]
+ },
+ "_run_asr": {
+  "start": 3090,
+  "end": 3142,
+  "size": 53,
+  "globals": [
+   "CONFIG",
+   "CutCancelled",
+   "execution_gate",
+   "os",
+   "sys"
+  ]
+ },
+ "_extract_quotes": {
+  "start": 3144,
+  "end": 3207,
+  "size": 64,
+  "globals": [
+   "PUNCTUATIONS",
+   "os",
+   "re"
+  ]
+ },
+ "_sanitize_short_title": {
+  "start": 3210,
+  "end": 3225,
+  "size": 16,
+  "globals": []
+ },
+ "_pick_version_title": {
+  "start": 3227,
+  "end": 3242,
+  "size": 16,
+  "globals": []
+ },
+ "parse_episode_number": {
+  "start": 3245,
+  "end": 3257,
+  "size": 13,
+  "globals": [
+   "re"
+  ]
+ },
+ "get_episode_file": {
+  "start": 3259,
+  "end": 3270,
+  "size": 12,
+  "globals": [
+   "os"
+  ]
+ },
+ "list_episodes": {
+  "start": 3272,
+  "end": 3294,
+  "size": 23,
+  "globals": [
+   "os"
+  ]
+ },
+ "_generate_edl_versions": {
+  "start": 3296,
+  "end": 3592,
+  "size": 297,
+  "globals": [
+   "AICopyGenerator",
+   "CONFIG",
+   "datetime",
+   "json",
+   "os"
+  ]
+ },
+ "_render_versions_serial": {
+  "start": 3594,
+  "end": 3637,
+  "size": 44,
+  "globals": []
+ },
+ "_render_versions_parallel": {
+  "start": 3639,
+  "end": 3681,
+  "size": 43,
+  "globals": [
+   "ThreadPoolExecutor",
+   "as_completed"
+  ]
+ },
+ "_detect_source_pattern": {
+  "start": 3684,
+  "end": 3728,
+  "size": 45,
+  "globals": [
+   "os",
+   "re"
+  ]
+ },
+ "_repair_config_source_pattern": {
+  "start": 3730,
+  "end": 3745,
+  "size": 16,
+  "globals": [
+   "CONFIG",
+   "os"
+  ]
+ },
+ "_precheck_source_pattern": {
+  "start": 3747,
+  "end": 3774,
+  "size": 28,
+  "globals": [
+   "os",
+   "re"
+  ]
+ },
+ "_classify_render_failure": {
+  "start": 3776,
+  "end": 3789,
+  "size": 14,
+  "globals": [
+   "re"
+  ]
+ },
+ "_edl_hash_of": {
+  "start": 3792,
+  "end": 3794,
+  "size": 3,
+  "globals": [
+   "_edl_mod"
+  ]
+ },
+ "_check_edl_approval": {
+  "start": 3796,
+  "end": 3812,
+  "size": 17,
+  "globals": [
+   "CONFIG",
+   "_edl_mod",
+   "os"
+  ]
+ },
+ "approve_edl": {
+  "start": 3814,
+  "end": 3827,
+  "size": 14,
+  "globals": [
+   "_edl_mod",
+   "os"
+  ]
+ },
+ "_run_render_one": {
+  "start": 3829,
+  "end": 3923,
+  "size": 95,
+  "globals": [
+   "CONFIG",
+   "CutCancelled",
+   "execution_gate",
+   "os",
+   "re",
+   "sys"
+  ]
+ },
+ "_resume_manifest_path": {
+  "start": 3933,
+  "end": 3934,
+  "size": 2,
+  "globals": [
+   "os"
+  ]
+ },
+ "_load_resume_manifest": {
+  "start": 3936,
+  "end": 3945,
+  "size": 10,
+  "globals": [
+   "json"
+  ]
+ },
+ "_save_resume_manifest": {
+  "start": 3947,
+  "end": 3955,
+  "size": 9,
+  "globals": [
+   "json",
+   "os"
+  ]
+ },
+ "_mark_resume_version": {
+  "start": 3957,
+  "end": 3966,
+  "size": 10,
+  "globals": [
+   "datetime"
+  ]
+ },
+ "_source_signature": {
+  "start": 3968,
+  "end": 3978,
+  "size": 11,
+  "globals": [
+   "os"
+  ]
+ },
+ "_resume_scene_valid": {
+  "start": 3980,
+  "end": 3996,
+  "size": 17,
+  "globals": [
+   "glob",
+   "os"
+  ]
+ },
+ "_find_version_final": {
+  "start": 3998,
+  "end": 4007,
+  "size": 10,
+  "globals": [
+   "os",
+   "re"
+  ]
+ },
+ "_re_render_from_configs": {
+  "start": 4009,
+  "end": 4110,
+  "size": 102,
+  "globals": [
+   "CONFIG",
+   "glob",
+   "json",
+   "os",
+   "re"
+  ]
+ },
+ "_apply_resume_result": {
+  "start": 4112,
+  "end": 4127,
+  "size": 16,
+  "globals": [
+   "os"
+  ]
+ },
+ "_resume_render_serial": {
+  "start": 4129,
+  "end": 4159,
+  "size": 31,
+  "globals": []
+ },
+ "_resume_render_parallel": {
+  "start": 4161,
+  "end": 4191,
+  "size": 31,
+  "globals": [
+   "ThreadPoolExecutor",
+   "as_completed"
+  ]
+ },
+ "_compute_version_budget": {
+  "start": 4205,
+  "end": 4263,
+  "size": 59,
+  "globals": [
+   "CONFIG",
+   "_duration_mod",
+   "random"
+  ]
+ },
+ "_seg_budget_left": {
+  "start": 4265,
+  "end": 4278,
+  "size": 14,
+  "globals": [
+   "CONFIG"
+  ]
+ },
+ "_causal_check_segments": {
+  "start": 4280,
+  "end": 4410,
+  "size": 131,
+  "globals": [
+   "CONFIG",
+   "datetime",
+   "hashlib",
+   "json",
+   "os"
+  ]
+ },
+ "_causal_check_llm": {
+  "start": 4412,
+  "end": 4454,
+  "size": 43,
+  "globals": [
+   "AICopyGenerator",
+   "json"
+  ]
+ },
+ "_causal_replacement_cands": {
+  "start": 4456,
+  "end": 4480,
+  "size": 25,
+  "globals": []
+ },
+ "_nonoverlap_cands": {
+  "start": 4482,
+  "end": 4518,
+  "size": 37,
+  "globals": []
+ },
+ "_planned_segs_per_version": {
+  "start": 4520,
+  "end": 4532,
+  "size": 13,
+  "globals": [
+   "CONFIG",
+   "_duration_mod"
+  ]
+ },
+ "_capacity_version_count": {
+  "start": 4534,
+  "end": 4578,
+  "size": 45,
+  "globals": [
+   "CONFIG",
+   "CUT_CONFIG_ABS"
+  ]
+ },
+ "_keyword_cands": {
+  "start": 4722,
+  "end": 4758,
+  "size": 37,
+  "globals": []
+ },
+ "_score_episode_llm": {
+  "start": 4760,
+  "end": 4835,
+  "size": 76,
+  "globals": [
+   "json"
+  ]
+ },
+ "_save_highlight_cache": {
+  "start": 4837,
+  "end": 4846,
+  "size": 10,
+  "globals": [
+   "json",
+   "os"
+  ]
+ },
+ "_load_episode_highlights": {
+  "start": 4848,
+  "end": 5007,
+  "size": 160,
+  "globals": [
+   "AICopyGenerator",
+   "CONFIG",
+   "json",
+   "os"
+  ]
+ },
+ "_generate_versions_via_llm": {
+  "start": 5009,
+  "end": 5038,
+  "size": 30,
+  "globals": [
+   "json"
+  ]
+ },
+ "_review_arc_plan": {
+  "start": 5040,
+  "end": 5075,
+  "size": 36,
+  "globals": [
+   "json"
+  ]
+ },
+ "_analyze_drama_arc": {
+  "start": 5077,
+  "end": 5192,
+  "size": 116,
+  "globals": [
+   "AICopyGenerator",
+   "json",
+   "os"
+  ]
+ },
+ "_validate_arc_plan": {
+  "start": 5194,
+  "end": 5228,
+  "size": 35,
+  "globals": []
+ },
+ "_build_arc_order": {
+  "start": 5230,
+  "end": 5245,
+  "size": 16,
+  "globals": []
+ },
+ "_scene_boundaries": {
+  "start": 5251,
+  "end": 5286,
+  "size": 36,
+  "globals": [
+   "CONFIG",
+   "os",
+   "re",
+   "subprocess"
+  ]
+ },
+ "_snap_scene_start": {
+  "start": 5288,
+  "end": 5312,
+  "size": 25,
+  "globals": [
+   "CONFIG"
+  ]
+ },
+ "_snap_segment_start": {
+  "start": 5314,
+  "end": 5328,
+  "size": 15,
+  "globals": []
+ },
+ "_snap_word_start": {
+  "start": 5330,
+  "end": 5351,
+  "size": 22,
+  "globals": [
+   "CONFIG"
+  ]
+ },
+ "_generate_reverse_segments": {
+  "start": 5353,
+  "end": 5566,
+  "size": 214,
+  "globals": [
+   "CONFIG",
+   "math"
+  ]
+ },
+ "_generate_random_segments": {
+  "start": 5568,
+  "end": 5619,
+  "size": 52,
+  "globals": [
+   "random"
+  ]
+ },
+ "_get_episode_num": {
+  "start": 5621,
+  "end": 5625,
+  "size": 5,
+  "globals": [
+   "os"
+  ]
+ },
+ "_update_config_artifacts": {
+  "start": 5627,
+  "end": 5647,
+  "size": 21,
+  "globals": [
+   "json",
+   "os"
+  ]
+ },
+ "_select_best_videos": {
+  "start": 5649,
+  "end": 5681,
+  "size": 33,
+  "globals": [
+   "CONFIG"
+  ]
+ },
+ "_parse_version_from_filename": {
+  "start": 5683,
+  "end": 5691,
+  "size": 9,
+  "globals": [
+   "re"
+  ]
+ },
+ "_dedup_versions_by_content": {
+  "start": 5693,
+  "end": 5830,
+  "size": 138,
+  "globals": [
+   "CONFIG",
+   "os"
+  ]
+ },
+ "_get_video_duration": {
+  "start": 5832,
+  "end": 5841,
+  "size": 10,
+  "globals": [
+   "CONFIG",
+   "os",
+   "subprocess"
+  ]
+ },
+ "_write_content_risk_audit": {
+  "start": 5843,
+  "end": 5861,
+  "size": 19,
+  "globals": [
+   "CONFIG",
+   "json",
+   "os"
+  ]
+ },
+ "_validate_delivery_media": {
+  "start": 5863,
+  "end": 5883,
+  "size": 21,
+  "globals": [
+   "CONFIG",
+   "os"
+  ]
+ },
+ "_episode_real_duration": {
+  "start": 5885,
+  "end": 5891,
+  "size": 7,
+  "globals": []
+ },
+ "_post_process": {
+  "start": 5893,
+  "end": 5979,
+  "size": 87,
+  "globals": [
+   "CONFIG",
+   "os",
+   "subprocess"
+  ]
+ },
+ "_get_version_idx": {
+  "start": 5987,
+  "end": 5998,
+  "size": 12,
+  "globals": [
+   "os",
+   "re"
+  ]
+ },
+ "_get_watermark_from_path": {
+  "start": 6000,
+  "end": 6006,
+  "size": 7,
+  "globals": []
+ },
+ "_generate_cover": {
+  "start": 6008,
+  "end": 6047,
+  "size": 40,
+  "globals": [
+   "os",
+   "shutil"
+  ]
+ },
+ "_find_official_cover": {
+  "start": 6049,
+  "end": 6084,
+  "size": 36,
+  "globals": [
+   "os"
+  ]
+ },
+ "_add_cover_badge": {
+  "start": 6086,
+  "end": 6132,
+  "size": 47,
+  "globals": [
+   "CONFIG",
+   "os",
+   "subprocess"
+  ]
+ },
+ "_cleanup_test_versions": {
+  "start": 6134,
+  "end": 6145,
+  "size": 12,
+  "globals": [
+   "os"
+  ]
+ },
+ "_generate_qc_report": {
+  "start": 6147,
+  "end": 6305,
+  "size": 159,
+  "globals": [
+   "CONFIG",
+   "datetime",
+   "glob",
+   "json",
+   "os"
+  ]
+ },
+ "_write_render_report": {
+  "start": 6307,
+  "end": 6360,
+  "size": 54,
+  "globals": [
+   "os"
+  ]
+ },
+ "_resolve_actual_cover": {
+  "start": 6362,
+  "end": 6390,
+  "size": 29,
+  "globals": [
+   "glob",
+   "os"
+  ]
+ },
+ "_write_report": {
+  "start": 6392,
+  "end": 6527,
+  "size": 136,
+  "globals": [
+   "datetime",
+   "json",
+   "os",
+   "re"
+  ]
+ },
+ "_update_state": {
+  "start": 6528,
+  "end": 6543,
+  "size": 16,
+  "globals": [
+   "datetime"
+  ]
+ },
+ "_acquire_lock": {
+  "start": 6545,
+  "end": 6559,
+  "size": 15,
+  "globals": []
+ },
+ "_release_lock": {
+  "start": 6561,
+  "end": 6577,
+  "size": 17,
+  "globals": [
+   "os"
+  ]
+ }
+}

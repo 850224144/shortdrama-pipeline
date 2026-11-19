@@ -219,7 +219,7 @@ class TestCausalCheckLlm(unittest.TestCase):
         ai = mock.MagicMock()
         ai.enabled = True
         ai.chat_json.return_value = content
-        with mock.patch.object(processor, 'AICopyGenerator',
+        with mock.patch('pipeline.edl_mixin.AICopyGenerator',
                                return_value=ai):
             return p._causal_check_llm('测试剧', ['[0] 第20集 [15-45s] x'], retry)
 
@@ -248,7 +248,7 @@ class TestCausalCheckLlm(unittest.TestCase):
         p, _ = _mk()
         ai = mock.MagicMock()
         ai.enabled = False
-        with mock.patch.object(processor, 'AICopyGenerator',
+        with mock.patch('pipeline.edl_mixin.AICopyGenerator',
                                return_value=ai):
             self.assertIsNone(p._causal_check_llm('测试剧', ['x']))
 
@@ -259,7 +259,7 @@ class TestCausalCheckLlm(unittest.TestCase):
         ai.enabled = True
         ai.chat_json.side_effect = [None, json.dumps(
             {"breaks": [{"index": 0, "reason": "r"}]})]
-        with mock.patch.object(processor, 'AICopyGenerator',
+        with mock.patch('pipeline.edl_mixin.AICopyGenerator',
                                return_value=ai):
             breaks = p._causal_check_llm('测试剧', ['x'], retry=1)
         self.assertEqual(breaks, [{"index": 0, "reason": "r"}])

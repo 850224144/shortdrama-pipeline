@@ -118,7 +118,7 @@ class ArcReviewLoopTests(unittest.TestCase):
 
     def _run(self, review_scores=None):
         self._setup_ai(review_scores)
-        with mock.patch('processor.AICopyGenerator', return_value=self.ai):
+        with mock.patch('pipeline.edl_mixin.AICopyGenerator', return_value=self.ai):
             return self.proc._analyze_drama_arc(_eps_hl(self.tmp), 3, '剧X')
 
     def test_review_passes_no_retry(self):
@@ -151,7 +151,7 @@ class ArcReviewLoopTests(unittest.TestCase):
             self.calls['reviewer'] += 1
             return '不是 JSON'
         self.ai.chat_json.side_effect = chat_json
-        with mock.patch('processor.AICopyGenerator', return_value=self.ai):
+        with mock.patch('pipeline.edl_mixin.AICopyGenerator', return_value=self.ai):
             versions = self.proc._analyze_drama_arc(_eps_hl(self.tmp), 3, '剧X')
         self.assertEqual(len(versions), 3)
         self.assertEqual(self.calls['director'], 1, '评审失败不应重试')

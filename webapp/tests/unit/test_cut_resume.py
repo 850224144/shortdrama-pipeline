@@ -132,7 +132,7 @@ class TestReRenderFromConfigs(unittest.TestCase):
             for ep in (1, 2):
                 open(os.path.join(src, f'测试剧 - 第{ep}集.mp4'), 'w').close()
             # 素材目录需在 CONFIG['download_base_dir'] 下 —— mock CONFIG
-            with mock.patch('processor.CONFIG', {
+            with mock.patch('pipeline.cut_mixin.CONFIG', {
                 'download_base_dir': d,
                 'output_dir': os.path.join(d, 'output'),
                 'scripts_dir': os.path.dirname(os.path.dirname(os.path.dirname(__file__))),

@@ -228,7 +228,7 @@ class TestAnalyzeDramaArcDefault(unittest.TestCase):
         """AI 禁用 → 默认方案：top-N 高分集轮换做开头（不同集）"""
         p, _ = _mk()
         eps = _eps_hl()  # scores: ep10=9, ep20=8, ep1=5
-        with mock.patch.object(processor, 'AICopyGenerator') as AG:
+        with mock.patch('pipeline.edl_mixin.AICopyGenerator') as AG:
             AG.return_value.enabled = False
             plan = p._analyze_drama_arc(eps, 3, drama_name='测试剧')
         self.assertEqual(len(plan), 3)
@@ -255,7 +255,7 @@ class TestAnalyzeDramaArcDefault(unittest.TestCase):
             with open(os.path.join(cache_dir, 'arc_plan.json'), 'w',
                       encoding='utf-8') as f:
                 json.dump(plan, f, ensure_ascii=False)
-            with mock.patch.object(processor, 'AICopyGenerator') as AG:
+            with mock.patch('pipeline.edl_mixin.AICopyGenerator') as AG:
                 got = p._analyze_drama_arc(eps, 3, drama_name='测试剧')
                 AG.assert_not_called()
             self.assertEqual(got[0]['opening_ep'], 20)
@@ -349,7 +349,7 @@ class TestArcAngleRichness(unittest.TestCase):
         """GLM 禁用 → 默认方案角度互不相同 + order_type 轮换（不再全 reverse）。"""
         p, _ = _mk()
         eps = _eps_hl()
-        with mock.patch.object(processor, 'AICopyGenerator') as AG:
+        with mock.patch('pipeline.edl_mixin.AICopyGenerator') as AG:
             AG.return_value.enabled = False
             plan = p._analyze_drama_arc(eps, 3, drama_name='测试剧')
         self.assertIsNotNone(plan)
