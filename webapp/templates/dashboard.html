@@ -1350,9 +1350,37 @@
                             上传成功后自动清理（移入回收站）
                         </label>
                         <label>
-                            <input type="checkbox" id="scheduledPublish" checked>
+                            <input type="checkbox" id="scheduledPublish" checked onchange="updatePublishHint()">
                             ⏰ 定时发表（按计划时间发表，而非保存草稿）
                         </label>
+                    </div>
+
+                    <div class="publish-plan-panel" style="margin: var(--spacing-md) 0; padding: var(--spacing-md); border: 1px solid var(--border); border-radius: 8px; background: var(--card);">
+                        <h3 style="margin: 0 0 var(--spacing-sm) 0;">⏰ 定时发表时间（视频号「定时发表」）</h3>
+                        <div style="display: flex; flex-wrap: wrap; gap: var(--spacing-md); align-items: center;">
+                            <label>排期方式
+                                <select id="publishMode" onchange="updatePublishHint()">
+                                    <option value="sequence">顺序排（按勾选顺序连续排）</option>
+                                    <option value="per_drama_day">一天一部剧（每部剧占一天）</option>
+                                </select>
+                            </label>
+                            <label>发表日期
+                                <input type="date" id="publishDate" onchange="updatePublishHint()">
+                            </label>
+                            <label>起始时间
+                                <input type="time" id="publishStartTime" value="07:00" onchange="updatePublishHint()">
+                            </label>
+                            <label>间隔（分钟）
+                                <input type="number" id="publishInterval" value="120" min="1" max="1440" step="1" style="width:90px;" onchange="updatePublishHint()">
+                            </label>
+                            <label>随机抖动（±分钟）
+                                <input type="number" id="publishJitter" value="10" min="0" max="120" step="1" style="width:90px;" onchange="updatePublishHint()">
+                            </label>
+                            <label>每天最晚
+                                <input type="time" id="publishWindowEnd" value="23:00" onchange="updatePublishHint()">
+                            </label>
+                        </div>
+                        <div id="publishPlanHint" style="margin-top: var(--spacing-sm); font-size: 12px; color: var(--text-secondary);"></div>
                     </div>
 
                     <div class="drama-selector">
@@ -1382,6 +1410,8 @@
                             </div>
                         </div>
                     </div>
+
+                    <div id="batchProgress" style="display:none; margin-bottom: var(--spacing-sm); font-size: 13px; color: var(--accent-amber);"></div>
 
                     <div class="upload-queue" id="uploadQueue">
                         <div style="padding: var(--spacing-lg); text-align: center; color: var(--text-tertiary);">队列为空</div>
@@ -2411,6 +2441,129 @@
         let uploadPollTimer = null;
         let selectedDramas = {};
 
+        // ===== 定时发表时间设置 =====
+        // 规则与服务端一致：同日从起始时间起按间隔顺延，每条 ±抖动，
+        // 同一账号自动避让已排队/已排期的时间（最终时间以服务端 publish_plan 为准）。
+        function formatDateInput(d) {
+            const y = d.getFullYear();
+            const m = String(d.getMonth() + 1).padStart(2, '0');
+            const day = String(d.getDate()).padStart(2, '0');
+            return `${y}-${m}-${day}`;
+        }
+
+        function initPublishPlan() {
+            const dateEl = document.getElementById('publishDate');
+            if (!dateEl) return;
+            const today = new Date();
+            const max = new Date();
+            max.setDate(max.getDate() + 14);
+            dateEl.min = formatDateInput(today);
+            dateEl.max = formatDateInput(max);
+            if (!dateEl.value) {
+                const tomorrow = new Date();
+                tomorrow.setDate(tomorrow.getDate() + 1);
+                dateEl.value = formatDateInput(tomorrow);
+            }
+            updatePublishHint();
+        }
+
+        function getPublishOption() {
+            const dateEl = document.getElementById('publishDate');
+            const startEl = document.getElementById('publishStartTime');
+            const intervalEl = document.getElementById('publishInterval');
+            const jitterEl = document.getElementById('publishJitter');
+            const endEl = document.getElementById('publishWindowEnd');
+            const modeEl = document.getElementById('publishMode');
+            const intVal = parseInt(intervalEl?.value || '120', 10);
+            const jitVal = parseInt(jitterEl?.value || '0', 10);
+            return {
+                date: dateEl?.value || '',
+                start_time: startEl?.value || '07:00',
+                window_end: endEl?.value || '23:00',
+                mode: modeEl?.value || 'sequence',
+                interval_minutes: Number.isFinite(intVal) ? intVal : 120,
+                jitter_minutes: Number.isFinite(jitVal) ? jitVal : 0,
+            };
+        }
+
+        function selectedVideoCount() {
+            let n = 0;
+            for (const versions of Object.values(selectedDramas)) {
+                n += (versions || []).length;
+            }
+            return n;
+        }
+
+        function updatePublishHint() {
+            const hint = document.getElementById('publishPlanHint');
+            if (!hint) return;
+            const opt = getPublishOption();
+            const n = selectedVideoCount();
+            const scheduled = document.getElementById('scheduledPublish')?.checked !== false;
+            const interval = Math.max(1, opt.interval_minutes);
+            const jitter = Math.max(0, opt.jitter_minutes);
+            const [sh, sm] = (opt.start_time || '07:00').split(':').map(Number);
+            const [eh, em] = (opt.window_end || '23:00').split(':').map(Number);
+            const startMin = sh * 60 + sm;
+            const endMin = eh * 60 + em;
+            const perDay = endMin >= startMin
+                ? Math.floor((endMin - startMin) / interval) + 1
+                : Math.floor((24 * 60 - startMin + endMin) / interval) + 1;
+
+            let text;
+            let totalDays = 0;
+            let lastOffset = 0;
+            let lastSlot = 0;
+
+            if (opt.mode === 'per_drama_day') {
+                text = `一天一部剧：剧内每 ${interval} 分钟一条` +
+                    (jitter > 0 ? `（±${jitter} 分钟随机）` : '') +
+                    `，每天 ${opt.start_time}–${opt.window_end} 最多 ${perDay} 条，` +
+                    `排满顺延次日继续（同一部剧保持连续）。`;
+                if (n > 0) {
+                    let days = 0;
+                    for (const versions of Object.values(selectedDramas)) {
+                        const nv = (versions || []).length;
+                        if (nv === 0) continue;
+                        days += Math.ceil(nv / perDay);
+                        lastSlot = (nv - 1) % perDay;
+                    }
+                    totalDays = days;
+                    lastOffset = days - 1;
+                }
+            } else {
+                text = `顺序排：从 ${opt.date || '次日'} ${opt.start_time} 起，同一账号每 ${interval} 分钟一条` +
+                    (jitter > 0 ? `（±${jitter} 分钟随机）` : '') +
+                    `，只在 ${opt.start_time}–${opt.window_end} 之间发，排满顺延次日。`;
+                if (n > 0) {
+                    totalDays = Math.ceil(n / perDay);
+                    lastOffset = Math.floor((n - 1) / perDay);
+                    lastSlot = (n - 1) % perDay;
+                }
+            }
+
+            if (n > 0) {
+                const lastMin = startMin + lastSlot * interval;
+                const lh = Math.floor(lastMin / 60) % 24;
+                const lm = lastMin % 60;
+                let lastDay = '次日';
+                if (opt.date) {
+                    const d = new Date(opt.date + 'T00:00:00');
+                    d.setDate(d.getDate() + lastOffset);
+                    lastDay = formatDateInput(d);
+                }
+                text += ` 当前选中 ${n} 条，每天最多 ${perDay} 条，约 ${totalDays} 天发完；` +
+                    `最后一条约 ${lastDay} ${String(lh).padStart(2, '0')}:${String(lm).padStart(2, '0')}。`;
+                if (totalDays > 14) {
+                    text += ` ⚠️ 超过平台约 14 天的可选范围，超出的会回退存草稿。`;
+                }
+            }
+            if (!scheduled) {
+                text += ' 注意：当前未勾选「定时发表」，时间仅记录并保存草稿。';
+            }
+            hint.textContent = text;
+        }
+
         async function checkLoginStatus() {
             const account = document.getElementById('uploadAccount').value;
             if (!account) {
@@ -2552,6 +2705,7 @@
                     }
                     window.dramasData = [];
                     selectedDramas = {};
+                    updatePublishHint();
                     return;
                 }
 
@@ -2593,6 +2747,7 @@
 
                 window.dramasData = dramas;
                 selectedDramas = {};
+                updatePublishHint();
 
                 showNotification('已加载' + dramas.length + '部剧', 'success');
             } catch (error) {
@@ -2614,6 +2769,7 @@
                 delete selectedDramas[dramaName];
                 if (item) item.classList.remove('selected');
             }
+            updatePublishHint();
         }
 
         let startUploadBusy = false;
@@ -2636,6 +2792,9 @@
 
             setStartUploadBusy(true, '⏳ 正在提交任务…');
             showNotification('正在提交任务并计算内容指纹…', 'info');
+            // 提交期间也要轮询：批量内容查重很慢（逐视频 ffmpeg），
+            // 靠 batch_progress 显示「校验中 x/N」，否则页面像卡死。
+            startUploadPolling();
 
             try {
             const batchId = 'batch_' + Date.now() + '_' + Math.floor(Math.random() * 1000);
@@ -2690,7 +2849,7 @@
                 const response = await fetch('/api/upload/batches', {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ items: items, batch_id: batchId })
+                    body: JSON.stringify({ items: items, batch_id: batchId, publish: getPublishOption() })
                 });
 
                 let result = {};
@@ -2770,7 +2929,17 @@
                 const startResult = await startResponse.json();
 
                 if (startResult.status === 'success') {
-                    showNotification(`已添加${addedCount}个任务，开始上传`, 'success');
+                    const plan = (lastResult && lastResult.publish_plan) || [];
+                    let planMsg = '';
+                    if (plan.length) {
+                        const first = plan[0].publish_time;
+                        const last = plan[plan.length - 1].publish_time;
+                        planMsg = plan.length > 1
+                            ? `，定时 ${first} → ${last}（${plan.length} 条）`
+                            : `，定时 ${first}`;
+                    }
+                    if (!scheduledEnabled) planMsg += '（保存草稿模式）';
+                    showNotification(`已添加${addedCount}个任务${planMsg}，开始上传`, 'success');
                     startUploadPolling();
                 } else {
                     showNotification('开始上传失败: ' + startResult.error, 'error');
@@ -2936,6 +3105,19 @@
                 document.getElementById('uploadCurrentCount').textContent = status.current_task ? 1 : 0;
                 document.getElementById('uploadCompletedCount').textContent = status.completed_count;
                 document.getElementById('uploadFailedCount').textContent = status.failed_count;
+
+                // 批量提交时的内容指纹校验进度：这一步不走队列，单独提示，
+                // 否则用户会误以为「勾了剧却一直没进展」。
+                const bpEl = document.getElementById('batchProgress');
+                if (bpEl) {
+                    const bp = status.batch_progress;
+                    if (bp && bp.total) {
+                        bpEl.style.display = '';
+                        bpEl.textContent = `⏳ 正在校验视频内容（查重）${bp.done}/${bp.total}，校验完成后才会入队，请稍候…`;
+                    } else {
+                        bpEl.style.display = 'none';
+                    }
+                }
 
                 const startBtn = document.getElementById('startUploadBtn');
                 const pauseBtn = document.getElementById('pauseUploadBtn');
@@ -3674,6 +3856,7 @@
             refreshUploadStats();
             refreshCutStats();
             loadUploadAccounts();
+            initPublishPlan();
 
             fetch('/api/logs?limit=50')
                 .then(r => r.json())

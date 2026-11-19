@@ -302,7 +302,8 @@ class TestIncrementalReportsAndSourcePattern(unittest.TestCase):
             ai = mock.MagicMock()
             ai.enabled = True
             ai.generate_copy.side_effect = [
-                {'title': f'标题{i}', 'description': f'描述{i}',
+                # 标题必须 6-16 字（平台规则），'标题1' 只有 3 字会被质量门拦掉
+                {'title': f'测试剧第{i}集真相', 'description': f'描述{i}',
                  'hashtags': ['#测试']} for i in range(1, 4)]
             renders = [
                 (None, 'quality', {'status': 'rejected', 'reason': '时长过短'}),
@@ -318,13 +319,19 @@ class TestIncrementalReportsAndSourcePattern(unittest.TestCase):
                 {'opening_ep': 2, 'angle': '真相', 'order_type': 'reverse'},
                 {'opening_ep': 3, 'angle': '打脸', 'order_type': 'reverse'},
             ]
-            with mock.patch('processor.AICopyGenerator', return_value=ai), \
+            # AICopyGenerator 是在 pipeline.edl_mixin 里实例化的（processor 只是
+            # 转发导入），patch processor 那个名字等于没 patch——真 AI 会联网
+            # 返回不合规标题，测试随环境飘。
+            with mock.patch('pipeline.edl_mixin.AICopyGenerator', return_value=ai), \
                  mock.patch.object(p, '_load_episode_highlights', return_value=hl), \
                  mock.patch.object(p, '_analyze_drama_arc', return_value=plan), \
                  mock.patch.object(
                      p, '_generate_reverse_segments',
+                     # 混剪有最短时长门槛（约 180s）：只给 1 段 20s 会全版
+                     # NOT_RENDERED，测试还没走到渲染就结束了
                      side_effect=lambda _eps, idx, **kw: [
-                         {'episode': idx + 1, 'start': 0, 'duration': 20}]), \
+                         {'episode': idx + 1, 'start': i * 20, 'duration': 20}
+                         for i in range(10)]), \
                  mock.patch.object(p, '_run_render_one', side_effect=renders) as mr:
                 videos = p._generate_edl_versions(
                     '测试剧', src, eps, 3, out, use_reverse=True)

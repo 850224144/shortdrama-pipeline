@@ -310,7 +310,7 @@ class WeChatUploaderTests(unittest.TestCase):
             'found': False, 'clicked': False, 'text': ''
         }
         uploader._scroll_page_to_bottom = lambda: None
-        uploader._wait_for_draft_saved = lambda previous_url, title, baseline_count=None: False
+        uploader._wait_for_draft_saved = lambda previous_url, title, baseline_count=None, description=None, baseline_required=False: False
         uploader._save_debug_state = lambda stage: None
 
         self.assertFalse(uploader._save_draft('示例标题'))
@@ -325,7 +325,7 @@ class WeChatUploaderTests(unittest.TestCase):
             'found': False, 'clicked': False, 'text': ''
         }
         uploader._scroll_page_to_bottom = lambda: None
-        uploader._wait_for_draft_saved = lambda previous_url, title, baseline_count=None: True
+        uploader._wait_for_draft_saved = lambda previous_url, title, baseline_count=None, description=None, baseline_required=False: True
 
         self.assertTrue(uploader._save_draft('示例标题'))
         self.assertEqual(button.click_count, 1)
@@ -338,7 +338,7 @@ class WeChatUploaderTests(unittest.TestCase):
             'found': True, 'clicked': True, 'text': '保存草稿'
         }
         uploader._scroll_page_to_bottom = lambda: None
-        uploader._wait_for_draft_saved = lambda previous_url, title, baseline_count=None: True
+        uploader._wait_for_draft_saved = lambda previous_url, title, baseline_count=None, description=None, baseline_required=False: True
 
         self.assertTrue(uploader._save_draft('示例标题'))
 

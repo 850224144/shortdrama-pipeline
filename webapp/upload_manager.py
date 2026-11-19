@@ -6,6 +6,7 @@
 import os
 import json
 import logging
+import random
 import threading
 import time
 from datetime import datetime, timedelta
@@ -39,6 +40,24 @@ from base_queue import BaseQueueManager
 # DrissionPage 已随 wechat_uploader 加载；此处模块级导入便于 mock 与复用
 from DrissionPage import ChromiumPage, ChromiumOptions
 
+
+def _account_login_state(uploader, account=''):
+    """三态登录校验，兼容只实现 check_login() 的旧替身/脚本。
+
+    返回 'logged_in' / 'logged_out' / 'busy'。任何异常按 'busy' 处理——
+    “测不了”不等于“未登录”，调用方应保持队列而不是把任务标失败。
+    """
+    try:
+        fn = getattr(uploader, 'login_state', None)
+        if callable(fn):
+            st = fn()
+            if st in ('logged_in', 'logged_out', 'busy'):
+                return st
+        return 'logged_in' if uploader.check_login() else 'logged_out'
+    except Exception as e:
+        get_logger('upload').warning(f'登录校验异常 {account}: {e}')
+        return 'busy'
+
 class UploadManager(BaseQueueManager):
     """上传队列管理器"""
     
@@ -57,6 +76,14 @@ class UploadManager(BaseQueueManager):
         self.upload_thread = None
         self.accounts = []
         self.current_account = None
+
+        # 账号级登录验证时间戳（account → time.time()）：批次预检/上传成功后刷新。
+        # 供 _execute_upload 决定是否跳过 upload_to_draft 内的重复登录校验
+        # （原实现把该缓存挂在上传器实例上，而每任务都新建实例，缓存从未生效）。
+        self._login_verified = {}
+        # 批量提交的内容指纹计算进度（供 /api/upload/status 展示）：
+        # {'phase': 'fingerprint', 'done': n, 'total': N} 或 None
+        self.batch_progress = None
         
         # 草稿箱浏览器实例（account → ChromiumPage）
         self.draft_pages = {}
@@ -380,7 +407,7 @@ class UploadManager(BaseQueueManager):
         except Exception:
             return None
 
-    def _check_content_duplicate(self, video_path, account):
+    def _check_content_duplicate(self, video_path, account, seq=None):
         """上传前内容查重：跨账号的已上传/已入队成片相似时返回冲突 dict。
 
         查重范围不再局限于目标账号：同一作品换账号发布同样可能被平台判重。
@@ -391,6 +418,9 @@ class UploadManager(BaseQueueManager):
         或当前入队中（pending/uploading）」的内容。纯生成期指纹（从未入队/
         上传）不拦截——否则从未上传的成片会被自己生成期的指纹自匹配
         （相似度 1.0）误拒，表现为「点了上传却不开始」。
+
+        seq: 已预先算好的视频指纹（add_batch 在锁外批量预计算，避免在锁内跑
+             ffmpeg 把 status 接口一起堵死）；None 时现场计算。
         """
         if not video_path or not os.path.isfile(video_path):
             return None
@@ -398,7 +428,8 @@ class UploadManager(BaseQueueManager):
             from content_fingerprint import (video_fingerprint,
                                              FingerprintStore,
                                              dedup_thresholds)
-            seq = video_fingerprint(video_path)
+            if seq is None:
+                seq = video_fingerprint(video_path)
             if not seq:
                 return None
             th = dedup_thresholds(CONFIG)
@@ -467,12 +498,11 @@ class UploadManager(BaseQueueManager):
 
     @staticmethod
     def _compute_publish_time(version) -> str:
-        """按版本号计算计划发表时间：当天+day_offset 日的 times 槽位循环。
+        """【兼容保留】按版本号取槽的旧算法：当天+day_offset 日的 times 槽位循环。
 
-        槽位按 (版本号-1) % len(times) 取，V1→times[0]，V2→times[1]…循环，
-        使同批多版本错峰发表。槽位统一取自 ``config.get_publish_schedule()``
-        （运行时 CONFIG 优先），与过期顺延 ``_ensure_future_publish_time`` 同源，
-        避免 L4 双配置口径；配置异常回退 当天+1 日、21:00。
+        只按版本号取槽会让「多部剧同版本」撞同一时刻（已由 plan_publish_times
+        取代）；保留它是为了旧调用/测试兼容，新入队一律走批次级分配。
+        配置异常回退 当天+1 日、21:00。
         """
         try:
             from config import get_publish_schedule
@@ -487,6 +517,297 @@ class UploadManager(BaseQueueManager):
             slot = times[0]
         target = (datetime.now() + timedelta(days=day_offset)).date()
         return f'{target.isoformat()} {slot}'
+
+    # ── 批次级定时发表时间分配 ─────────────────────────────────────────
+    # 旧逻辑（_compute_publish_time）按版本号取槽：5 部剧的 V1 全部拿到 times[0]，
+    # 同一天同一刻齐发。这里改为「起始时间 + 固定间隔 + 小抖动 + 避让已占用」，
+    # 同一账号内逐条顺延；跨账号各自排各的序列（不同账号同时发不冲突）。
+    MAX_PUBLISH_LEAD_DAYS = 14      # 平台日历可选范围按 14 天预留，超界日格会禁用
+    MIN_PUBLISH_GAP_MINUTES = 30    # 同账号两条定时发表的最小间隔
+
+    @staticmethod
+    def _publish_defaults() -> Dict:
+        """发布计划缺省值：日期=今天+day_offset，起点=config 首个槽位。"""
+        sched = {}
+        try:
+            from config import get_publish_schedule
+            sched = get_publish_schedule() or {}
+        except Exception:
+            pass
+        times = [str(t).strip() for t in (sched.get('times') or []) if str(t).strip()]
+        jitter = sched.get('jitter_minutes')
+        try:
+            jitter = 10 if jitter is None else int(jitter)   # 0 是合法值（关闭抖动），不能用 or
+        except (TypeError, ValueError):
+            jitter = 10
+        return {
+            'day_offset': int(sched.get('day_offset') or 1),
+            'start_time': times[0] if times else '07:00',
+            'window_end': str(sched.get('window_end') or (times[-1] if times else '23:00')),
+            'interval_minutes': int(sched.get('interval_minutes') or 120),
+            'jitter_minutes': jitter,
+        }
+
+    @classmethod
+    def _normalize_publish_options(cls, options) -> Dict:
+        """校验并补全发布计划；任何非法值回退缺省，绝不抛异常。
+
+        options: {date:'YYYY-MM-DD', start_time:'HH:MM', window_end:'HH:MM',
+                  interval_minutes:int, jitter_minutes:int}（都可缺省）
+        """
+        defaults = cls._publish_defaults()
+        opt = options if isinstance(options, dict) else {}
+        now = datetime.now()
+        today = now.date()
+
+        date_str = str(opt.get('date') or '').strip()
+        try:
+            day = datetime.strptime(date_str, '%Y-%m-%d').date()
+        except Exception:
+            day = today + timedelta(days=defaults['day_offset'])
+        if day < today:
+            day = today
+        max_day = today + timedelta(days=cls.MAX_PUBLISH_LEAD_DAYS)
+        if day > max_day:
+            day = max_day
+
+        start = str(opt.get('start_time') or defaults['start_time']).strip()
+        try:
+            datetime.strptime('2000-01-01 ' + start, '%Y-%m-%d %H:%M')
+        except Exception:
+            start = defaults['start_time']
+
+        # 每日发布窗口终点：超出就顺延到次日起始时间（避免凌晨 1 点、3 点还在发）
+        end = str(opt.get('window_end') or defaults['window_end']).strip()
+        try:
+            datetime.strptime('2000-01-01 ' + end, '%Y-%m-%d %H:%M')
+        except Exception:
+            end = defaults['window_end']
+        if end <= start:   # 字符串 HH:MM 可直接比大小（等长补零）
+            end = defaults['window_end']
+            if end <= start:
+                end = '23:59'
+
+        try:
+            interval = int(opt.get('interval_minutes') or defaults['interval_minutes'])
+        except Exception:
+            interval = defaults['interval_minutes']
+        interval = max(1, min(1440, interval))
+
+        jitter_raw = opt.get('jitter_minutes')
+        try:
+            jitter = int(defaults['jitter_minutes']) if jitter_raw is None else int(jitter_raw)
+        except Exception:
+            jitter = defaults['jitter_minutes']
+        # 抖动上限 interval/3：抖动大于半个间隔会把顺序打乱、甚至跨天
+        jitter = max(0, min(interval // 3, jitter))
+        jitter = min(jitter, 120)
+
+        # 选了今天但起始时间已过 → 整批顺延到明天（与 _ensure_future_publish_time 口径一致，
+        # 否则首条会被夹到「现在+5分钟」，后面各条反而排到首条之前）
+        if day == today:
+            try:
+                start_dt = datetime.strptime(f'{day.isoformat()} {start}', '%Y-%m-%d %H:%M')
+                if start_dt <= now + timedelta(minutes=5):
+                    day = day + timedelta(days=1)
+            except Exception:
+                pass
+
+        return {'date': day, 'start_time': start, 'window_end': end,
+                'mode': (str(opt.get('mode') or 'sequence')
+                         if str(opt.get('mode') or 'sequence') in
+                         ('sequence', 'per_drama_day') else 'sequence'),
+                'interval_minutes': interval, 'jitter_minutes': jitter}
+
+    @classmethod
+    def plan_publish_times(cls, entries, options=None, taken_by_account=None,
+                           rng=None) -> List[str]:
+        """为整批任务分配定时发表时间，返回与 entries 等长的 'YYYY-MM-DD HH:MM'。
+
+        entries: [{'account': 账号, 'drama': 剧名}]，列表顺序 = 发表顺序
+        taken_by_account: {账号: [datetime, ...]} 已占用时刻（库里的计划时间）
+
+        两种排期方式（options.mode）：
+        - sequence（默认）：同一账号从起始时间起按 interval 连续排，跨天顺延；
+        - per_drama_day：每部剧占一天——剧内按 interval 排，排满当天窗口顺延
+          次日继续（同一部剧保持连续），下一部剧从再下一天起始时间开始。
+
+        通用规则：
+        1) 每条在 ±jitter 分钟内随机（jitter ≤ interval/3，顺序不乱）；
+        2) 与已占用时刻相差 < MIN_PUBLISH_GAP 分钟则后移一个间隔，直到空出；
+        3) 只在每日窗口 [start_time, window_end] 内发，超出顺延到次日起始时间；
+        4) 结果必然晚于「现在+5分钟」。
+        """
+        rng = rng or random
+        opts = cls._normalize_publish_options(options)
+        entries = list(entries or [])
+        gap = cls.MIN_PUBLISH_GAP_MINUTES
+        interval = opts['interval_minutes']
+        jitter = opts['jitter_minutes']
+        mode = opts['mode']
+        day0 = opts['date']
+        start_h, start_m = (int(x) for x in opts['start_time'].split(':'))
+        end_h, end_m = (int(x) for x in opts['window_end'].split(':'))
+        start_min = start_h * 60 + start_m
+        end_min = end_h * 60 + end_m
+        earliest = datetime.now() + timedelta(minutes=5)
+        step = max(interval, gap)
+
+        occupied = {}
+        lasts = {}   # 账号 -> 上一条已排定的时刻（保证同账号严格递增）
+        for acc, times in (taken_by_account or {}).items():
+            occupied[acc or ''] = [t for t in (times or []) if isinstance(t, datetime)]
+
+        def resolve(cand, busy):
+            """撞点则按固定间隔后移，并重新夹回每日窗口。"""
+            for _ in range(400):
+                if not any(abs((cand - t).total_seconds()) < gap * 60 for t in busy):
+                    return cand
+                cand = cls._roll_into_window(
+                    cand + timedelta(minutes=step), start_h, start_m, end_h, end_m)
+            return cand
+
+        results = []
+        if mode == 'per_drama_day':
+            # 每个账号独立：同一部剧连续排，换剧 +1 天，剧内超出窗口也顺延
+            states = {}
+            for entry in entries:
+                entry = entry or {}
+                account = entry.get('account') or ''
+                drama = entry.get('drama') or ''
+                st = states.get(account)
+                if st is None:
+                    st = {'day': day0, 'slot': 0, 'drama': drama}
+                    states[account] = st
+                elif drama and drama != st['drama']:
+                    st['day'] = st['day'] + timedelta(days=1)
+                    st['slot'] = 0
+                    st['drama'] = drama
+
+                while True:
+                    base = (datetime.combine(st['day'], datetime.min.time())
+                            + timedelta(minutes=start_min + st['slot'] * interval))
+                    if base.hour * 60 + base.minute > end_min:
+                        st['day'] += timedelta(days=1)
+                        st['slot'] = 0
+                        continue
+                    break
+                cand = base
+                if jitter:
+                    cand += timedelta(minutes=rng.randint(-jitter, jitter))
+                cand = max(cand, earliest)
+                cand = cls._roll_into_window(cand, start_h, start_m, end_h, end_m)
+                busy = occupied.setdefault(account, [])
+                cand = resolve(cand, busy)
+                # 保证同一账号的发表顺序严格递增：上一版被窗口顺延/避让推后时，
+                # 本版不能再排到它前面（否则 V2 会抢在 V1 之前发）。
+                last = lasts.get(account)
+                if last is not None and cand <= last:
+                    cand = cls._roll_into_window(
+                        last + timedelta(minutes=interval),
+                        start_h, start_m, end_h, end_m)
+                    cand = resolve(cand, busy)
+
+                busy.append(cand)
+                lasts[account] = cand
+                st['day'] = cand.date()
+                st['slot'] = max(0, ((cand.hour * 60 + cand.minute) - start_min)
+                                 // interval) + 1
+                results.append(cand.strftime('%Y-%m-%d %H:%M'))
+            return results
+
+        slots = {}   # 账号 -> 已排条数（网格位置）
+        for entry in entries:
+            entry = entry or {}
+            account = entry.get('account') or ''
+            idx = slots.get(account, 0)
+            slots[account] = idx + 1
+
+            # 固定在「起始时间 + idx*间隔」的网格上，抖动只作用于本条，
+            # 不累加到下一条（否则随机游走会越漂越远）。
+            base = (datetime.combine(day0, datetime.min.time())
+                    + timedelta(hours=start_h, minutes=start_m)
+                    + timedelta(minutes=idx * interval))
+            if jitter:
+                base += timedelta(minutes=rng.randint(-jitter, jitter))
+            cand = max(base, earliest)
+            cand = cls._roll_into_window(cand, start_h, start_m, end_h, end_m)
+
+            busy = occupied.setdefault(account, [])
+            cand = resolve(cand, busy)
+            # 同账号严格递增：窗口顺延/避让可能把前一条推到很晚，
+            # 后一条不能因此排到它前面。
+            last = lasts.get(account)
+            if last is not None and cand <= last:
+                cand = cls._roll_into_window(
+                    last + timedelta(minutes=interval),
+                    start_h, start_m, end_h, end_m)
+                cand = resolve(cand, busy)
+            busy.append(cand)
+            lasts[account] = cand
+            results.append(cand.strftime('%Y-%m-%d %H:%M'))
+        return results
+
+    @staticmethod
+    def _roll_into_window(dt, start_h, start_m, end_h, end_m):
+        """把时刻夹进每日发布窗口；晚于终点则顺延到次日起始时间。
+
+        目的：多剧/多版本一批排到第 10 条以后时，不会出现凌晨 01:00、03:00
+        这种没人看的时间——排满当天窗口就顺延次日 07:00 继续。
+        """
+        start_min = start_h * 60 + start_m
+        end_min = end_h * 60 + end_m
+        for _ in range(30):
+            tmin = dt.hour * 60 + dt.minute
+            if tmin < start_min:
+                dt = dt.replace(hour=start_h, minute=start_m, second=0, microsecond=0)
+                continue
+            if tmin <= end_min:
+                return dt
+            dt = (dt + timedelta(days=1)).replace(
+                hour=start_h, minute=start_m, second=0, microsecond=0)
+        return dt
+
+    def _taken_publish_times(self, accounts, day, span_days=3) -> Dict[str, List[datetime]]:
+        """查同账号在 [day, day+span_days) 内已占用的计划时间。
+
+        pending/uploading/completed 都算：completed 里定时已设但尚未到点的视频
+        会按该时刻发表，再排同一刻就是用户抱怨的「同一时间齐发」。
+        失败记录不占位（会被重传重新排期）。跨天查询是必需的——一批排满当天
+        窗口会顺延到次日，次日已有的排期同样要避让。
+        """
+        accounts = [a for a in (accounts or []) if a]
+        out: Dict[str, List[datetime]] = {}
+        if not accounts:
+            return out
+        start = day.isoformat()
+        end = (day + timedelta(days=max(1, span_days))).isoformat()
+        try:
+            with _connect_db(self.db_path) as conn:
+                marks = ','.join('?' for _ in accounts)
+                rows = conn.execute(
+                    f"SELECT account, publish_time FROM upload_records "
+                    f"WHERE account IN ({marks}) AND publish_time >= ? "
+                    f"AND publish_time < ? "
+                    f"AND status IN ('pending','uploading','completed')",
+                    list(accounts) + [start, end]).fetchall()
+            for account, pt in rows:
+                try:
+                    out.setdefault(account or '', []).append(
+                        datetime.strptime(str(pt)[:16], '%Y-%m-%d %H:%M'))
+                except Exception:
+                    continue
+        except Exception as e:
+            # 查库失败不让入队失败：退化为「本批内部不撞点」
+            logging.getLogger(__name__).warning(f'读取已占用发布时间失败: {e}')
+        return out
+
+    def _next_publish_time(self, account, drama=None) -> str:
+        """单条入队的缺省计划时间：取该账号同日最近的空档。"""
+        opts = self._normalize_publish_options(None)
+        taken = self._taken_publish_times([account], opts['date'])
+        return self.plan_publish_times(
+            [{'account': account, 'drama': drama or ''}], opts, taken)[0]
 
     @staticmethod
     def _read_edl_title(video_path, version):
@@ -529,15 +850,12 @@ class UploadManager(BaseQueueManager):
 
         expected_versions: 该组本次应上传的全部版本（透传进任务字典，
         供批次完成标记/清理门槛使用；默认 None 表示未提供）。
-        publish_time: 计划发表时间（YYYY-MM-DD HH:MM）。缺省时按 CONFIG
-        upload.publish_schedule 自动计算（当天+day_offset 日，times 槽位按版本号循环）。
+        publish_time: 计划发表时间（YYYY-MM-DD HH:MM）。缺省时按该账号当日
+        已占用时间自动排下一个空档（起始时间/间隔/抖动见 _normalize_publish_options）。
         """
         # 标题缺省时从 edl_config_v{version}.json 读取（切片时 AI 生成的文案）
         if not title:
             title = self._read_edl_title(video_path, version)
-        # 计划发表时间缺省时自动计算（当天+1 日，错峰槽位循环）
-        if not publish_time:
-            publish_time = self._compute_publish_time(version)
         with self.lock:
             # 检查是否已存在（按 account 去重，两个号可以发同一部剧）
             _account = account or '福桃说剧'
@@ -590,6 +908,11 @@ class UploadManager(BaseQueueManager):
             # 剧集 ID 快照：入队时若该剧已绑定则带上（上传时未绑定则自动查）
             bound_id, bound_src = self._bound_id(drama_name)
 
+            # 计划发表时间缺省：按账号当日已排队时间顺延，避免不同剧同版本撞同一时刻
+            # （放在锁内计算+入库，避免两个并发入队拿到同一个空档）
+            if not publish_time:
+                publish_time = self._next_publish_time(_account, drama_name)
+
             # 插入数据库
             with _connect_db(self.db_path) as conn:
                 cursor = conn.cursor()
@@ -631,7 +954,8 @@ class UploadManager(BaseQueueManager):
             
             return {'status': 'success', 'id': record_id}
 
-    def add_batch(self, items: List[Dict], default_expected_versions=None) -> Dict:
+    def add_batch(self, items: List[Dict], default_expected_versions=None,
+                  publish: Dict = None) -> Dict:
         """原子批量入队（R4）：一次校验 + 一个事务创建整批上传记录。
 
         解决「前端逐条提交可能产生半批次」：任何一条校验失败（缺字段/文件
@@ -641,8 +965,51 @@ class UploadManager(BaseQueueManager):
 
         items: 每条至少含 {drama_name, video_path, version}；
                可选 account/cover_path/title/description/topics/batch_id/
-               source_dir/output_dir/expected_versions。
+               source_dir/output_dir/expected_versions/publish_time。
+        publish: 批次级定时发表计划 {date, start_time, interval_minutes,
+                 jitter_minutes}；缺省=次日 + config 首槽位 + 120 分钟间隔 + ±10。
+                 显式带了 publish_time 的条目以条目为准，其余按计划顺序分配。
         """
+        # 内容指纹（ffmpeg 逐视频抽帧）很慢：必须放在锁外预计算。
+        # 原实现整个 add_batch 都持有 self.lock，指纹算几分钟期间
+        # /api/upload/status 也被阻塞，前端轮询全部超时——页面表现为
+        # 「一直没进展」。预计算期间用 batch_progress 暴露进度。
+        fingerprints = {}
+        total = len(items or [])
+        if total:
+            self.batch_progress = {'phase': 'fingerprint', 'done': 0, 'total': total}
+            paths = []
+            for item in items:
+                path = ((item or {}).get('video_path') or '').strip()
+                if path and path not in paths and os.path.isfile(path):
+                    paths.append(path)
+            try:
+                from content_fingerprint import video_fingerprint
+                import concurrent.futures as _futures
+                # ffmpeg 抽帧是 I/O+CPU 混合，4 路并行能把几十条视频的
+                # 校验时间压到 1/3 左右（单路一条约 20-40 秒）。
+                workers = max(1, min(4, len(paths) or 1))
+
+                def _fp(p):
+                    try:
+                        return p, video_fingerprint(p)
+                    except Exception as e:
+                        self._log('warn', f'指纹计算失败（放行）: {p} - {e}')
+                        return p, None
+
+                done = 0
+                with _futures.ThreadPoolExecutor(max_workers=workers) as pool:
+                    for p, seq in pool.map(_fp, paths):
+                        done += 1
+                        if seq:
+                            fingerprints[p] = seq
+                        self.batch_progress = {'phase': 'fingerprint',
+                                               'done': done, 'total': total}
+            except Exception as e:
+                self._log('warn', f'批量指纹预计算异常（回退锁内计算）: {e}')
+            finally:
+                self.batch_progress = None
+
         with self.lock:
             duplicates, missing, rejected = [], [], []
             accepted = []  # (item, drama, video_path, version, account, topics_list)
@@ -697,7 +1064,8 @@ class UploadManager(BaseQueueManager):
                     continue
 
                 # R9 内容级查重：同账号已传/已入队内容相似 → 拒收（宁可少传不可封号）
-                cdup = self._check_content_duplicate(video_path, account)
+                cdup = self._check_content_duplicate(
+                    video_path, account, seq=fingerprints.get(video_path))
                 if cdup:
                     up_th = CONFIG.get('content_dedup', {}).get('upload', 0.6)
                     duplicates.append({
@@ -732,6 +1100,28 @@ class UploadManager(BaseQueueManager):
                 return {'status': 'success', 'accepted': 0,
                         'duplicates': duplicates, 'missing': missing,
                         'rejected': rejected, 'ids': []}
+
+            # 计划发表：整批统一分配（同账号顺延，跨账号各排各的），
+            # 显式 publish_time 的条目保留原值，其余按计划顺序补齐。
+            plan_opts = self._normalize_publish_options(publish)
+            sh, sm = (int(x) for x in plan_opts['start_time'].split(':'))
+            eh, em = (int(x) for x in plan_opts['window_end'].split(':'))
+            per_day = max(1, ((eh * 60 + em) - (sh * 60 + sm))
+                          // plan_opts['interval_minutes'] + 1)
+            # 跨天查询窗口：按剧分天时看「剧数」，顺序排时看「总条数/每天容量」
+            if plan_opts['mode'] == 'per_drama_day':
+                span_days = len({a[1] for a in accepted}) + 3
+            else:
+                span_days = len(accepted) // per_day + 3
+            plan_taken = self._taken_publish_times(
+                sorted({a[4] for a in accepted}), plan_opts['date'],
+                span_days=span_days)
+            plan = self.plan_publish_times(
+                [{'account': a[4], 'drama': a[1]} for a in accepted],
+                plan_opts, plan_taken)
+            for i, (item, _drama, _vp, _ver, _acc, _topics) in enumerate(accepted):
+                if not item.get('publish_time'):
+                    item['publish_time'] = plan[i]
 
             # 一个事务插入全部通过校验的记录；任何失败整体回滚，不留半批次
             ids = []
@@ -801,6 +1191,10 @@ class UploadManager(BaseQueueManager):
             return {'status': 'success', 'accepted': len(accepted),
                     'duplicates': duplicates, 'missing': missing,
                     'rejected': rejected, 'ids': ids,
+                    'publish_plan': [{
+                        'drama_name': a[1], 'version': a[3], 'account': a[4],
+                        'publish_time': a[0].get('publish_time'),
+                    } for a in accepted],
                     'accepted_details': accepted_details}
     
     def _batch_ids_in_queue(self):
@@ -934,15 +1328,17 @@ class UploadManager(BaseQueueManager):
         # 锁外做登录检测（开浏览器较慢，避免长持 self.lock 阻塞队列操作）
         for acct in accounts:
             u = WeChatChannelsUploader(acct)
-            try:
-                if not u.check_login():
-                    return {'status': 'failed',
-                            'error': f'账号 {acct} 未登录，请先在微信视频号登录后重试',
-                            'login_required': True}
-            except Exception as e:
+            st = _account_login_state(u, acct)
+            if st == 'busy':
                 return {'status': 'failed',
-                        'error': f'账号 {acct} 登录检测失败：{e}',
+                        'error': f'账号 {acct} 正在登录或浏览器被占用，暂无法校验，请稍后重试',
                         'login_required': True}
+            if st != 'logged_in':
+                return {'status': 'failed',
+                        'error': f'账号 {acct} 未登录，请先在微信视频号登录后重试',
+                        'login_required': True}
+            # 记下验证时间：worker 起来后不必对每个任务重复开浏览器校验
+            self._login_verified[acct] = time.time()
         # 检测通过，重新进锁启动 worker（二次校验状态未变）
         with self.lock:
             if self.uploading:
@@ -959,7 +1355,9 @@ class UploadManager(BaseQueueManager):
             self._restore_run_mode()
             self._run_epoch += 1
             self.current_account = self.queue[0].get('account')
-            self.upload_thread = threading.Thread(target=self._upload_worker, daemon=True)
+            # 登录态刚逐账号校验过（_login_verified 已写入），worker 跳过重复预检
+            self.upload_thread = threading.Thread(
+                target=self._upload_worker, args=(True,), daemon=True)
             self.upload_thread.start()
             self._log('info', f'恢复上传：{len(self.queue)}个任务（登录校验通过）')
             return {'status': 'success'}
@@ -1024,22 +1422,27 @@ class UploadManager(BaseQueueManager):
             return {'status': 'success', 'cleared': cleared}
     
     def get_status(self) -> Dict:
-        """获取上传状态"""
-        with self.lock:
-            return {
-                'uploading': self.uploading,
-                'prechecking': self.prechecking,
-                'paused': self.paused,
-                'queue_length': len(self.queue),
-                'completed_count': len(self.completed),
-                'failed_count': len(self.failed),
-                'current_task': self.current_task,
-                'current_account': self.current_account,
-                'queue': self.queue[:],
-                'completed': self.completed[-20:],  # 最近20个
-                'failed': self.failed[-20:],  # 最近20个
-                'logs': self.logs[-50:]  # 最近50条日志
-            }
+        """获取上传状态。
+
+        锁被长任务占用（批量指纹计算/正在上传）时不等锁，直接返回无锁快照：
+        /api/upload/status 是前端 5 秒一次的轮询接口，等锁会把页面拖成假死。
+        无锁读取的字段都是简单赋值/列表切片，GIL 下不会读到中间态。
+        """
+        return {
+            'uploading': self.uploading,
+            'prechecking': self.prechecking,
+            'paused': self.paused,
+            'queue_length': len(self.queue),
+            'completed_count': len(self.completed),
+            'failed_count': len(self.failed),
+            'current_task': self.current_task,
+            'current_account': self.current_account,
+            'queue': self.queue[:],
+            'completed': self.completed[-20:],  # 最近20个
+            'failed': self.failed[-20:],  # 最近20个
+            'logs': self.logs[-50:],  # 最近50条日志
+            'batch_progress': self.batch_progress,
+        }
     
     def update_task_title(self, record_id: int, title: str) -> Dict:
         """手动覆盖任务短标题（dashboard 上传前编辑）。
@@ -1130,17 +1533,48 @@ class UploadManager(BaseQueueManager):
             return f'单任务执行超时（>{self.task_timeout}s），副作用未确认，转人工'
         if self._upload_side_effect_done(task):
             return '已产生草稿/发表副作用，未自动重试以免重复上传'
+        err = task.get('error_message') or ''
+        if any(k in err for k in ('登录状态已失效', '登录失效', '未登录')):
+            # 登录掉线重试只是再开两次浏览器、再失败两次：必须人工重新登录
+            return '登录态失效，需重新登录后再传'
+        if '基线' in err:
+            # 草稿箱基线拿不到 → 无法确认「本次新增」；重传只会多一条重复草稿
+            return '草稿箱基线缺失，无法确认是否产生新增草稿，不自动重试，请人工检查草稿箱'
         if not self._should_retry(task):
             return f'重试已达上限（{self.max_retries} 次）'
         return ''
 
-    def _upload_worker(self):
-        """上传工作线程 - 缩小锁范围，避免死锁"""
-        # 先预检所有待上传账号的登录态。
-        # 不预检的代价：队列里每个任务都要单独开一次 headless 浏览器校验
-        # （每次 10-20s），登录过期时整条队列白跑、全部标失败。
+    def _precheck_or_abort(self) -> bool:
+        """预检待传账号登录态；返回 False 表示本轮不应继续（状态已复位）。
+
+        不预检的代价：队列里每个任务都要单独开一次 headless 浏览器校验
+        （每次 10-20s），登录过期时整条队列白跑、全部标失败。
+        """
         self._log('info', '预检登录状态...')
-        if not self._precheck_logins():
+        try:
+            pre = self._precheck_logins()
+        except Exception as e:
+            # 预检抛异常不能击穿 worker：否则 uploading 永久 True，后续 start_upload
+            # 一律被“正在上传或预检中”拒绝，只能重启服务。此处复位后直接退出。
+            with self.lock:
+                self.uploading = False
+                self.prechecking = False
+                self.current_task = None
+            self._log('error', f'预检登录异常，本轮未启动上传：{e}')
+            return False
+
+        if pre == 'blocked':
+            # 账号浏览器被登录/上传占用：无法判定登录态。不标失败、不结算批次，
+            # 队列原样保留 pending，用户处理完占用后可直接再点开始。
+            with self.lock:
+                self.uploading = False
+                self.prechecking = False
+                self.current_task = None
+                pending = len([t for t in self.queue if t.get('status') == 'pending'])
+            self._log('warning', f'预检中止（账号占用），{pending} 个任务保持待传')
+            return False
+
+        if not pre:
             # P2-9: 预检失败=登录态不可用，队列任务标 failed（防永久 pending），
             # 并 finalize 已记录批次（防批次行永久 running）。auto_cleanup=False：
             # 登录失败≠上传完成，触发清理会误删未上传的成片。
@@ -1170,6 +1604,18 @@ class UploadManager(BaseQueueManager):
             except Exception as e:
                 self._log('error', f'预检失败finalize批次失败: {e}')
             self._log('warning', f'预检失败，{len(failed_tasks)} 个任务标失败')
+            return False
+        return True
+
+    def _upload_worker(self, skip_precheck: bool = False):
+        """上传工作线程 - 缩小锁范围，避免死锁
+
+        skip_precheck=True 只用于 resume 路径：登录态刚由 resume_upload 同步校验
+        并写入 _login_verified，再跑一遍预检等于每个账号白开一次浏览器。
+        """
+        if skip_precheck:
+            self._log('info', '恢复上传：登录态已在校验阶段确认，跳过重复预检')
+        elif not self._precheck_or_abort():
             return
 
         seen_batches = set()
@@ -1321,15 +1767,29 @@ class UploadManager(BaseQueueManager):
                         "SELECT COUNT(*) FROM upload_records "
                         "WHERE batch_id=? AND status IN ('pending','uploading')",
                         (batch_id,)).fetchone()[0]
+                    do_cleanup = bool(auto_cleanup)
+                    if pending == 0 and do_cleanup:
+                        # 自动清理硬门槛：批次内必须全部 completed。出现 failed /
+                        # pending_confirm 说明有内容没确认落地，清理会误删未上传的成片。
+                        unfinished = conn.execute(
+                            "SELECT COUNT(*) FROM upload_records "
+                            "WHERE batch_id=? AND status <> 'completed'",
+                            (batch_id,)).fetchone()[0]
+                        if unfinished:
+                            do_cleanup = False
+                            self._log(
+                                'warning',
+                                f'批次 {batch_id} 有 {unfinished} 条非 completed，'
+                                f'跳过自动清理（防误删未上传成片）')
                     if pending == 0:
                         conn.execute(
                             "UPDATE upload_batches SET status='completed', "
                             "auto_cleanup=?, completed_at=? WHERE batch_id=?",
-                            (1 if auto_cleanup else 0,
+                            (1 if do_cleanup else 0,
                              datetime.now().strftime('%Y-%m-%d %H:%M:%S'), batch_id))
                         conn.commit()
                         self._log('info', f'批次 {batch_id} 已标记完成')
-                        if auto_cleanup and self._cleanup_callback:
+                        if do_cleanup and self._cleanup_callback:
                             try:
                                 self._cleanup_callback(batch_id)
                                 self._log('info', f'批次 {batch_id} 触发自动清理')
@@ -1338,28 +1798,52 @@ class UploadManager(BaseQueueManager):
             except Exception as e:
                 self._log('error', f'批次 {batch_id} 完成标记失败: {e}')
     
-    def _precheck_logins(self) -> bool:
-        """上传前校验队列里每个账号的登录态。全通过返回 True；
-        有未登录账号则只把该账号的任务标失败并结算其批次，登录正常的账号
-        照常上传（账号级隔离，不再因一个账号掉线拖垮整批）；全部账号未登录
-        才返回 False（不启动上传）。"""
+    def _precheck_logins(self):
+        """上传前校验队列里每个账号的登录态。
+
+        返回三种结果：
+          True      —— 预检放行（至少一个账号登录有效；确认未登录账号的任务已标失败）；
+          False     —— 全部待传账号都确认未登录（任务已标失败，不启动上传）；
+          'blocked' —— 有账号 profile 正被登录/上传占用（busy），本轮**无法判定**：
+                       任务一律不标失败、队列保持 pending，等占用结束后重试。
+        """
         self.prechecking = True
         try:
             with self.lock:
                 accounts = []
                 for t in self.queue:
-                    if t.get('account') not in accounts:
-                        accounts.append(t.get('account'))
+                    acct = t.get('account')
+                    if acct and acct not in accounts:
+                        accounts.append(acct)
 
-            bad, ok = [], []
+            # 上传要独占账号 profile：先收掉该账号开着的草稿箱窗口，
+            # 否则登录校验会撞同一个 user_data_dir（附着/抢占用户正在用的窗口）。
+            for acct in accounts:
+                if acct in self.draft_pages:
+                    self.close_draft_box(acct)
+                    self._log('info', f'{acct} 草稿箱已关闭（上传需独占账号浏览器）')
+
+            bad, ok, busy = [], [], []
             for acct in accounts:
                 u = WeChatChannelsUploader(acct)
-                if u.check_login():
+                st = _account_login_state(u, acct)
+                if st == 'logged_in':
                     ok.append(acct)
+                    self._login_verified[acct] = time.time()
                     self._log('info', f'登录校验通过：{acct}')
+                elif st == 'busy':
+                    busy.append(acct)
+                    self._log('warning', f'{acct} 正在登录/浏览器被占用，暂无法校验')
                 else:
                     bad.append(acct)
                     self._log('error', f'登录校验失败：{acct}')
+
+            if busy:
+                # busy 是“测不了”，不是“掉线”：整批保持 pending，不标失败、不结算批次
+                self._log('error',
+                          f'预检中止：账号 {", ".join(busy)} 正在登录/被占用，'
+                          f'队列保持待传，请稍后重试')
+                return 'blocked'
 
             if not bad:
                 self._log('info', f'预检通过（{len(accounts)}个账号）')
@@ -1408,6 +1892,15 @@ class UploadManager(BaseQueueManager):
             return False
         finally:
             self.prechecking = False
+
+    def _login_recently_verified(self, account, ttl: int = 600) -> bool:
+        """该账号是否在 ttl 秒内刚通过登录校验（批次预检/上次上传成功）。
+
+        一次登录校验要起一个完整 Chrome（10-20s）。同批次内逐任务重复校验
+        没有收益：真掉线由 upload_to_draft 的发布页 URL 检测兜住。
+        """
+        ts = self._login_verified.get(account or '', 0)
+        return bool(ts) and (time.time() - ts) < ttl
 
     @staticmethod
     def _page_is_alive(page) -> bool:
@@ -1620,16 +2113,18 @@ class UploadManager(BaseQueueManager):
 
             
             # 初始化上传器
-            uploader = WeChatChannelsUploader(task['account'])
+            account = task.get('account')
+            uploader = WeChatChannelsUploader(account)
             # 上传进度日志转发到 status.logs（前端 uploadLog 可见）。
-            # 必须在 check_login/upload_to_draft 之前设置，否则浏览器启动/
+            # 必须在 upload_to_draft 之前设置，否则浏览器启动/
             # 视频上传等进度只走 stderr，用户看不到上传进展。
             uploader.set_log_hook(self._log)
 
-            # 检查登录状态
-            if not uploader.check_login():
-                task['error_message'] = '登录失败'
-                return False
+            # 登录态由批次预检负责（_precheck_logins 已把未登录账号的任务结算掉），
+            # 这里不再为每个任务单开一次浏览器做 check_login：那是同一批次里的
+            # 第二次全量校验，纯耗时且会和 profile 锁互相等待。
+            # upload_to_draft 内部仍是权威校验（发布页 URL + 登录页跳转检测）。
+            skip_login_check = self._login_recently_verified(account)
 
             # 剧集 ID（保存草稿前填「链接 → 视频号剧集」用，A3 混合语义）：
             # 任务有绑定 ID 用之；未绑定则自动查上游首条；查不到/失败则不填，
@@ -1671,6 +2166,7 @@ class UploadManager(BaseQueueManager):
                 drama_id=drama_id,
                 publish_time=task.get('publish_time'),
                 scheduled=scheduled,
+                skip_login_check=skip_login_check,
             )
 
             if isinstance(outcome, dict):
@@ -1680,6 +2176,7 @@ class UploadManager(BaseQueueManager):
                 task['draft_saved'] = bool(outcome.get('draft_saved'))
                 task['published'] = bool(outcome.get('published'))
                 if outcome.get('status') == 'success':
+                    self._login_verified[account] = time.time()
                     return True
                 elif outcome.get('status') == 'pending_confirm':
                     # 定时发表未确认：不假报失败（作品可能已发表），交人工复核。
@@ -1691,6 +2188,10 @@ class UploadManager(BaseQueueManager):
                     return False
                 else:
                     task['error_message'] = outcome.get('error') or '上传失败'
+                    if '登录' in (task['error_message'] or ''):
+                        # 登录失效/账号被占用：作废本账号的“已验证”缓存，
+                        # 后续任务会重新完整校验（而不是继续盲传）
+                        self._login_verified.pop(account, None)
                     return False
             else:
                 # 兼容旧返回 bool（不应再出现）

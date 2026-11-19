@@ -65,6 +65,7 @@ def create_upload_bp(deps):
                 batch_id=data.get('batch_id'),
                 source_dir=data.get('source_dir'),
                 output_dir=data.get('output_dir'),
+                publish_time=data.get('publish_time'),
                 expected_versions=data.get('expected_versions'),
             )
 
@@ -88,7 +89,11 @@ def create_upload_bp(deps):
     def add_upload_batch():
         """原子批量添加上传任务（R4）：一次请求创建整批，无半批次。
 
-        请求体：{items: [{drama_name, video_path, version, account?, ...}], batch_id?}
+        请求体：{items: [{drama_name, video_path, version, account?, ...}],
+                 batch_id?, publish?: {date, start_time, interval_minutes, jitter_minutes}}
+        publish 为批次级定时发表计划（缺省=次日 + 07:00 + 120 分钟 + ±10 抖动），
+        服务端统一为每条分配 publish_time（同账号顺延、避让当日已占用时刻），
+        并原样回传 publish_plan 供前端展示。
         服务端一次校验（必填/文件存在/重复）+ 一个事务创建全部记录；
         返回 accepted/duplicates/missing/rejected 结构化明细。
         """
@@ -99,7 +104,12 @@ def create_upload_bp(deps):
                 return Response(json.dumps({'status': 'failed', 'error': '缺少 items（非空数组）'},
                                            ensure_ascii=False), mimetype='application/json', status=400)
 
-            result = upload_manager.add_batch(items)
+            publish = data.get('publish')
+            if publish is not None and not isinstance(publish, dict):
+                return Response(json.dumps({'status': 'failed', 'error': 'publish 必须是对象'},
+                                           ensure_ascii=False), mimetype='application/json', status=400)
+
+            result = upload_manager.add_batch(items, publish=publish)
 
             # 登记批次元数据（幂等，按 batch_id 聚合），供清理计划器使用
             if result.get('status') == 'success' and result.get('accepted'):

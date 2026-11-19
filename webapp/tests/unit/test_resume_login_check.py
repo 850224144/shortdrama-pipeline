@@ -67,16 +67,20 @@ def test_login_check_exception_returns_login_required(mgr, monkeypatch):
 
 
 def test_logged_in_starts_worker(mgr, monkeypatch):
-    """已登录 → 启动 worker 处理队列 pending。"""
+    """已登录 → 启动 worker 处理队列 pending，且要求跳过重复预检。"""
     started = threading.Event()
+    called_with = []
     monkeypatch.setattr('upload_manager.WeChatChannelsUploader',
                         lambda acct: _FakeUploader(logged_in=True))
-    monkeypatch.setattr(mgr, '_upload_worker', lambda: started.set())
+    monkeypatch.setattr(mgr, '_upload_worker',
+                        lambda skip_precheck=False: (called_with.append(skip_precheck),
+                                                     started.set()))
     res = mgr.resume_upload()
     assert res['status'] == 'success'
     assert mgr.uploading is True
     assert mgr.upload_thread is not None
     assert started.wait(3), 'worker 未启动'
+    assert called_with == [True], 'resume 已校验登录，worker 不得再跑预检'
 
 
 def test_empty_queue_returns_failed(mgr, monkeypatch):

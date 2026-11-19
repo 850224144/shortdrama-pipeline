@@ -94,9 +94,82 @@ class AddBatchTests(unittest.TestCase):
         self.assertEqual(res['accepted'], 0)
         self.assertEqual(len(self.mgr.queue), 0)
 
+    def test_batch_assigns_distinct_publish_times_across_dramas(self):
+        """回归：5 部剧同版本同批入队，不得共用同一个定时发表时刻。"""
+        from datetime import datetime, timedelta
+        items = []
+        for i in range(1, 6):
+            p = os.path.join(self.tmp, f'剧{i}_1_去重版.mp4')
+            open(p, 'w').close()
+            items.append({
+                'drama_name': f'剧{i}', 'video_path': p, 'account': '福桃说剧',
+                'version': 1, 'batch_id': 'B_PLAN', 'output_dir': self.tmp,
+                'expected_versions': [1],
+            })
+        tomorrow = (datetime.now() + timedelta(days=1)).strftime('%Y-%m-%d')
+        res = self.mgr.add_batch(items, publish={
+            'date': tomorrow, 'start_time': '07:00',
+            'interval_minutes': 120, 'jitter_minutes': 0})
+        self.assertEqual(res['accepted'], 5)
+        times = [d['publish_time'] for d in res['publish_plan']]
+        self.assertEqual(len(times), 5)
+        self.assertEqual(len(set(times)), 5, '5 条必须拿到 5 个不同时刻')
+        for i, t in enumerate(times):
+            expect = (datetime.strptime(tomorrow + ' 07:00', '%Y-%m-%d %H:%M')
+                      + timedelta(minutes=120 * i)).strftime('%Y-%m-%d %H:%M')
+            self.assertEqual(t, expect, f'第{i + 1}条应按间隔顺延')
+        # 落库与队列口径一致
+        self.assertEqual({t['publish_time'] for t in self.mgr.queue}, set(times))
+
+    def test_batch_avoids_times_already_queued(self):
+        """当日已有 07:00 的待发任务时，新批次应从下一个空档开始。"""
+        from datetime import datetime, timedelta
+        tomorrow = (datetime.now() + timedelta(days=1)).strftime('%Y-%m-%d')
+        p0 = os.path.join(self.tmp, '剧X_1_去重版.mp4')
+        open(p0, 'w').close()
+        self.mgr.add_to_queue(drama_name='剧X', video_path=p0, account='福桃说剧',
+                              version=1, publish_time=f'{tomorrow} 07:00')
+        p1 = os.path.join(self.tmp, '剧Y_1_去重版.mp4')
+        open(p1, 'w').close()
+        res = self.mgr.add_batch([{
+            'drama_name': '剧Y', 'video_path': p1, 'account': '福桃说剧',
+            'version': 1, 'batch_id': 'B_AVOID', 'output_dir': self.tmp,
+        }], publish={'date': tomorrow, 'start_time': '07:00',
+                     'interval_minutes': 120, 'jitter_minutes': 0})
+        self.assertEqual(res['accepted'], 1)
+        self.assertNotEqual(res['publish_plan'][0]['publish_time'], f'{tomorrow} 07:00')
+        self.assertEqual(res['publish_plan'][0]['publish_time'], f'{tomorrow} 09:00')
+    def test_per_drama_day_mode_plumbs_through(self):
+        """排期方式=一天一部剧：两部剧各自占一天。"""
+        from datetime import datetime, timedelta
+        items = []
+        for drama, versions in (('剧P', (1, 2)), ('剧Q', (1, 2))):
+            for v in versions:
+                p = os.path.join(self.tmp, f'{drama}_{v}_去重版.mp4')
+                open(p, 'w').close()
+                items.append({
+                    'drama_name': drama, 'video_path': p, 'account': '福桃说剧',
+                    'version': v, 'batch_id': 'B_DDAY', 'output_dir': self.tmp,
+                })
+        tomorrow = (datetime.now() + timedelta(days=1)).strftime('%Y-%m-%d')
+        day2 = (datetime.now() + timedelta(days=2)).strftime('%Y-%m-%d')
+        res = self.mgr.add_batch(items, publish={
+            'date': tomorrow, 'start_time': '07:00', 'window_end': '23:00',
+            'mode': 'per_drama_day', 'interval_minutes': 120, 'jitter_minutes': 0})
+        self.assertEqual(res['accepted'], 4)
+        plan = res['publish_plan']
+        self.assertTrue(all(d['publish_time'].startswith(tomorrow) for d in plan[:2]))
+        self.assertTrue(all(d['publish_time'].startswith(day2) for d in plan[2:]))
+        self.assertEqual([d['publish_time'].split()[1] for d in plan], [
+            '07:00', '09:00', '07:00', '09:00'])
+
     def test_no_half_batch_on_mixed_validation(self):
         """混合场景：1 有效 + 1 重复 + 1 缺失 → 只有有效的入队（无半批次残留）。"""
-        self.mgr.add_to_queue(drama_name='剧A', video_path=self.paths[0],
+        # 预先入队的 V2 必须用另一个文件：查重是按 video_path 判定的，
+        # 复用 paths[0] 会让本应有效的 V1 也被判为重复（测试自己造出的冲突）。
+        extra = os.path.join(self.tmp, '剧A_4_预置_去重版.mp4')
+        open(extra, 'w').close()
+        self.mgr.add_to_queue(drama_name='剧A', video_path=extra,
                               account='福桃说剧', version=2)
         res = self.mgr.add_batch([
             self._item(1),

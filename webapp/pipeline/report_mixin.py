@@ -536,42 +536,80 @@ class ReportMixin:
         except Exception as e:
             self.logger.log("system", 'WARN', f'封面生成失败：{str(e)}')
 
+    _COVER_IMAGE_EXTS = ('.png', '.jpg', '.jpeg', '.webp')
+    _COVER_KEYWORDS = ('封面', '海报', '视频号', 'sph', 'cover', 'poster')
+
     def _find_official_cover(self, src_dir, drama_name=None):
-        """查找官方封面图"""
-        # 优先匹配规则
-        patterns = ['sph', '视频号', '封面图', '封面', '海报']
-        
-        # 扫描所有图片
+        """查找官方封面图（打分挑选，不再用体积硬阈值）。
+
+        历史实现只看三层：文件名关键字 / 文件名含剧名 / 数字命名且 0.3–2.0MB。
+        2026-11-19 实测漏判两类真实海报（封面明明都在素材目录里）：
+          - 错嫁后我怀了三宝：官方海报就叫 1.png，3.67MB，被 2.0MB 上限挡掉；
+          - 重生后我不当后妈：官方海报是旧剧名「退婚当天，我夺回铁饭碗 (2).jpg」，
+            既不含「封面/海报」也不含现剧名，三层全不中。
+        改为打分：关键字 > 剧名 > 数字名，竖版（h/w>=1.15）加分、横版（角色立绘
+        多为 16:9）减分，面积只做同分微调；关键字/剧名/数字名全不中时用竖版
+        大图兜底。始终找不到时仍返回 None，保持"不生成封面"的用户规则。
+        """
         images = []
         try:
-            for f in os.listdir(src_dir):
-                if f.lower().endswith(('.png', '.jpg', '.jpeg')):
-                    images.append(f)
+            for name in sorted(os.listdir(src_dir)):
+                path = os.path.join(src_dir, name)
+                if os.path.isfile(path) and name.lower().endswith(self._COVER_IMAGE_EXTS):
+                    images.append(path)
         except Exception as e:
             self.logger.log('system', 'WARN', f'扫描封面图片失败：{str(e)}')
             return None
-        
-        # 第一层：按文件名匹配
-        for pattern in patterns:
-            for img in images:
-                if pattern.lower() in img.lower():
-                    return os.path.join(src_dir, img)
-        
-        # 第二层：文件名和剧名一致
-        if drama_name:
-            for img in images:
-                if drama_name in img and '集' not in img:
-                    return os.path.join(src_dir, img)
-        
-        # 第三层：数字开头的图片（如 1.png, 0.png）
-        for img in images:
-            if img[0].isdigit() and len(img) < 20:
-                fpath = os.path.join(src_dir, img)
-                size = os.path.getsize(fpath) / (1024*1024)
-                if 0.3 <= size <= 2.0:
-                    return fpath
-        
-        return None
+        if not images:
+            return None
+
+        normalized_drama = re.sub(r'[^\w\u4e00-\u9fff]', '', drama_name or '')
+
+        def _score(path):
+            name = os.path.basename(path)
+            lower = name.lower()
+            score = 0.0
+            if any(k in lower for k in self._COVER_KEYWORDS):
+                score += 1000
+            normalized_name = re.sub(r'[^\w\u4e00-\u9fff]', '', name)
+            if normalized_drama and normalized_drama in normalized_name and '集' not in name:
+                score += 800
+            stem = os.path.splitext(name)[0]
+            if stem[:1].isdigit() and len(stem) < 20:
+                score += 200
+            if '集' in name:
+                score -= 400
+
+            width = height = 0
+            try:
+                from PIL import Image
+                with Image.open(path) as im:
+                    width, height = im.size
+            except Exception:
+                pass
+            if width and height:
+                if height >= width * 1.15:
+                    score += 300      # 竖版：海报典型比例
+                elif width >= height * 1.15:
+                    score -= 100      # 横版：多为剧照/角色立绘
+                score += min((width * height) / 1e6, 12)   # 面积微调，只用于同分比较
+                if width < 400 or height < 400:
+                    score -= 500      # 缩略图/图标不能当封面
+            else:
+                try:
+                    score += min(os.path.getsize(path) / (1024 * 1024), 6)
+                except OSError:
+                    pass
+            return score
+
+        best_path, best_score = None, None
+        for path in images:
+            score = _score(path)
+            if best_score is None or score > best_score:
+                best_path, best_score = path, score
+        if best_path is None or (best_score or 0) <= 0:
+            return None
+        return best_path
 
     def _add_cover_badge(self, cover_path, version_idx):
         """给封面加角标。

@@ -80,5 +80,11 @@ test_schedule.py
 
 # 本次会话临时目录
 .pytest_tmp2/
+.pytest_tmp3/
+.pytest_tmp*/
 _rerun/
 data/backup/
+
+# 运行期临时文件（不入库）
+data/*.db.bak_*
+data/webapp.lock

@@ -59,6 +59,12 @@ class TestPublishVerification(unittest.TestCase):
         u, _ = _make_uploader('', url=LIST_URL)
         self.assertTrue(u._verify_publish_success(timeout=1, interval=0.1))
 
+    def test_url_to_draft_list_is_not_success(self):
+        # 点发表后被导到草稿箱（/platform/post/draftListManager）不得记成发表成功
+        u, _ = _make_uploader(
+            '', url='https://channels.weixin.qq.com/platform/post/draftListManager')
+        self.assertIsNone(u._verify_publish_success(timeout=0.5, interval=0.1))
+
     def test_switch_to_immediate_returns_true(self):
         u, _ = _make_uploader(True)
         self.assertTrue(u._switch_to_immediate_publish())

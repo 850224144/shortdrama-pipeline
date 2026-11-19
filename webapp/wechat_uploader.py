@@ -474,6 +474,10 @@ class WeChatChannelsUploader:
         self.user_data_path = os.path.join(USER_DATA_BASE, account_name)
         self.page = None
         self.log_hook = None
+        # 草稿验证失败原因（如 baseline_missing），供调用方拼进任务错误串
+        self._draft_verify_reason = None
+        # 平台是否明确报了「视频上传失败」（与“等不到完成信号”区分开）
+        self._video_upload_failed = False
 
     def set_log_hook(self, hook):
         """把本上传器的进度日志转发到 hook(level, message)。
@@ -965,6 +969,7 @@ return (() => {
         视频设置文件后 43s 就点了发表，必然失败）。
         """
         self._scroll_page_to_bottom()
+        self._video_upload_failed = False
         started = time.monotonic()
         effective_deadline = started + max(30, timeout)
         hard_deadline = started + max(timeout, min(1800, timeout + 300))
@@ -995,6 +1000,7 @@ return (() => {
 
             if state.get('upload_failed'):
                 logger.error(f'平台报告视频上传失败，停止等待: {state}')
+                self._video_upload_failed = True
                 return None
 
             remote_ready = bool(readiness.get('remote_media_ready'))
@@ -1565,18 +1571,22 @@ return (() => {
     def _count_title_in_draft_box(self, title):
         """当前草稿列表里标题出现次数（调用前须已在草稿箱页面）。
 
-        用于“本次新增草稿”判定：保存后计数必须大于保存前基线。
+        口径与复核一致：列表文本归一化（去空白+标点）后按归一化标题计数。
         """
-        t = self._compact(title)
+        t = self._norm_publish_text(title)
         if not t:
             return 0
-        return self._compact(self._read_draft_list_text()).count(t)
+        return self._read_list_text_stable().count(t)
 
     def _capture_draft_baseline(self, title, publish_url, description=None):
-        """保存前统计草稿箱里该标题的出现次数（基线），随后返回发布页。
+        """保存前统计草稿箱里匹配键的出现次数（基线），随后返回发布页。
 
-        返回基线计数；捕获失败返回 None（调用方不得把它当 0，否则重复标题
-        的旧草稿会构成假阳性）。「本次新增草稿」判定依赖 count_after > 基线。
+        返回 {'title': T0, 'desc': D0}；无法建立基线返回 None。调用方必须把
+        None 当作「不可确认」，不得当 0 或退回子串断言——旧草稿同标题会构成
+        假成功（进而误触发自动清理）。
+
+        读取用 _read_list_text_stable（滚到底+文本稳定），与保存后复核同一口径；
+        列表读空（导航后还没渲染）视为无效结果，重试一次，两次都失败才返回 None。
 
         短标题不体现在草稿箱列表标题（列表展示描述首行派生标题），因此标题与
         描述首行分别记基线，返回 {'title': T0, 'desc': D0}；保存后各自在同一
@@ -1584,24 +1594,43 @@ return (() => {
         已保存误判为未保存）。
         """
         draft_url = 'https://channels.weixin.qq.com/platform/post/draftListManager'
+        keys = {
+            'title': self._norm_publish_text(title),
+            'desc': self._norm_publish_text((description or '').split('\n')[0]),
+        }
+        for attempt in range(2):
+            try:
+                self.page.get(draft_url)
+                time.sleep(4)
+                # 落地页必须是草稿箱：被重定向到登录页/首页时读到的文本不是草稿，
+                # 拿它当基线会让后续复核的计数增量失真。
+                landed = (self.page.url or '').lower()
+                if 'draftlist' not in landed and 'draft' not in landed:
+                    logger.warning(
+                        f'未到达草稿箱（当前 {landed}，第{attempt+1}次），无法建立基线')
+                    continue
+                text = self._read_list_text_stable()
+                if not text:
+                    logger.warning(
+                        f'草稿箱列表读取为空（第{attempt+1}次），无法确认基线，重试')
+                    continue
+                base = {k: (text.count(v) if v else 0) for k, v in keys.items()}
+                logger.info(f'草稿箱基线（标题/描述首行出现次数）: {base}')
+                self.page.get(publish_url)
+                time.sleep(5)
+                return base
+            except Exception as e:
+                logger.warning(f'捕获草稿基线失败（第{attempt+1}次）: {e}')
+        logger.error('草稿箱基线两次均未建立：本次保存不做“新增”确认（不假报成功）')
         try:
-            self.page.get(draft_url)
-            time.sleep(4)
-            base = {'title': self._count_title_in_draft_box(title), 'desc': None}
-            if description:
-                _d = self._compact((description or '').split('\n')[0])
-                if _d:
-                    base['desc'] = self._compact(self._read_draft_list_text()).count(_d)
-            logger.info(f'草稿箱基线（标题/描述首行出现次数）: {base}')
             self.page.get(publish_url)
             time.sleep(5)
-            return base
         except Exception as e:
-            logger.warning(f'捕获草稿基线失败，退回子串校验（可能误判）: {e}')
-            return None
+            logger.warning(f'基线失败后返回发布页失败: {e}')
+        return None
 
     def _wait_for_draft_saved(self, previous_url, title, timeout=90, baseline_count=None,
-                              description=None):
+                              description=None, baseline_required=False):
         """点击保存草稿后，导航到草稿箱检查标题是否存在——最可靠的验证。
 
         此前用「成功提示文案 / URL 跳转 / 保存按钮消失」三个信号判成功，
@@ -1613,17 +1642,22 @@ return (() => {
         注意：草稿箱列表展示的是「描述首行」派生的标题，而非短标题字段
         （短标题是独立 SEO 字段，不进列表标题）。因此除 title 外还需用
         description 首行兜底匹配，否则短标题与描述首行不一致时会误判失败。
+
+        baseline_required=True（生产保存路径）：没有基线就不判成功——子串命中
+        会把「旧草稿同标题」当成本次新增（假成功 → 任务 completed → 批次自然
+        结束 → 自动清理误删未上传成片）。False 仅供兼容/测试。
         """
         draft_url = 'https://channels.weixin.qq.com/platform/post/draftListManager'
+        if baseline_required and baseline_count is None:
+            logger.error('草稿箱基线缺失，无法确认本次新增（不按子串断言成功）')
+            self._draft_verify_reason = 'baseline_missing'
+            return False
         started = time.time()
         # 给平台一点时间落库
         time.sleep(3)
         last_nav = 0
-        # 兜底匹配串：描述首行（去空白/标点），与草稿箱列表标题对齐
-        desc_first = ''
-        if description:
-            _d = (description or '').split('\n')[0]
-            desc_first = ''.join(_d.split())
+        # 兜底匹配串：描述首行（归一化：去空白/标点），与草稿箱列表标题对齐
+        desc_first = self._norm_publish_text((description or '').split('\n')[0])
         while time.time() - started < timeout:
             try:
                 # 处理"将此次编辑保留? 不保存保存"离开确认弹窗——点"保存"（=保存草稿）。
@@ -1636,12 +1670,19 @@ return (() => {
                         self.page.get(draft_url)
                         last_nav = time.time()
                         time.sleep(4)
-                # 递归读取草稿列表文本（含 iframe）
-                body_text = self._read_draft_list_text()
-                expected_title = ''.join(title.split())
-                compact_body = ''.join(body_text.split())
+                    # 落地页必须是草稿箱：仍停在发布页时正文里就有描述文本，
+                    # 直接计数会被当成本次新增（假成功），此时跳过本轮。
+                    landed = (self.page.url or '').lower()
+                    if 'draftlist' not in landed and 'draft' not in landed:
+                        logger.debug(f'尚未到达草稿箱（当前 {landed}），跳过本轮计数')
+                        time.sleep(2)
+                        continue
+                # 滚到底读全列表（与基线同一口径），归一化后计数
+                body_text = self._read_list_text_stable()
+                expected_title = self._norm_publish_text(title)
+                compact_body = body_text
                 # 本次新增草稿判定：提供基线时要求计数严格大于基线（重复标题不误判）；
-                # 未提供基线（向后兼容/测试）退回标题子串匹配。
+                # 未提供基线（向后兼容/测试）退回标题子串匹配。生产路径必须带基线。
                 if baseline_count is not None:
                     # 基线：dict={'title':T0,'desc':D0}（标题/描述首行分别计数）；
                     # 旧调用传 int 时视为两条序列共用同一基线。
@@ -1711,7 +1752,8 @@ return (() => {
             f"{result.get('error') if isinstance(result, dict) else result}")
         return False
 
-    def _save_draft(self, title, baseline_count=None, description=None):
+    def _save_draft(self, title, baseline_count=None, description=None,
+                    baseline_required=False):
         logger.info('开始保存草稿...')
         
         # 步骤1: 关闭可能的通知弹窗
@@ -1770,7 +1812,8 @@ return (() => {
         # 引用），等于一直空转。现改为调用它：等成功提示文案、URL 跳转（draft/
         # 草稿列表且正文含本条标题）、或保存按钮消失，都没有才判失败。
         if not self._wait_for_draft_saved(previous_url, title, baseline_count=baseline_count,
-                                          description=description):
+                                          description=description,
+                                          baseline_required=baseline_required):
             logger.error('草稿保存未确认：平台无成功提示/URL 未跳转/按钮未消失')
             self._save_debug_state('draft_save_unverified')
             return False
@@ -1955,25 +1998,41 @@ return (() => {
             self._quit_page()
             self._release_profile_lock(lock)
 
-    def check_login(self):
-        """检查登录状态（headless，不弹窗口）。持锁后调用无锁核心。"""
+    def login_state(self):
+        """三态登录校验：'logged_in' / 'logged_out' / 'busy'。
+
+        'busy' = profile 锁被其它进程（扫码登录 / 正在上传）占用，本轮**无法判定**。
+        调用方必须把 busy 与 logged_out 分开处理：busy 只代表“测不了”，
+        不能当成“未登录”去标任务失败（否则用户正在扫码时整批任务被误判掉线）。
+        """
         if not os.path.exists(self.user_data_path):
             logger.error(f"未找到登录目录，请先登录: {self.user_data_path}")
-            return False
+            return 'logged_out'
         lock = self._acquire_profile_lock()
         if lock is None:
-            logger.warning(f"[{self.account_name}] 登录进行中，暂无法校验")
-            return False
+            logger.warning(f"[{self.account_name}] 账号浏览器被占用，暂无法校验登录")
+            return 'busy'
         try:
-            return self._check_login_core()
+            return 'logged_in' if self._check_login_core() else 'logged_out'
         finally:
             self._release_profile_lock(lock)
+
+    def check_login(self):
+        """兼容布尔接口（API/人工脚本）：仅确认登录有效才 True。
+
+        需要区分“未登录”和“测不了”的调用方请用 login_state()。
+        """
+        return self.login_state() == 'logged_in'
 
     def _check_login_core(self):
         """无锁登录校验核心——调用方必须已持有 profile 锁。
 
-        check_login 自身加锁，若 upload_to_draft 也加锁再调 check_login 会
-        自锁（文件哨兵不可重入），故拆出本方法供持锁方复用。
+        判定要扛住两件事：
+        1) 未登录最终态 /login.html 之前有一段 /platform/post/create 瞬态（<6s）。
+           原来只要 URL 连续 1 秒不变就判已登录并直接 return True，冷启动时
+           完全可能落在瞬态页上 → 登录早已过期也会“预检通过”。
+           现在“已登录”结论必须隔 3s + 3s 两次复检仍成立，跨过瞬态窗口。
+        2) 已登录页面可能残留隐藏 qrconnect iframe，故 URL 判据优先（见 _login_state）。
         """
         try:
             co = self._get_browser_options(headless=True)
@@ -2005,10 +2064,20 @@ return (() => {
             st = self._login_state()
             logger.info(f"[{self.account_name}] 登录态={st} | {last}")
             if st == 'logged_in':
+                # 已登录结论必须复检：瞬态页可稳定 1s 以上，隔 3s+3s 再验两次
+                for delay in (3, 3):
+                    time.sleep(delay)
+                    st2 = self._login_state()
+                    if st2 != 'logged_in':
+                        # 复检看到了登录态翻转 = 跳转链已经走完，结论就是未登录；
+                        # 不再走下面的“可能还没跳完”二次确认（否则会把瞬态又捞回来）
+                        logger.error(
+                            f"[{self.account_name}] ❌ 已登录结论复检失败（{st2}）")
+                        return False
                 logger.info(f"[{self.account_name}] ✅ 登录有效")
                 return True
 
-            # 二次确认：未登录态再等一轮，排除跳转未完成
+            # 二次确认：初始不是已登录态（可能跳转未完成），再等一轮
             time.sleep(3)
             st2 = self._login_state()
             if st2 == 'logged_in':
@@ -2414,7 +2483,7 @@ return (() => {
         于是永远返回 None；而且它同样不看按钮尺寸，隐藏按钮也会被算作可见。
         现改为只认明确信号：
           - 出现失败提示 → False
-          - 出现成功提示（发表成功/已提交/审核中…）或页面已离开 /post/create → True
+          - 出现成功提示（发表成功/已提交/审核中…）或页面跳到已发布列表 → True
           - 超时仍无明确信号 → None（不确定，交给已发布列表复核）
         """
         import time as _time
@@ -2447,7 +2516,10 @@ return (() => {
                 if success_pattern.search(body_text):
                     return True
                 current_url = (self.page.url or '').lower()
-                if '/post/create' not in current_url and '/platform/post/' in current_url:
+                # 只认「已发布列表」这一个落地页：原先的「离开 create 且含
+                # /platform/post/」范围过宽，/platform/post/draftListManager（草稿箱）
+                # 同样命中，点发表后被导去草稿箱会被记成发表成功。
+                if '/post/list' in current_url:
                     return True
             except Exception as error:
                 logger.debug(f'发表成功验证异常: {error}')
@@ -2509,11 +2581,12 @@ return (() => {
         """统计各匹配键在归一化列表全文里的出现次数。"""
         return {k: (text.count(v) if v else 0) for k, v in keys.items()}
 
-    def _read_published_list_stable(self, max_rounds=3, settle=1.5):
-        """滚到列表底部直至文本稳定（懒加载/分页项被读全），返回归一化全文。
+    def _read_list_text_stable(self, max_rounds=3, settle=1.5):
+        """列表页（草稿箱/已发布列表）滚到底直至文本稳定，返回归一化全文。
 
-        基线与发表后确认都走本方法，保证两次读取深度一致——否则基线少读
-        （旧条目没加载）会把「本来就存在」的卡片当成本次新增。
+        草稿与已发布是同一套卡片组件，滚动 JS 通用。基线与保存后复核必须都走
+        本方法——两次读取深度不一致（基线少读）会把「本来就存在的卡片」当成
+        本次新增。
         """
         prev = None
         text = ''
@@ -2521,13 +2594,17 @@ return (() => {
             try:
                 self.page.run_js(self._PUBLISHED_LIST_SCROLL_JS)
             except Exception as error:
-                logger.debug(f'已发布列表滚动失败: {error}')
+                logger.debug(f'列表滚动失败: {error}')
             time.sleep(settle)
             text = self._norm_publish_text(self._read_draft_list_text())
             if text == prev:
                 break
             prev = text
         return text
+
+    def _read_published_list_stable(self, max_rounds=3, settle=1.5):
+        """已发布列表稳定读取（保留旧名，供既有调用方）。"""
+        return self._read_list_text_stable(max_rounds=max_rounds, settle=settle)
 
     def _capture_published_baseline(self, title, publish_url, description=None):
         """发表前记录已发布列表里匹配键的出现次数（基线），随后返回发布页。
@@ -2616,7 +2693,7 @@ return (() => {
 
     def upload_to_draft(self, video_path, title, tags, description, cover_path=None,
                         drama_name=None, drama_id=None, publish_time=None,
-                        scheduled=False):
+                        scheduled=False, skip_login_check=False):
         """
         上传视频到草稿箱（scheduled=False）或按计划时间发表（scheduled=True）。
         
@@ -2658,16 +2735,15 @@ return (() => {
             return self._upload_failure("已有登录/上传进程在使用该账号，请稍后再试")
 
         try:
-            # 检查登录（复用：10分钟内已验证则跳过重复校验，避免每版重复验证）
-            _now = time.time()
-            if getattr(self, '_login_verified_at', 0) and _now - self._login_verified_at < 600:
-                pass
+            # 登录校验：批次预检刚验过（skip_login_check=True）就跳过，
+            # 不再为每个版本重复开一次浏览器。发布页加载完仍会做 URL 兜底
+            # （见下方「验证登录」），中途掉线会快速失败而不是假报成功。
+            if skip_login_check:
+                logger.info(f'[{self.account_name}] 批次内已通过登录预检，跳过重复校验')
             elif not self._check_login_core():
                 self._release_profile_lock(lock)
                 logger.error("登录失效，请先登录")
                 return self._upload_failure("登录失效，请先登录")
-            else:
-                self._login_verified_at = time.time()
 
             # 启动浏览器。任何启动期异常都必须在这里释放 profile 锁，
             # 否则后续登录/上传会永久被同账号哨兵锁拒绝。
@@ -2696,6 +2772,13 @@ return (() => {
             # 必须在视频上传前导航，避免离开发布页丢已上传视频。
             draft_baseline = self._capture_draft_baseline(title, publish_url,
                                                           description=description)
+            if draft_baseline is None and not scheduled:
+                # 草稿模式的唯一成功判据是「比基线多一条」；基线建不起来就无法确认，
+                # 继续上传只会产出一条无法验证的草稿（还可能被误判成功触发清理）。
+                # 此时尚未上传任何内容，中止是安全的。
+                logger.error('草稿箱基线无法建立，已中止本次上传（未产生草稿）')
+                return self._upload_failure(
+                    '草稿箱基线无法建立，已中止上传（未产生草稿）')
             # 定时发表另需「已发布列表」基线（review L2）：发表后按计数增量确认
             # 本次真的新增一条作品，防跨剧同名子串命中被误判为发表成功。
             # 同样必须在视频上传前导航——发布页一离开，已上传视频就丢了。
@@ -2838,6 +2921,14 @@ return (() => {
             logger.info('等待视频上传完成...')
             upload_state = self._wait_for_video_upload(
                 timeout=upload_timeout, bail_on_no_ui=not scheduled)
+            if self._video_upload_failed:
+                # 平台明确报「上传失败」：草稿里不会有可用视频。继续保存只会得到
+                # 一条无视频/坏视频的空壳草稿，而草稿确实“新增了一条”，
+                # 校验会把任务记成功——这是验证逻辑的假阳性，必须直接失败。
+                error = '平台报视频上传失败，已中止（未保存无视频草稿，可直接重试）'
+                logger.error(error)
+                self._save_debug_state('video_upload_failed')
+                return self._upload_failure(error)
             if not upload_state and scheduled:
                 # 定时发表没有草稿重试兜底：视频没就绪就点「发表」等于空发表，
                 # 平台不会报错也不会产生作品（实测 4/4 全部如此），必须直接失败。
@@ -2977,11 +3068,18 @@ return (() => {
             # 6b. 保存草稿（重试：视频可能仍在上传，保存被拒则等待重试）
             logger.info('保存草稿...')
             saved = False
+            self._draft_verify_reason = None
             for attempt in range(5):
                 logger.info(f'保存草稿（第{attempt+1}次尝试）...')
                 saved = self._save_draft(title, baseline_count=draft_baseline,
-                                         description=description)
+                                         description=description, baseline_required=True)
                 if saved:
+                    break
+                if self._draft_verify_reason == 'baseline_missing':
+                    # 无基线 = 无法判定「本次新增」，永远等不到确认；重存只会多出
+                    # 一条重复草稿。直接失败转人工（不自动重试）。
+                    logger.error('草稿箱基线缺失，无法确认新增，停止重试（转人工复核）')
+                    self._save_debug_state('draft_baseline_missing')
                     break
                 # 连接已死：视频随页面丢失，重试无意义，立即失败（不阻塞 worker）
                 if not self._page_connection_alive():
@@ -2989,23 +3087,29 @@ return (() => {
                         f'浏览器页面连接已断开，停止草稿重试（第{attempt+1}次，'
                         f'视频已随页面丢失）')
                     break
+                # _save_draft 的校验环节会导航到草稿箱读列表——一旦离开 create 页，
+                # 已上传的视频（客户端状态）就没了，回发布页只会得到空编辑器，
+                # 再点「保存草稿」等于存一条无视频的空草稿。所以此时只复核列表，
+                # 不再重复保存（原实现回发布页只补了封面、没补视频，重试必然无效）。
+                current_url_after = ''
+                try:
+                    current_url_after = self.page.url or ''
+                except Exception:
+                    current_url_after = ''
+                if 'create' not in current_url_after:
+                    logger.warning(
+                        f'发布页已被草稿校验导航离开（视频不再保留），'
+                        f'改为只复核草稿列表，不再重复保存（第{attempt+1}次）')
+                    saved = self._wait_for_draft_saved(
+                        current_url_after, title, timeout=60,
+                        baseline_count=draft_baseline, description=description,
+                        baseline_required=True)
+                    break
                 logger.warning(
                     f'草稿保存未确认（第{attempt+1}次），'
                     f'视频可能仍在上传，等待30s后重试'
                 )
                 time.sleep(30)
-                # 回发布页重试（_save_draft 失败时可能已导航到草稿箱）。
-                # 已应用的封面会随导航丢失，必须重新应用，否则草稿保存成功后封面仍是默认的。
-                try:
-                    current_url_after = self.page.url or ''
-                    if 'create' not in current_url_after:
-                        self.page.get(publish_url)
-                        time.sleep(5)
-                    if cover_result.get('status') == 'applied' and abs_cover_path:
-                        logger.info('草稿重试前重新应用封面（上次应用随导航丢失）')
-                        cover_result = self._upload_cover(abs_cover_path)
-                except Exception as e:
-                    logger.debug(f'返回发布页失败: {e}')
 
             if saved:
                 logger.info(f'[{self.account_name}] ✅ 草稿保存成功')
@@ -3019,15 +3123,19 @@ return (() => {
                 }
             else:
                 logger.error(f'[{self.account_name}] ❌ 草稿保存失败')
-                # 保存失败时不关闭页面，方便调试
-                logger.warning('页面保持打开，方便检查问题')
+                logger.warning('已保存失败现场（截图/页面文本），浏览器随本次任务释放')
                 self._save_debug_state('draft_save_failed')
+                if self._draft_verify_reason == 'baseline_missing':
+                    error = ('草稿保存失败（草稿箱基线缺失，未确认新增，'
+                             '请到草稿箱人工检查）')
+                else:
+                    error = '草稿保存失败' + (
+                        f'（{publish_note}）' if publish_note else '')
                 return {
                     'status': 'failed',
                     'draft_saved': False,
                     'cover': cover_result,
-                    'error': '草稿保存失败' + (
-                        f'（{publish_note}）' if publish_note else ''),
+                    'error': error,
                     'publish_note': publish_note,
                 }
         finally:

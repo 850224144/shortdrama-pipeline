@@ -3,6 +3,7 @@
 import os
 import sys
 import re
+import time
 import subprocess
 from datetime import datetime
 from flask import Blueprint, request, jsonify
@@ -10,6 +11,12 @@ from flask import Blueprint, request, jsonify
 
 def create_login_bp(deps):
     bp = Blueprint('login', __name__)
+
+    # 登录态轮询缓存：每次 check_login 都要开一个浏览器（10-20s）。登录成功后
+    # 前端仍会连打几次 /check，逐次开窗既慢又闪。缓存 10s；登录进行中直接短路，
+    # 不再尝试（profile 锁被登录进程占着，校验只会得到 busy）。
+    cache = {'account': None, 'ts': 0.0, 'payload': None}
+    cache_ttl = 10.0
 
     @bp.route('/api/login/check')
     def check_login_status():
@@ -23,13 +30,30 @@ def create_login_bp(deps):
             # 登录进程活着时 check_login 不会开浏览器（profile 锁互斥），
             # 但前端需要这个标志才能停掉轮询——否则登录窗口关了之后还会一直轮。
             in_progress = WeChatChannelsUploader.is_login_in_progress(account)
+            if in_progress:
+                return jsonify({
+                    'logged_in': False,
+                    'login_in_progress': True,
+                    'account': account,
+                })
+            now = time.time()
+            if (cache['account'] == account and cache['payload'] is not None
+                    and now - cache['ts'] < cache_ttl):
+                payload = dict(cache['payload'])
+                payload['cached'] = True
+                return jsonify(payload)
             uploader = WeChatChannelsUploader(account)
             is_logged_in = uploader.check_login()
-            return jsonify({
-                'logged_in': is_logged_in,
-                'login_in_progress': in_progress,
+            payload = {
+                'logged_in': bool(is_logged_in),
+                'login_in_progress': False,
                 'account': account,
-            })
+            }
+            if is_logged_in:
+                cache.update({'account': account, 'ts': now, 'payload': payload})
+            else:
+                cache.update({'account': None, 'ts': 0.0, 'payload': None})
+            return jsonify(payload)
         except Exception as e:
             return jsonify({'logged_in': False, 'login_in_progress': False, 'error': str(e)})
 
