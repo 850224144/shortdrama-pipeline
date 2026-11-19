@@ -237,6 +237,11 @@ class CutMixin:
             if '已有成品' in (reason or ''):
                 try:
                     _pq_mark_by_drama(drama_name, status='done')
+                    # 队列条目若没有 drama_name（下载续传/手动补队列写入的老条目），
+                    # 按剧名回标会落空 → 每次重启都重复提交这部剧。补按 link_id 回标。
+                    link_id = (download_result or {}).get('link_id')
+                    if link_id:
+                        _pq_mark(link_id=link_id, status='done', drama_name=drama_name)
                 except Exception:
                     pass
             self._update_state('idle', '', 0, f'跳过：{reason}')
