@@ -116,18 +116,30 @@ def _safe_remove(path):
         pass
 
 
-def sweep_stale_tmp(out_dir):
+def sweep_stale_tmp(out_dir, min_age_seconds=1800):
     """清扫历史运行残留的 .tmp 半成品（进程被强杀时 finally 没执行到的）。
 
     命名固定为 <交付名>.mp4.tmp：对所有 endswith('.mp4') 的收集/去重/上传
     glob 不可见，因此残留也无害，清扫只是保持交付目录整洁。
+
+    并行渲染（cut.render_workers>1）下多个渲染进程共用一个输出目录，
+    这里必须只清扫“足够旧”的残留：否则先结束的进程会把另一个进程正在
+    写的 .tmp 删掉，表现为 ffmpeg rc=1 / rename WinError 2。
     """
     n = 0
+    now = time.time()
     try:
         for f in os.listdir(out_dir):
-            if f.endswith(".mp4.tmp"):
-                _safe_remove(os.path.join(out_dir, f))
-                n += 1
+            if not f.endswith(".mp4.tmp"):
+                continue
+            path = os.path.join(out_dir, f)
+            try:
+                if now - os.path.getmtime(path) < min_age_seconds:
+                    continue
+            except OSError:
+                continue
+            _safe_remove(path)
+            n += 1
     except OSError:
         pass
     return n
@@ -534,7 +546,9 @@ def main():
         config = json.load(f)
 
     out_dir = config["output_dir"]
-    tmp_base = os.path.join(out_dir, "_tmp_raw")
+    # 并行渲染隔离：每个渲染进程用独立临时目录，互不 rmtree（旧实现共用
+    # out_dir/_tmp_raw，先结束的进程会把另一个进程的中间文件删光）。
+    tmp_base = os.path.join(out_dir, "_tmp_raw_%d" % os.getpid())
     os.makedirs(out_dir, exist_ok=True)
     if not validate_only:
         os.makedirs(tmp_base, exist_ok=True)
@@ -626,9 +640,17 @@ def main():
         r = process_video(v, config, tmp_base)
         results.append(r)
 
-    # 清理临时目录
+    # 清理临时目录（本进程独占）
     if os.path.isdir(tmp_base):
-        shutil.rmtree(tmp_base)
+        shutil.rmtree(tmp_base, ignore_errors=True)
+    # 旧实现共用 _tmp_raw：只清理超过 30 分钟没动的历史残留，避免误删并发进程
+    legacy_tmp = os.path.join(out_dir, "_tmp_raw")
+    try:
+        if (os.path.isdir(legacy_tmp)
+                and time.time() - os.path.getmtime(legacy_tmp) > 1800):
+            shutil.rmtree(legacy_tmp, ignore_errors=True)
+    except OSError:
+        pass
 
     # P0-2：清扫历史运行残留的 .tmp 半成品（上次进程被强杀时 finally 没跑到）
     swept = sweep_stale_tmp(out_dir)

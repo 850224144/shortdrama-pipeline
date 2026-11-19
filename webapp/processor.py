@@ -4015,17 +4015,13 @@ class PipelineProcessor:
             return videos
 
         self.logger.log(drama_name, 'INFO', f'续跑：找到{len(config_paths)}个保留的EDL配置，开始重渲染')
-        # fail-fast ②状态：连续同类别失败计数（≥2 同类失败 = 系统性错误，停止剩余版本）
-        consecutive_fail = 0
-        last_fail_cat = None
         verdicts = {}
+        # P1-6：续跑也走“先筛选、再渲染”，渲染阶段按 render_workers 并行
+        pending = []
         for config_path in config_paths:
             self._raise_if_cancelled(cancel_event)
             m = re.search(r'edl_config_v(\d+)\.json$', config_path)
-            v_idx = (int(m.group(1)) - 1) if m else len(videos)
-            self._emit_cut_progress(
-                'render', min(88, 45 + int(40 * v_idx / max(1, len(config_paths)))),
-                f'续跑渲染 V{v_idx + 1}', version=v_idx + 1)
+            v_idx = (int(m.group(1)) - 1) if m else len(pending)
             edl_config = None
             try:
                 with open(config_path, encoding='utf-8') as f:
@@ -4053,8 +4049,6 @@ class PipelineProcessor:
             except Exception as e:
                 self.logger.log(drama_name, 'WARN', f'续跑读取配置失败 {os.path.basename(config_path)}: {e}')
             # 断点续跑：该版本最终成品已存在且通过质量校验 → 跳过重渲染。
-            # 覆盖两种崩溃场景：①渲染成功、config 删除前崩溃；②成功交付后再
-            # 触发续跑（幂等）。文件存在性+质量校验是权威，清单只是提示。
             final_path = None
             if isinstance(edl_config, dict):
                 try:
@@ -4092,50 +4086,102 @@ class PipelineProcessor:
             _segs = ((edl_config.get('videos') or [{}])[0].get('segments', [])
                      if isinstance(edl_config, dict) else [])
             _planned = sum(float(s.get('duration', 0)) for s in _segs)
-            video, fail_cat, _verdict = self._run_render_one(
-                drama_name, out_dir, v_idx, config_path,
-                cancel_event=cancel_event,
-                timeout=max(600, int(_planned * 2.5)))
+            pending.append((v_idx, config_path, _planned))
+
+        workers = max(1, int((CONFIG.get('cut') or {}).get('render_workers', 1)
+                             or 1))
+        if workers > 1 and len(pending) > 1:
+            self._resume_render_parallel(
+                drama_name, out_dir, pending, verdicts, videos,
+                len(config_paths), cancel_event, workers)
+        else:
+            self._resume_render_serial(
+                drama_name, out_dir, pending, verdicts, videos,
+                len(config_paths), cancel_event)
+        self._write_render_report(out_dir, drama_name, verdicts,
+                                  expected_count=len(config_paths))
+        return videos
+
+    def _apply_resume_result(self, drama_name, out_dir, v_idx, config_path,
+                             video, verdict, verdicts, videos):
+        """续跑单版结果落账：标记清单、删 config（仅成功）、记录 verdict。"""
+        verdicts[v_idx] = verdict or (
+            {'status': 'accepted', 'reason': ''} if video else
+            {'status': 'render_failed', 'reason': '未知'})
+        if video:
+            videos.append(video)
+            self._mark_resume_version(
+                out_dir, v_idx, status='post_done',
+                artifact=video.get('filename'))
+            # P2-4：渲染成功即删除该版本 config——失败路径保留 config 以便续跑
+            try:
+                os.remove(config_path)
+            except OSError as e:
+                self.logger.log(drama_name, 'WARN', f'清理已渲染配置失败（可忽略）: {e}')
+
+    def _resume_render_serial(self, drama_name, out_dir, pending, verdicts,
+                              videos, expected_count, cancel_event):
+        """续跑串行渲染：保留连续同类失败即停的 fail-fast。"""
+        consecutive_fail = 0
+        last_fail_cat = None
+        for v_idx, config_path, planned in pending:
+            self._raise_if_cancelled(cancel_event)
             self._emit_cut_progress(
-                'render', min(89, 45 + int(40 * (v_idx + 1) / max(1, len(config_paths)))),
-                f'续跑 V{v_idx + 1} '
-                f'{"渲染完成" if video else "渲染未通过"}',
+                'render', min(88, 45 + int(40 * v_idx / max(1, expected_count))),
+                f'续跑渲染 V{v_idx + 1}', version=v_idx + 1)
+            video, fail_cat, verdict = self._run_render_one(
+                drama_name, out_dir, v_idx, config_path,
+                cancel_event=cancel_event, timeout=max(600, int(planned * 2.5)))
+            self._emit_cut_progress(
+                'render', min(89, 45 + int(40 * (v_idx + 1) / max(1, expected_count))),
+                f'续跑 V{v_idx + 1} {"渲染完成" if video else "渲染未通过"}',
                 version=v_idx + 1, accepted=bool(video))
-            if not _verdict:
-                _verdict = ({'status': 'accepted', 'reason': ''} if video else
-                            {'status': 'render_failed',
-                             'reason': fail_cat or '未知'})
-            verdicts[v_idx] = _verdict
-            if video:
-                videos.append(video)
-                consecutive_fail = 0
-                last_fail_cat = None
-                # 断点续跑：标记本版完成（清单源签名+状态，供 _cut_once 自动识别现场）
-                self._mark_resume_version(
-                    out_dir, v_idx, status='post_done',
-                    artifact=video.get('filename'))
-                # P2-4: 渲染成功即删除该版本 config——失败路径保留 config 以便续跑，
-                # 成功删除避免 stale config 跨 run 累积、下次续跑重复渲染抬高 real_count
-                try:
-                    os.remove(config_path)
-                except OSError as e:
-                    self.logger.log(drama_name, 'WARN', f'清理已渲染配置失败（可忽略）: {e}')
-            else:
-                # fail-fast ②：连续同类别失败 = 系统性错误，剩余版本必然同样失败，立即停止。
-                # 不同类或单次失败视为偶发，继续。
+            self._apply_resume_result(drama_name, out_dir, v_idx, config_path,
+                                      video, verdict, verdicts, videos)
+            if not video:
                 if fail_cat and fail_cat == last_fail_cat:
                     consecutive_fail += 1
                 else:
                     consecutive_fail = 1
                     last_fail_cat = fail_cat
-                if fail_cat and fail_cat not in ('other', 'quality') and consecutive_fail >= 2:
+                if (fail_cat and fail_cat not in ('other', 'quality')
+                        and consecutive_fail >= 2):
                     self.logger.log(drama_name, 'ERROR',
                         f'续跑连续{consecutive_fail}个版本同类失败（{fail_cat}），判定系统性错误，'
                         f'停止剩余版本（已成功{len(videos)}个）')
                     break
-        self._write_render_report(out_dir, drama_name, verdicts,
-                                  expected_count=len(config_paths))
-        return videos
+
+    def _resume_render_parallel(self, drama_name, out_dir, pending, verdicts,
+                                videos, expected_count, cancel_event, workers):
+        """续跑并行渲染（render_workers>1），失败按版独立判定。"""
+        self.logger.log(drama_name, 'INFO',
+                        f'续跑并行渲染：{len(pending)} 版 / {workers} 路')
+        futures = {}
+        with ThreadPoolExecutor(max_workers=workers) as pool:
+            for v_idx, config_path, planned in pending:
+                if cancel_event is not None and cancel_event.is_set():
+                    verdicts[v_idx] = {'status': 'not_rendered', 'reason': '用户已停止'}
+                    continue
+                fut = pool.submit(self._run_render_one, drama_name, out_dir,
+                                  v_idx, config_path,
+                                  cancel_event=cancel_event,
+                                  timeout=max(600, int(planned * 2.5)))
+                futures[fut] = (v_idx, config_path)
+            done = 0
+            for fut in as_completed(futures):
+                v_idx, config_path = futures[fut]
+                try:
+                    video, fail_cat, verdict = fut.result()
+                except Exception as e:
+                    video, verdict = None, {'status': 'render_failed',
+                                            'reason': f'渲染异常：{e}'}
+                done += 1
+                self._emit_cut_progress(
+                    'render', min(89, 45 + int(40 * done / max(1, len(futures)))),
+                    f'续跑 V{v_idx + 1} {"渲染完成" if video else "渲染未通过"}',
+                    version=v_idx + 1, accepted=bool(video))
+                self._apply_resume_result(drama_name, out_dir, v_idx, config_path,
+                                          video, verdict, verdicts, videos)
     
     # 成片业务窗口 210-300s（见 _select_best_videos）。渲染会跑 atempo=1.05 轻微加速，
     # 所以 EDL 规划总时长收敛到 230-285s，留出余量确保成片落进窗口。
